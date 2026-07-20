@@ -67,6 +67,9 @@ backend/user_prompts/
 .trae/
 .zcode/
 
+# ===== Local Git worktrees =====
+.worktrees/
+
 # ===== TypeScript build cache =====
 frontend/tsconfig*.tsbuildinfo
 
