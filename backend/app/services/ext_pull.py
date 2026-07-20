@@ -14,7 +14,6 @@ import httpx
 from app.services.ext_data import (
     ExtConfig,
     ExtConfigStore,
-    PullConfig,
     rows_to_parquet,
 )
 
@@ -133,9 +132,15 @@ async def fetch_and_ingest(
     # 字段映射
     rows = _apply_field_map(rows, pull.field_map)
 
-    # 校验 symbol 列
-    if rows and "symbol" not in rows[0]:
-        raise ValueError("数据行中缺少 symbol 字段，请配置 field_map 映射")
+    # 校验可关联标的的字段：直接 symbol/code，或配置里声明的映射源列。
+    row_keys = set(rows[0]) if rows else set()
+    mapped_cols = {
+        m.get("col")
+        for m in (config.symbol_map or {}, config.code_map or {})
+        if m.get("type") == "mapped" and m.get("col")
+    }
+    if rows and not ({"symbol", "code"} & row_keys or mapped_cols & row_keys):
+        raise ValueError("数据行中缺少 symbol/code 字段，请配置字段映射或标的映射")
 
     # 写入
     snap = date.today()
@@ -231,57 +236,6 @@ class PullScheduler:
                     logger.info("PullScheduler: removed %s", cid)
 
         self._submit(_apply)
-
-    async def _run_loop(self, config: ExtConfig) -> None:
-        """单个配置的定时拉取循环。
-
-        策略: 启用后立即执行一次, 之后按 interval 循环。
-        每次循环重读最新配置 (fresh), interval 取自 fresh.pull.schedule_minutes,
-        这样用户中途修改间隔也能立即生效 (无需重启)。
-        """
-        try:
-            while self._running:
-                # 每轮重读最新配置 — 用户可能修改了 url / interval / enabled
-                store = ExtConfigStore(self._data_dir)
-                fresh = store.get(config.id)
-                if not fresh or not fresh.pull or not fresh.pull.enabled:
-                    break
-                pull = fresh.pull
-
-                # 先执行一次 (启用即拉取, 让用户立刻看到生效)
-                try:
-                    n, d = await fetch_and_ingest(fresh, self._data_dir)
-                    fresh.pull.last_run = datetime.now(timezone.utc).isoformat()
-                    fresh.pull.last_status = "success"
-                    fresh.pull.last_message = f"{n} rows @ {d}"
-                    fresh.pull.last_rows = n
-                    store.upsert(fresh)
-                    logger.info("PullScheduler: %s success, %d rows", config.id, n)
-                except Exception as e:
-                    fresh2 = store.get(config.id)
-                    if fresh2 and fresh2.pull:
-                        fresh2.pull.last_run = datetime.now(timezone.utc).isoformat()
-                        fresh2.pull.last_status = "error"
-                        fresh2.pull.last_message = str(e)[:200]
-                        store.upsert(fresh2)
-                    logger.warning("PullScheduler: %s error: %s", config.id, e)
-
-                # 间隔取自最新配置 (每次重新读取, 修复改间隔不生效)
-                interval = max(pull.schedule_minutes * 60, 60)  # 至少 60s
-                # 预告下次运行时间, 供前端展示
-                next_dt = datetime.now(timezone.utc).timestamp() + interval
-                latest = store.get(config.id)
-                if latest and latest.pull:
-                    latest.pull.next_run = datetime.fromtimestamp(
-                        next_dt, tz=timezone.utc
-                    ).isoformat()
-                    store.upsert(latest)
-
-                await asyncio.sleep(interval)
-                if not self._running:
-                    break
-        except asyncio.CancelledError:
-            pass
 
     async def _run_loop(self, config: ExtConfig) -> None:
         """单个配置的定时拉取循环。

@@ -26,11 +26,14 @@ export const QK = {
   watchlistQuotes:      ['watchlist-quotes'] as const,
   watchlistEnriched:    (ext?: string) => ['watchlist-enriched', ext] as const,
   watchlistKlineBatch:  (symbols: string) => ['watchlist-kline-batch', symbols] as const,
-  instrumentSearch:     (q: string) => ['instrument-search', q] as const,
+  // 不用 watchlist- 前缀: 避免被 SSE quotes_updated 高频失效(expert 1s/pro 2s)
+  // 导致每次都拉 TickFlow 触限流。分时图用固定 refetchInterval 刷新即可。
+  minuteBatch:          (symbols: string) => ['minute-batch', symbols] as const,
+  instrumentSearch:     (q: string, assetTypes?: string) => ['instrument-search', q, assetTypes ?? 'stock'] as const,
 
   // Screener
   screener:             ['screener'] as const,
-  screenerStrategies:   ['screener-strategies'] as const,
+  screenerStrategies:   (assetType: string = 'stock') => ['screener-strategies', assetType] as const,
   screenerCached:       (ext?: string) => ['screener-cached', ext] as const,
   screenerKlineBatch:   (symbols: string) => ['screener-kline-batch', symbols] as const,
   marketSnapshot:       ['market-snapshot'] as const,
@@ -38,6 +41,7 @@ export const QK = {
 
   // Backtest
   backtestStatus:       ['backtest-status'] as const,
+  strategyDetail:       (id: string) => ['strategy-detail', id] as const,
 
   // Data / Pipeline
   dataStatus:           ['data-status'] as const,
@@ -52,6 +56,12 @@ export const QK = {
   kline:                (symbol: string, start: string, end: string, extColumns?: string) =>
                            ['kline', symbol, start, end, extColumns ?? ''] as const,
   stockLevels:          (symbol: string, days?: number) => ['stock-levels', symbol, days ?? 120] as const,
+  stockDeepReportHealth: ['stock-deep-report-health'] as const,
+  stockDeepReportDefaults: ['stock-deep-report-defaults'] as const,
+  stockDeepReportTaskCatalog: ['stock-deep-report-task-catalog'] as const,
+  stockDeepReportTaskCatalogAdmin: ['stock-deep-report-task-catalog-admin'] as const,
+  stockDeepReportRuns:   (symbol?: string) => ['stock-deep-report-runs', symbol ?? 'all'] as const,
+  stockDeepReportRun:    (id: string) => ['stock-deep-report-run', id] as const,
   klineMinute:          (symbol: string, date: string) =>
                              ['kline-minute', symbol, date] as const,
   indexDaily:           (symbol: string, start: string, end: string) =>
@@ -81,6 +91,11 @@ export const QK = {
 
 // ===== SSE 应该 invalidate 的 key 前缀列表 =====
 // 新增需要 SSE 推送的查询，只需在此加一行
+//
+// 注意: 策略页 (screener-cached) 不在此列表 —— 行情刷新时策略结果不变
+// (非监控策略读盘后静态缓存, 监控策略由独立的 strategy_results_updated 事件在
+// 重算完成后刷新)。若加入 'screener', 会导致每个行情 tick 双重刷新策略页,
+// 且在 monitor "重算" 窗口内读到空结果, 造成策略列表闪烁 (变 0 → 空失效 → 又出现)。
 
 export const SSE_INVALIDATE_PREFIXES = [
   'watchlist',
@@ -88,5 +103,4 @@ export const SSE_INVALIDATE_PREFIXES = [
   'index-quotes',
   'overview-market',
   'limit-ladder',
-  'screener',
 ] as const

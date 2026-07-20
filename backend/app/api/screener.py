@@ -1,8 +1,10 @@
 """Screener API。"""
 from __future__ import annotations
 
+import glob as _glob
 import logging
 import math
+import os
 import re
 import time
 from dataclasses import asdict
@@ -12,8 +14,8 @@ from typing import Any, Optional
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
-from app.services.screener import PRESET_STRATEGIES, ScreenerService
 from app.services import strategy_cache
+from app.services.screener import ScreenerService
 from app.strategy import config as strategy_config
 
 logger = logging.getLogger(__name__)
@@ -28,6 +30,7 @@ class CustomRequest(BaseModel):
     pool: Optional[list[str]] = None
     as_of: Optional[date] = None
     ext_columns: Optional[str] = None
+    asset_type: str = "stock"
 
 
 class PresetRequest(BaseModel):
@@ -35,6 +38,8 @@ class PresetRequest(BaseModel):
     pool: Optional[list[str]] = None
     as_of: Optional[date] = None
     ext_columns: Optional[str] = None
+    asset_type: str = "stock"
+    timeframe: str = "1d"
 
 
 def _safe(result_dict: dict) -> dict:
@@ -62,17 +67,41 @@ def _quote_ident(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
+# ── 扩展列 value_map 缓存 ────────────────────────────────────────────
+# 每次请求 _load_ext_value_maps 都会重新从磁盘读 ext parquet 并重建 {symbol: value}。
+# 用底层 parquet 文件的 (路径, mtime) 签名做 memoize: 文件未变则复用上次的 map,
+# parquet 被重写 (mtime 变化) 时自动失效重算。仅缓存基于 config 的快照/时序路径,
+# 无 config 的 DuckDB view 回退路径不缓存 (少见)。
+_ext_value_map_cache: dict[tuple[str, str], tuple[Any, dict[str, Any]]] = {}
+
+
+def _ext_parquet_signature(cfg, data_dir) -> Optional[tuple]:
+    """该扩展配置底层 parquet 文件的 (路径, mtime) 签名; 出错返回 None (禁用缓存)。"""
+    try:
+        from app.api.ext_data import _parquet_glob
+        pattern = _parquet_glob(cfg, data_dir)
+        files = sorted(_glob.glob(pattern, recursive=True))
+        if not files:
+            return None
+        return tuple((f, os.path.getmtime(f)) for f in files)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _load_ext_value_maps(repo, ext_columns: Optional[str]) -> dict[str, dict[str, Any]]:
     """按请求加载扩展列，返回 {输出列名: {symbol: value}}。
 
     策略结果缓存是共享文件，不能被不同 ext_columns 组合污染；因此扩展列只在
     返回前通过该投影映射追加到结果副本中。
+
+    基于 config 的路径按 parquet 文件 mtime 签名 memoize, 文件未变时跳过磁盘重读。
     """
     ext_specs = _parse_ext_columns(ext_columns) if ext_columns else []
     if not ext_specs:
         return {}
 
     import polars as pl
+
     from app.api.ext_data import _read_ext_dataframe
     from app.services.ext_data import ExtConfigStore
 
@@ -85,8 +114,15 @@ def _load_ext_value_maps(repo, ext_columns: Optional[str]) -> dict[str, dict[str
     for config_id, field_name in ext_specs:
         out_col = f"{config_id}__{field_name}"
         cfg = configs.get(config_id)
+        cache_key = (config_id, field_name)
+        sig = _ext_parquet_signature(cfg, data_dir) if cfg else None
         try:
             if cfg:
+                # 命中缓存 (文件签名一致) → 复用, 免去磁盘重读
+                cached = _ext_value_map_cache.get(cache_key)
+                if cached is not None and sig is not None and cached[0] == sig:
+                    value_maps[out_col] = cached[1]
+                    continue
                 # 时序扩展表只取最新分区，避免历史分区把同一 symbol JOIN 放大。
                 ext_df, _ = _read_ext_dataframe(cfg, data_dir)
             else:
@@ -99,11 +135,14 @@ def _load_ext_value_maps(repo, ext_columns: Optional[str]) -> dict[str, dict[str
                 continue
 
             ext_df = ext_df.select(["symbol", field_name]).unique(subset=["symbol"], keep="last")
-            value_maps[out_col] = {
+            vmap = {
                 str(row["symbol"]): _safe_ext_value(row.get(field_name))
                 for row in ext_df.to_dicts()
                 if row.get("symbol")
             }
+            value_maps[out_col] = vmap
+            if cfg and sig is not None:
+                _ext_value_map_cache[cache_key] = (sig, vmap)
         except Exception as e:  # noqa: BLE001
             logger.debug("screener ext column join skipped for %s.%s: %s", config_id, field_name, e)
 
@@ -174,43 +213,37 @@ def _update_cache_strategy(data_dir, as_of: str, strategy_id: str, safe_data: di
 
 
 @router.get("/strategies")
-def strategies(request: Request):
-    """策略清单（内置 + 自定义 + AI）。"""
+def strategies(
+    request: Request,
+    asset_type: str = Query("stock"),
+    timeframe: str = Query("1d"),
+):
+    """兼容策略清单端点；唯一数据源为 StrategyEngine。"""
     data_dir = request.app.state.repo.store.data_dir
-    presets = []
-    seen_ids: set[str] = set()
-
-    # 内置策略
-    for k, v in PRESET_STRATEGIES.items():
-        overrides = strategy_config.load_override(data_dir, k)
-        name = (overrides.get("name") or v["name"]) if overrides else v["name"]
-        desc = (overrides.get("description") or v["description"]) if overrides else v["description"]
-        presets.append({"id": k, "name": name, "description": desc, "source": "builtin"})
-        seen_ids.add(k)
-
-    # 自定义/AI 策略（不在 PRESET_STRATEGIES 中的）
     engine = getattr(request.app.state, "strategy_engine", None)
-    if engine:
-        for meta in engine.list_strategies():
-            sid = meta["id"]
-            if sid not in seen_ids:
-                overrides = strategy_config.load_override(data_dir, sid)
-                name = (overrides.get("name") or meta["name"]) if overrides else meta["name"]
-                desc = (overrides.get("description") or meta.get("description", "")) if overrides else meta.get("description", "")
-                presets.append({"id": sid, "name": name, "description": desc, "source": meta.get("source", "custom")})
-                seen_ids.add(sid)
-        # 暴露加载失败的策略,让前端可见(避免"策略静默消失"误判为正常)
-        load_errors = engine.load_errors() if engine else []
-    else:
-        load_errors = []
+    if engine is None:
+        raise HTTPException(status_code=503, detail="策略引擎未初始化")
+    presets = []
+    for meta in engine.list_strategies():
+        if asset_type not in meta.get("asset_types", ["stock"]):
+            continue
+        if timeframe not in meta.get("timeframes", ["1d"]):
+            continue
+        sid = meta["id"]
+        overrides = strategy_config.load_override(data_dir, sid)
+        presets.append({
+            **meta,
+            "name": overrides.get("name") or meta["name"],
+            "description": overrides.get("description") or meta.get("description", ""),
+        })
 
-    return {"presets": presets, "load_errors": load_errors}
+    return {"presets": presets, "load_errors": engine.load_errors()}
 
 
 @router.post("/run")
 def run_custom(req: CustomRequest, request: Request):
     repo = request.app.state.repo
-    svc = ScreenerService(repo)
+    svc = ScreenerService(repo, asset_type=req.asset_type)
     as_of = req.as_of or svc.latest_date()
     if not as_of:
         raise HTTPException(status_code=400,
@@ -230,7 +263,7 @@ def run_custom(req: CustomRequest, request: Request):
 @router.post("/run_preset")
 def run_preset(req: PresetRequest, request: Request):
     repo = request.app.state.repo
-    svc = ScreenerService(repo)
+    svc = ScreenerService(repo, asset_type=req.asset_type)
     as_of = req.as_of or svc.latest_date()
     if not as_of:
         raise HTTPException(status_code=400, detail="无可用数据日期")
@@ -239,39 +272,34 @@ def run_preset(req: PresetRequest, request: Request):
     data_dir = request.app.state.repo.store.data_dir
     ext_values = _load_ext_value_maps(repo, req.ext_columns)
     overrides = strategy_config.load_override(data_dir, req.strategy_id)
-    bf = overrides.get("basic_filter") if overrides else None
-    dl = overrides.get("display_limit") if overrides else None
-    if dl is None and overrides and "display_limit" in overrides:
-        dl = 0
-
-    # 内置策略
-    if req.strategy_id in PRESET_STRATEGIES:
-        try:
-            result = svc.run_preset(req.strategy_id, as_of=as_of, pool=req.pool, basic_filter=bf, display_limit=dl)
-        except ValueError as e:
-            raise HTTPException(status_code=404, detail=str(e)) from e
-        safe_data = _safe(asdict(result))
-        _update_cache_strategy(data_dir, str(as_of), req.strategy_id, safe_data)
-        return _result_with_ext(safe_data, ext_values)
-
-    # 自定义/AI 策略 — 通过 StrategyEngine 执行
     engine = getattr(request.app.state, "strategy_engine", None)
     if not engine:
         raise HTTPException(status_code=404, detail=f"策略引擎未初始化或策略 {req.strategy_id} 不存在")
 
     try:
-        result = engine.run(req.strategy_id, as_of, pool=req.pool, overrides=overrides or None)
+        if not engine.has(req.strategy_id):
+            raise ValueError(f"unknown strategy: {req.strategy_id}")
+        params = dict(overrides.get("params") or {})
+        context = svc.build_strategy_context(
+            engine,
+            as_of,
+            [req.strategy_id],
+            timeframe=req.timeframe,
+            params_map={req.strategy_id: params},
+            overrides_map={req.strategy_id: overrides or {}},
+        )
+        result = engine.run(
+            req.strategy_id,
+            context,
+            pool=req.pool,
+            params=params,
+            overrides=overrides or None,
+        )
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
+        status_code = 404 if "unknown strategy" in str(e) else 400
+        raise HTTPException(status_code=status_code, detail=str(e)) from e
 
-    data = asdict(result)
-
-    if dl is not None and dl > 0:
-        data["rows"] = data["rows"][:dl]
-        data["total"] = min(data["total"], dl)
-
-    # 单跑后更新缓存中该策略的结果（保持缓存最新）
-    safe_data = _safe(data)
+    safe_data = _safe(asdict(result))
     _update_cache_strategy(data_dir, str(as_of), req.strategy_id, safe_data)
 
     return _result_with_ext(safe_data, ext_values)
@@ -352,18 +380,19 @@ def market_snapshot(request: Request):
 
 @router.post("/run_all")
 def run_all(request: Request, body: Optional[dict] = None):
-    """批量运行指定策略,只返回每个策略的命中数。
-
-    优化: 从 enriched 读取一次目标日期数据, 所有策略共享。
-    body.strategy_ids: 只跑指定的策略 ID 列表, 为空则跑全部。
-    """
+    """批量运行指定策略；注册、路由和执行均由 StrategyEngine 负责。"""
     from datetime import date as date_type
 
     t_total = time.perf_counter()
 
     body = body or {}
     repo = request.app.state.repo
-    svc = ScreenerService(repo)
+    asset_type = str(body.get("asset_type") or "stock")
+    timeframe = str(body.get("timeframe") or "1d")
+    svc = ScreenerService(repo, asset_type=asset_type)
+    engine = getattr(request.app.state, "strategy_engine", None)
+    if engine is None:
+        raise HTTPException(status_code=503, detail="策略引擎未初始化")
 
     # 解析日期
     raw_date = body.get("as_of")
@@ -374,27 +403,21 @@ def run_all(request: Request, body: Optional[dict] = None):
     if not as_of:
         return {"as_of": None, "results": {}}
 
-    # 一次读取目标日期的全部数据
-    t0 = time.perf_counter()
-    precomputed = svc._load_enriched_for_date(as_of)
-    logger.info("run_all: _load_enriched_for_date took %.1fms", (time.perf_counter() - t0) * 1000)
-
-    results: dict[str, dict] = {}
     data_dir = request.app.state.repo.store.data_dir
 
-    # 收集需要运行的策略 ID (如果指定了 strategy_ids 则只跑这些)
     requested_ids = body.get("strategy_ids")
-    all_ids = list(PRESET_STRATEGIES.keys())
-    engine = getattr(request.app.state, "strategy_engine", None)
-    if engine:
-        for meta in engine.list_strategies():
-            sid = meta["id"]
-            if sid not in PRESET_STRATEGIES:
-                all_ids.append(sid)
-
     if requested_ids and isinstance(requested_ids, list):
-        id_set = set(requested_ids)
-        all_ids = [sid for sid in all_ids if sid in id_set]
+        all_ids = [str(sid) for sid in requested_ids]
+        unknown = [sid for sid in all_ids if not engine.has(sid)]
+        if unknown:
+            raise HTTPException(status_code=404, detail=f"unknown strategies: {unknown}")
+    else:
+        all_ids = [
+            meta["id"]
+            for meta in engine.list_strategies()
+            if asset_type in meta.get("asset_types", ["stock"])
+            and timeframe in meta.get("timeframes", ["1d"])
+        ]
 
     if not all_ids:
         return {"as_of": str(as_of), "results": {}}
@@ -404,45 +427,37 @@ def run_all(request: Request, body: Optional[dict] = None):
     all_overrides = strategy_config.list_overrides(data_dir)
     logger.info("run_all: list_overrides took %.1fms (%d overrides)", (time.perf_counter() - t0) * 1000, len(all_overrides))
 
-    # 历史策略: 只在需要时加载 (只加载 all_ids 中包含的 filter_history 策略)
-    t0 = time.perf_counter()
-    shared_history = None
-    id_set = set(all_ids)
-    if engine:
-        history_strats = [
-            (sid, s) for sid, s in engine._strategies.items()
-            if s.filter_history_fn and sid in id_set
-        ]
-        if history_strats:
-            max_lb = min(max(s.lookback_days for _, s in history_strats), 30)
-            shared_history = svc._load_enriched_history(as_of, max(1, max_lb))
-    else:
-        history_strats = []
-    logger.info("run_all: _load_enriched_history took %.1fms (history_strats=%d)", (time.perf_counter() - t0) * 1000, len(history_strats))
+    params_map = {
+        sid: dict((all_overrides.get(sid) or {}).get("params") or {})
+        for sid in all_ids
+    }
+    overrides_map = {sid: all_overrides.get(sid, {}) for sid in all_ids}
+    try:
+        context = svc.build_strategy_context(
+            engine,
+            as_of,
+            all_ids,
+            timeframe=timeframe,
+            params_map=params_map,
+            overrides_map=overrides_map,
+        )
+        engine_results = engine.run_all(
+            context,
+            params_map=params_map,
+            overrides_map=overrides_map,
+            strategy_ids=all_ids,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
-    for sid in all_ids:
-        try:
-            overrides = all_overrides.get(sid, {})
-            bf = overrides.get("basic_filter") if overrides else None
-            dl = overrides.get("display_limit") if overrides else None
-            if dl is None and overrides and "display_limit" in overrides:
-                dl = 0
-
-            if sid in PRESET_STRATEGIES:
-                r = svc.run_preset(sid, as_of=as_of, precomputed=precomputed, basic_filter=bf, display_limit=dl)
-            else:
-                r = engine.run(
-                    sid, as_of, overrides=overrides or None,
-                    precomputed=precomputed, precomputed_history=shared_history,
-                )
-                if dl is not None and dl > 0:
-                    r.rows = r.rows[:dl]
-                    r.total = min(r.total, dl)
-
-            safe_rows = _safe(asdict(r)).get("rows", [])
-            results[sid] = {"total": r.total, "as_of": str(as_of), "rows": safe_rows}
-        except (ValueError, Exception):
-            continue
+    results: dict[str, dict] = {}
+    for sid, result in engine_results.items():
+        safe_rows = _safe(asdict(result)).get("rows", [])
+        results[sid] = {
+            "total": result.total,
+            "as_of": str(as_of),
+            "rows": safe_rows,
+        }
 
     elapsed = (time.perf_counter() - t_total) * 1000
     logger.info("run_all: total took %.1fms (%d strategies)", elapsed, len(all_ids))
@@ -475,8 +490,6 @@ def limit_ladder(
 
     ext_columns: 动态 JOIN 扩展数据, 如 "concept.concept,industry.industry"
     """
-    from datetime import timedelta
-
     import polars as pl
 
     is_down = direction == "down"
@@ -536,17 +549,10 @@ def limit_ladder(
     sealed_counts_up = _count_sealed(up_map, sealed_up_ready)
     sealed_counts_down = _count_sealed(down_map, sealed_down_ready)
 
-    # 加载前一日数据获取 prev consecutive_limit_ups/downs
-    prev_consec: pl.DataFrame = pl.DataFrame()
-    for delta in range(1, 10):
-        candidate = as_of - timedelta(days=delta)
-        df_prev = svc._load_enriched_for_date(candidate)
-        if not df_prev.is_empty() and consec_col in df_prev.columns:
-            prev_consec = df_prev.select(
-                "symbol",
-                pl.col(consec_col).alias("prev_consec"),
-            )
-            break
+    # 加载前一日的 prev consecutive_limit_ups/downs
+    # 窄读: 仅取前一交易日的 [symbol, consec_col] 两列 (存储列, 直接谓词下推读 parquet),
+    # 替代旧的 range(1,10) 循环逐日 _load_enriched_for_date 全量指标重算 (最坏 9× 全市场重算)。
+    prev_consec: pl.DataFrame = svc.load_prior_consecutive(as_of, consec_col)
 
     if not prev_consec.is_empty():
         df = df.join(prev_consec, on="symbol", how="left")

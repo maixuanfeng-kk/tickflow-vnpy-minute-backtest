@@ -93,13 +93,27 @@ AUTH_PASSWORD=你的密码    # 至少 6 位;仅首次生效,已设过则不覆�
 
 ---
 
-## Docker 构建 Extras(可选)
+## 后端依赖 Extras(可选)
 
 ```ini
 BACKEND_EXTRAS=             # 留空默认;legacy-cpu 兼容老 CPU
 ```
 
-老 VPS 无 AVX2/FMA 支持时设为 `legacy-cpu`,会给 Polars 切到 `rtcompat` 运行时;需回测则 `legacy-cpu backtest`。详见 [deployment.md → 老 CPU 兼容](./deployment.md#老-cpu-兼容avx2fma-缺失)。
+老 CPU 无 AVX2/FMA 支持时设为 `legacy-cpu`,会给 Polars 切到 `rtcompat` 运行时;需回测则 `legacy-cpu backtest`。Docker 构建和 `./dev.sh` / `.\dev.ps1` 都会读取此值并同步依赖。详见 [deployment.md → 老 CPU 兼容](./deployment.md#老-cpu-兼容avx2fma-缺失)。
+
+---
+
+## FinSight 深度研报（Windows + Word）
+
+```ini
+FINSIGHT_ROOT=./vendor/finsight
+FINSIGHT_PYTHON=./vendor/finsight/.venv/Scripts/python.exe
+FINSIGHT_MAX_CONCURRENT=1
+```
+
+`FINSIGHT_ROOT` 指向锁定提交的 FinSight Git submodule，`FINSIGHT_PYTHON` 必须是其独立 Python 3.10.20 虚拟环境。`FINSIGHT_MAX_CONCURRENT` 默认并建议保持为 `1`，避免多个 Word 转换进程互相干扰。模型、Embedding、VLM 与搜索服务的真实密钥填写在 `vendor/finsight/.env`，不得写入 TickFlow 配置、运行目录或 Git。
+
+完整安装与一致性校验见 [deep-report-windows.md](./deep-report-windows.md)。Docker/Linux 环境无法使用 Word PDF 转换，因而不支持该能力。
 
 ---
 

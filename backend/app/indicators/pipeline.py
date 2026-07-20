@@ -22,6 +22,7 @@ from pathlib import Path
 import polars as pl
 
 from app.config import settings
+from app.parquet import scan_daily_parquet, scan_enriched_parquet, scan_parquet_compat
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,7 @@ ENRICHED_STORAGE_COLS = [
     "turnover_rate",                           # 依赖当时的 float_shares, 不可回推
     "consecutive_limit_ups",                   # 递推状态, 需从历史 cum_sum
     "consecutive_limit_downs",
+    "quote_ts",                                # 行情时间戳(ms): 盘后校验/量比折算/跨天完整性
 ]
 
 
@@ -142,6 +144,10 @@ ENRICHED_COLUMNS: dict[str, dict[str, str]] = {
     "signal_macd_dead":        "MACD死叉 (DIF下穿DEA)",
     "signal_ma20_breakout":    "收盘突破MA20上方",
     "signal_ma20_breakdown":   "收盘跌破MA20下方",
+    "signal_ma5_breakout":     "收盘突破MA5上方",
+    "signal_ma5_breakdown":    "收盘跌破MA5下方",
+    "signal_ma10_breakout":    "收盘突破MA10上方",
+    "signal_ma10_breakdown":   "收盘跌破MA10下方",
     "signal_n_day_high":       "创60日新高",
     "signal_n_day_low":        "创60日新低",
     "signal_boll_breakout_upper": "突破布林上轨",
@@ -281,11 +287,67 @@ def _apply_adj_factor(raw: pl.DataFrame, factors: pl.DataFrame) -> pl.DataFrame:
 # 技术指标计算 (从 OHLCV 计算)
 # ================================================================
 
-def compute_indicators(df: pl.DataFrame) -> pl.DataFrame:
+# ── compute_indicators 的列依赖关系 (供 needed 裁剪时求闭包) ────────────
+# target -> 其计算所依赖的中间/指标列 (仅列出依赖非原始 OHLCV 的项)
+_INDICATOR_DEPS: dict[str, set[str]] = {
+    "macd_dif": {"_ema12", "_ema26"},
+    "boll_upper": {"ma20", "_boll_std"},
+    "boll_lower": {"ma20", "_boll_std"},
+    "macd_dea": {"macd_dif"},
+    "macd_hist": {"macd_dif", "macd_dea"},
+    "kdj_k": {"_kdj_ln", "_kdj_hn"},
+    "kdj_d": {"kdj_k"},
+    "kdj_j": {"kdj_k", "kdj_d"},
+    "atr_14": {"_tr"},
+    "vol_ratio_5d": {"_vol_ma5"},
+    "annual_vol_20d": {"_daily_pct"},
+    "rsi_6": {"_delta", "_gain", "_loss"},
+    "rsi_14": {"_delta", "_gain", "_loss"},
+    "rsi_24": {"_delta", "_gain", "_loss"},
+}
+
+# compute_indicators 可产出的全部指标/临时列 (needed=None 时即为此全集, 行为不变)
+_ALL_INDICATOR_COLS: frozenset[str] = frozenset({
+    "prev_close", "ma5", "ma10", "ma20", "ma30", "ma60",
+    "ema5", "ema10", "ema20", "ema30", "ema60", "_ema12", "_ema26",
+    "_boll_std", "_kdj_ln", "_kdj_hn", "_tr", "vol_ma5", "vol_ma10",
+    "_vol_ma5", "high_60d", "low_60d",
+    "macd_dif", "boll_upper", "boll_lower", "macd_dea", "macd_hist",
+    "kdj_k", "kdj_d", "kdj_j",
+    "atr_14", "vol_ratio_5d",
+    "momentum_5d", "momentum_10d", "momentum_20d", "momentum_30d", "momentum_60d",
+    "change_pct", "change_amount", "amplitude", "_daily_pct", "annual_vol_20d",
+    "rsi_6", "rsi_14", "rsi_24",
+})
+
+
+def _resolve_needed(needed: set[str] | None) -> set[str]:
+    """把 needed 展开为闭包 (含所依赖的中间列)。needed=None → 全集。"""
+    if needed is None:
+        return set(_ALL_INDICATOR_COLS)
+    want = set(needed)
+    changed = True
+    while changed:
+        changed = False
+        for target in list(want):
+            deps = _INDICATOR_DEPS.get(target)
+            if deps and not deps <= want:
+                want |= deps
+                changed = True
+    return want
+
+
+def compute_indicators(df: pl.DataFrame, needed: set[str] | None = None) -> pl.DataFrame:
     """从 OHLCV 数据计算全套技术指标。
 
     输入必须包含: symbol, date, open, high, low, close, volume
     返回添加了所有指标列的 DataFrame。
+
+    needed:
+        None (默认) — 计算全部指标, 行为与历史逐位一致 (所有 gate 为真, 表达式/顺序不变)。
+        列名集合   — 仅计算这些列及其依赖闭包, 跳过无关的 EMA/KDJ/RSI 等 pass;
+                     输出保留输入列 + 所需指标列。被保留列的数值与全量计算逐位一致
+                     (逐列 window/rolling 相互独立, 跳过其它列不影响保留列)。
     """
     if df.is_empty():
         return df
@@ -293,133 +355,184 @@ def compute_indicators(df: pl.DataFrame) -> pl.DataFrame:
     import time as _time
     _t0 = _time.perf_counter()
 
+    want = _resolve_needed(needed)
+
     df = df.sort(["symbol", "date"])
 
     # Pass 1: 均线 + EMA + MACD 基础 + BOLL 基础 + KDJ 基础 + ATR 基础 + 量价 + 极值
     prev_close = pl.col("close").shift(1).over("symbol")
-    df = df.with_columns([
-        # 前收盘价
-        prev_close.alias("prev_close"),
-        # MA (最大 MA60)
-        pl.col("close").rolling_mean(5).over("symbol").alias("ma5"),
-        pl.col("close").rolling_mean(10).over("symbol").alias("ma10"),
-        pl.col("close").rolling_mean(20).over("symbol").alias("ma20"),
-        pl.col("close").rolling_mean(30).over("symbol").alias("ma30"),
-        pl.col("close").rolling_mean(60).over("symbol").alias("ma60"),
-        # EMA (不含 ema12/ema26, MACD 内部自算)
-        pl.col("close").ewm_mean(alpha=_ema_alpha(5), adjust=False).over("symbol").alias("ema5"),
-        pl.col("close").ewm_mean(alpha=_ema_alpha(10), adjust=False).over("symbol").alias("ema10"),
-        pl.col("close").ewm_mean(alpha=_ema_alpha(20), adjust=False).over("symbol").alias("ema20"),
-        pl.col("close").ewm_mean(alpha=_ema_alpha(30), adjust=False).over("symbol").alias("ema30"),
-        pl.col("close").ewm_mean(alpha=_ema_alpha(60), adjust=False).over("symbol").alias("ema60"),
-        # MACD base (内部计算, 不存 ema12/ema26)
-        pl.col("close").ewm_mean(alpha=_ema_alpha(12), adjust=False).over("symbol").alias("_ema12"),
-        pl.col("close").ewm_mean(alpha=_ema_alpha(26), adjust=False).over("symbol").alias("_ema26"),
-        # BOLL base
-        pl.col("close").rolling_std(20).over("symbol").alias("_boll_std"),
-        # KDJ base
-        pl.col("low").rolling_min(9).over("symbol").alias("_kdj_ln"),
-        pl.col("high").rolling_max(9).over("symbol").alias("_kdj_hn"),
-        # ATR base
-        pl.max_horizontal(
+    _p1: list[pl.Expr] = []
+    if "prev_close" in want:
+        _p1.append(prev_close.alias("prev_close"))
+    if "ma5" in want:
+        _p1.append(pl.col("close").rolling_mean(5).over("symbol").alias("ma5"))
+    if "ma10" in want:
+        _p1.append(pl.col("close").rolling_mean(10).over("symbol").alias("ma10"))
+    if "ma20" in want:
+        _p1.append(pl.col("close").rolling_mean(20).over("symbol").alias("ma20"))
+    if "ma30" in want:
+        _p1.append(pl.col("close").rolling_mean(30).over("symbol").alias("ma30"))
+    if "ma60" in want:
+        _p1.append(pl.col("close").rolling_mean(60).over("symbol").alias("ma60"))
+    if "ema5" in want:
+        _p1.append(pl.col("close").ewm_mean(alpha=_ema_alpha(5), adjust=False).over("symbol").alias("ema5"))
+    if "ema10" in want:
+        _p1.append(pl.col("close").ewm_mean(alpha=_ema_alpha(10), adjust=False).over("symbol").alias("ema10"))
+    if "ema20" in want:
+        _p1.append(pl.col("close").ewm_mean(alpha=_ema_alpha(20), adjust=False).over("symbol").alias("ema20"))
+    if "ema30" in want:
+        _p1.append(pl.col("close").ewm_mean(alpha=_ema_alpha(30), adjust=False).over("symbol").alias("ema30"))
+    if "ema60" in want:
+        _p1.append(pl.col("close").ewm_mean(alpha=_ema_alpha(60), adjust=False).over("symbol").alias("ema60"))
+    if "_ema12" in want:
+        _p1.append(pl.col("close").ewm_mean(alpha=_ema_alpha(12), adjust=False).over("symbol").alias("_ema12"))
+    if "_ema26" in want:
+        _p1.append(pl.col("close").ewm_mean(alpha=_ema_alpha(26), adjust=False).over("symbol").alias("_ema26"))
+    if "_boll_std" in want:
+        _p1.append(pl.col("close").rolling_std(20).over("symbol").alias("_boll_std"))
+    if "_kdj_ln" in want:
+        _p1.append(pl.col("low").rolling_min(9).over("symbol").alias("_kdj_ln"))
+    if "_kdj_hn" in want:
+        _p1.append(pl.col("high").rolling_max(9).over("symbol").alias("_kdj_hn"))
+    if "_tr" in want:
+        _p1.append(pl.max_horizontal(
             pl.col("high") - pl.col("low"),
             (pl.col("high") - prev_close).abs(),
             (pl.col("low") - prev_close).abs(),
-        ).alias("_tr"),
-        # 量价 base
-        pl.col("volume").rolling_mean(5).over("symbol").alias("vol_ma5"),
-        pl.col("volume").rolling_mean(10).over("symbol").alias("vol_ma10"),
-        pl.col("volume").rolling_mean(5).over("symbol").alias("_vol_ma5"),
-        # 极值
-        pl.col("close").rolling_max(60).over("symbol").alias("high_60d"),
-        pl.col("close").rolling_min(60).over("symbol").alias("low_60d"),
-    ])
+        ).alias("_tr"))
+    if "vol_ma5" in want:
+        _p1.append(pl.col("volume").rolling_mean(5).over("symbol").alias("vol_ma5"))
+    if "vol_ma10" in want:
+        _p1.append(pl.col("volume").rolling_mean(10).over("symbol").alias("vol_ma10"))
+    if "_vol_ma5" in want:
+        _p1.append(pl.col("volume").rolling_mean(5).over("symbol").alias("_vol_ma5"))
+    if "vol_ratio_5d" in want:
+        # 前5日平均成交量(不含当天), 标准量比分母: volume.shift(1).rolling_mean(5)
+        _p1.append(pl.col("volume").shift(1).rolling_mean(5).over("symbol").alias("_vol_ma5_prev"))
+    if "high_60d" in want:
+        _p1.append(pl.col("close").rolling_max(60).over("symbol").alias("high_60d"))
+    if "low_60d" in want:
+        _p1.append(pl.col("close").rolling_min(60).over("symbol").alias("low_60d"))
+    if _p1:
+        df = df.with_columns(_p1)
 
     # Pass 2: MACD + BOLL (基于 Pass 1 基础列)
-    df = df.with_columns([
-        (pl.col("_ema12") - pl.col("_ema26")).alias("macd_dif"),
-        (pl.col("ma20") + 2 * pl.col("_boll_std")).alias("boll_upper"),
-        (pl.col("ma20") - 2 * pl.col("_boll_std")).alias("boll_lower"),
-    ]).with_columns(
-        pl.col("macd_dif").ewm_mean(alpha=_ema_alpha(9), adjust=False).over("symbol").alias("macd_dea"),
-    ).with_columns(
-        ((pl.col("macd_dif") - pl.col("macd_dea")) * 2).alias("macd_hist"),
-    )
+    _p2: list[pl.Expr] = []
+    if "macd_dif" in want:
+        _p2.append((pl.col("_ema12") - pl.col("_ema26")).alias("macd_dif"))
+    if "boll_upper" in want:
+        _p2.append((pl.col("ma20") + 2 * pl.col("_boll_std")).alias("boll_upper"))
+    if "boll_lower" in want:
+        _p2.append((pl.col("ma20") - 2 * pl.col("_boll_std")).alias("boll_lower"))
+    if _p2:
+        df = df.with_columns(_p2)
+    if "macd_dea" in want:
+        df = df.with_columns(
+            pl.col("macd_dif").ewm_mean(alpha=_ema_alpha(9), adjust=False).over("symbol").alias("macd_dea"),
+        )
+    if "macd_hist" in want:
+        df = df.with_columns(
+            ((pl.col("macd_dif") - pl.col("macd_dea")) * 2).alias("macd_hist"),
+        )
 
     # Pass 3: KDJ
-    _kdj_rsv = (
-        100 * (pl.col("close") - pl.col("_kdj_ln"))
-        / (pl.col("_kdj_hn") - pl.col("_kdj_ln")).fill_null(1e-12)
-    )
-    df = df.with_columns([
-        _kdj_rsv.ewm_mean(alpha=1.0 / 3, adjust=False).over("symbol").alias("kdj_k"),
-    ]).with_columns([
-        pl.col("kdj_k").ewm_mean(alpha=1.0 / 3, adjust=False).over("symbol").alias("kdj_d"),
-    ]).with_columns([
-        (3 * pl.col("kdj_k") - 2 * pl.col("kdj_d")).alias("kdj_j"),
-    ])
+    if "kdj_k" in want:
+        _kdj_rsv = (
+            100 * (pl.col("close") - pl.col("_kdj_ln"))
+            / (pl.col("_kdj_hn") - pl.col("_kdj_ln")).fill_null(1e-12)
+        )
+        df = df.with_columns([
+            _kdj_rsv.ewm_mean(alpha=1.0 / 3, adjust=False).over("symbol").alias("kdj_k"),
+        ])
+    if "kdj_d" in want:
+        df = df.with_columns([
+            pl.col("kdj_k").ewm_mean(alpha=1.0 / 3, adjust=False).over("symbol").alias("kdj_d"),
+        ])
+    if "kdj_j" in want:
+        df = df.with_columns([
+            (3 * pl.col("kdj_k") - 2 * pl.col("kdj_d")).alias("kdj_j"),
+        ])
 
     # Pass 4: ATR + 量比 + 动量 + 波动 + 涨跌幅 + 涨跌额 + 振幅
-    df = df.with_columns(
-        pl.col("_tr").ewm_mean(alpha=1.0 / 14, adjust=False).over("symbol").alias("atr_14"),
-    ).with_columns(
-        (pl.col("volume") / pl.col("_vol_ma5")).alias("vol_ratio_5d"),
-    ).with_columns([
-        # 动量: 5d/10d/20d/30d/60d
-        (pl.col("close") / pl.col("close").shift(5).over("symbol") - 1).alias("momentum_5d"),
-        (pl.col("close") / pl.col("close").shift(10).over("symbol") - 1).alias("momentum_10d"),
-        (pl.col("close") / pl.col("close").shift(20).over("symbol") - 1).alias("momentum_20d"),
-        (pl.col("close") / pl.col("close").shift(30).over("symbol") - 1).alias("momentum_30d"),
-        (pl.col("close") / pl.col("close").shift(60).over("symbol") - 1).alias("momentum_60d"),
-        # 日涨跌幅
-        (pl.col("close") / pl.col("close").shift(1).over("symbol") - 1).alias("change_pct"),
-    ]).with_columns(
-        # 涨跌额
-        (pl.col("close") - pl.col("close").shift(1).over("symbol")).alias("change_amount"),
-    ).with_columns(
-        # 振幅 = (high - low) / prev_close
-        pl.when(pl.col("close").shift(1).over("symbol") > 0)
-          .then((pl.col("high") - pl.col("low")) / pl.col("close").shift(1).over("symbol"))
-          .otherwise(None)
-          .alias("amplitude"),
-    ).with_columns(
-        # 日涨跌幅 (用于波动率)
-        pl.col("close").pct_change().over("symbol").alias("_daily_pct"),
-    ).with_columns(
-        # 年化波动率
-        (pl.col("_daily_pct").rolling_std(20).over("symbol") * (252 ** 0.5))
-            .alias("annual_vol_20d"),
-    )
+    if "atr_14" in want:
+        df = df.with_columns(
+            pl.col("_tr").ewm_mean(alpha=1.0 / 14, adjust=False).over("symbol").alias("atr_14"),
+        )
+    if "vol_ratio_5d" in want:
+        # 标准量比(同花顺/东财): 今日成交量 / 前5日均量(不含当天)
+        # 盘后全量路径: 当日 volume 是完整全天量, 无需时间折算
+        df = df.with_columns(
+            (pl.col("volume") / pl.col("_vol_ma5_prev")).alias("vol_ratio_5d"),
+        )
+    _p4mom: list[pl.Expr] = []
+    if "momentum_5d" in want:
+        _p4mom.append((pl.col("close") / pl.col("close").shift(5).over("symbol") - 1).alias("momentum_5d"))
+    if "momentum_10d" in want:
+        _p4mom.append((pl.col("close") / pl.col("close").shift(10).over("symbol") - 1).alias("momentum_10d"))
+    if "momentum_20d" in want:
+        _p4mom.append((pl.col("close") / pl.col("close").shift(20).over("symbol") - 1).alias("momentum_20d"))
+    if "momentum_30d" in want:
+        _p4mom.append((pl.col("close") / pl.col("close").shift(30).over("symbol") - 1).alias("momentum_30d"))
+    if "momentum_60d" in want:
+        _p4mom.append((pl.col("close") / pl.col("close").shift(60).over("symbol") - 1).alias("momentum_60d"))
+    if "change_pct" in want:
+        _p4mom.append((pl.col("close") / pl.col("close").shift(1).over("symbol") - 1).alias("change_pct"))
+    if _p4mom:
+        df = df.with_columns(_p4mom)
+    if "change_amount" in want:
+        df = df.with_columns(
+            (pl.col("close") - pl.col("close").shift(1).over("symbol")).alias("change_amount"),
+        )
+    if "amplitude" in want:
+        df = df.with_columns(
+            pl.when(pl.col("close").shift(1).over("symbol") > 0)
+              .then((pl.col("high") - pl.col("low")) / pl.col("close").shift(1).over("symbol"))
+              .otherwise(None)
+              .alias("amplitude"),
+        )
+    if "_daily_pct" in want:
+        df = df.with_columns(
+            pl.col("close").pct_change().over("symbol").alias("_daily_pct"),
+        )
+    if "annual_vol_20d" in want:
+        df = df.with_columns(
+            (pl.col("_daily_pct").rolling_std(20).over("symbol") * (252 ** 0.5))
+                .alias("annual_vol_20d"),
+        )
 
     # Pass 5: RSI
-    df = df.with_columns(
-        pl.col("close").diff().over("symbol").alias("_delta"),
-    ).with_columns([
-        pl.when(pl.col("_delta") > 0).then(pl.col("_delta")).otherwise(0.0).alias("_gain"),
-        pl.when(pl.col("_delta") < 0).then(-pl.col("_delta")).otherwise(0.0).alias("_loss"),
-    ])
-    for n in (6, 14, 24):
-        a = 1.0 / n
-        df = df.with_columns([
-            pl.col("_gain").ewm_mean(alpha=a, adjust=False).over("symbol").alias(f"_rsi_avg_gain_{n}"),
-            pl.col("_loss").ewm_mean(alpha=a, adjust=False).over("symbol").alias(f"_rsi_avg_loss_{n}"),
-        ]).with_columns(
-            (100 - 100 / (1 + pl.col(f"_rsi_avg_gain_{n}") /
-                         pl.when(pl.col(f"_rsi_avg_loss_{n}") == 0)
-                           .then(1e-12)
-                           .otherwise(pl.col(f"_rsi_avg_loss_{n}"))
-                         )).alias(f"rsi_{n}"),
-        )
+    if want & {"rsi_6", "rsi_14", "rsi_24"}:
+        df = df.with_columns(
+            pl.col("close").diff().over("symbol").alias("_delta"),
+        ).with_columns([
+            pl.when(pl.col("_delta") > 0).then(pl.col("_delta")).otherwise(0.0).alias("_gain"),
+            pl.when(pl.col("_delta") < 0).then(-pl.col("_delta")).otherwise(0.0).alias("_loss"),
+        ])
+        for n in (6, 14, 24):
+            if f"rsi_{n}" not in want:
+                continue
+            a = 1.0 / n
+            df = df.with_columns([
+                pl.col("_gain").ewm_mean(alpha=a, adjust=False).over("symbol").alias(f"_rsi_avg_gain_{n}"),
+                pl.col("_loss").ewm_mean(alpha=a, adjust=False).over("symbol").alias(f"_rsi_avg_loss_{n}"),
+            ]).with_columns(
+                (100 - 100 / (1 + pl.col(f"_rsi_avg_gain_{n}") /
+                             pl.when(pl.col(f"_rsi_avg_loss_{n}") == 0)
+                               .then(1e-12)
+                               .otherwise(pl.col(f"_rsi_avg_loss_{n}"))
+                             )).alias(f"rsi_{n}"),
+            )
 
     # Pass 6: 换手率 (需要 float_shares, 后续在 compute_all 中 JOIN instruments 后补充)
 
-    # 清理临时列
-    df = df.drop(["_boll_std", "_tr", "_ema12", "_ema26",
-                  "_kdj_ln", "_kdj_hn", "_vol_ma5", "_daily_pct",
+    # 清理临时列 (只丢弃实际存在的临时列)
+    _temp_cols = ["_boll_std", "_tr", "_ema12", "_ema26",
+                  "_kdj_ln", "_kdj_hn", "_vol_ma5", "_vol_ma5_prev", "_daily_pct",
                   "_delta", "_gain", "_loss",
                   "_rsi_avg_gain_6", "_rsi_avg_loss_6",
                   "_rsi_avg_gain_14", "_rsi_avg_loss_14",
-                  "_rsi_avg_gain_24", "_rsi_avg_loss_24"])
+                  "_rsi_avg_gain_24", "_rsi_avg_loss_24"]
+    df = df.drop([c for c in _temp_cols if c in df.columns])
 
     _elapsed = (_time.perf_counter() - _t0) * 1000
     import logging as _logging
@@ -428,7 +541,50 @@ def compute_indicators(df: pl.DataFrame) -> pl.DataFrame:
     return df
 
 
-def compute_signals(df: pl.DataFrame) -> pl.DataFrame:
+SIGNAL_DEPENDENCIES: dict[str, frozenset[str]] = {
+    "signal_ma_golden_5_20": frozenset({"ma5", "ma20"}),
+    "signal_ma_dead_5_20": frozenset({"ma5", "ma20"}),
+    "signal_ma_golden_20_60": frozenset({"ma20", "ma60"}),
+    "signal_macd_golden": frozenset({"macd_dif", "macd_dea"}),
+    "signal_macd_dead": frozenset({"macd_dif", "macd_dea"}),
+    "signal_ma20_breakout": frozenset({"close", "ma20"}),
+    "signal_ma20_breakdown": frozenset({"close", "ma20"}),
+    "signal_ma5_breakout": frozenset({"close", "ma5"}),
+    "signal_ma5_breakdown": frozenset({"close", "ma5"}),
+    "signal_ma10_breakout": frozenset({"close", "ma10"}),
+    "signal_ma10_breakdown": frozenset({"close", "ma10"}),
+    "signal_n_day_high": frozenset({"close", "high_60d"}),
+    "signal_n_day_low": frozenset({"close", "low_60d"}),
+    "signal_boll_breakout_upper": frozenset({"close", "boll_upper"}),
+    "signal_boll_breakdown_lower": frozenset({"close", "boll_lower"}),
+    "signal_volume_surge": frozenset({"vol_ratio_5d"}),
+}
+
+LIMIT_SIGNAL_OUTPUTS: frozenset[str] = frozenset({
+    "signal_limit_up",
+    "signal_limit_down",
+    "signal_limit_down_recovery",
+    "signal_broken_limit_up",
+    "consecutive_limit_ups",
+    "consecutive_limit_downs",
+    "turnover_rate",
+})
+
+INDICATOR_COLUMNS: frozenset[str] = frozenset(
+    col for col in _ALL_INDICATOR_COLS if not col.startswith("_")
+)
+
+
+def get_signal_dependencies() -> dict[str, frozenset[str]]:
+    """返回内置与 JSON 自定义信号的唯一依赖映射。"""
+    from app.strategy import custom_signals
+
+    return {
+        **SIGNAL_DEPENDENCIES,
+        **custom_signals.expression_dependencies(_get_custom_signal_exprs()),
+    }
+
+def compute_signals(df: pl.DataFrame, needed: set[str] | None = None) -> pl.DataFrame:
     """从已有指标列计算原子信号布尔列。
 
     输入必须包含 compute_indicators() 产出的指标列。
@@ -436,43 +592,62 @@ def compute_signals(df: pl.DataFrame) -> pl.DataFrame:
     if df.is_empty():
         return df
 
-    df = df.with_columns([
-        ((pl.col("ma5") > pl.col("ma20")) &
+    want = set(SIGNAL_DEPENDENCIES) if needed is None else set(needed) & set(SIGNAL_DEPENDENCIES)
+    expressions: dict[str, pl.Expr] = {
+        "signal_ma_golden_5_20": ((pl.col("ma5") > pl.col("ma20")) &
          (pl.col("ma5").shift(1).over("symbol") <= pl.col("ma20").shift(1).over("symbol")))
             .alias("signal_ma_golden_5_20"),
-        ((pl.col("ma5") < pl.col("ma20")) &
+        "signal_ma_dead_5_20": ((pl.col("ma5") < pl.col("ma20")) &
          (pl.col("ma5").shift(1).over("symbol") >= pl.col("ma20").shift(1).over("symbol")))
             .alias("signal_ma_dead_5_20"),
-        ((pl.col("ma20") > pl.col("ma60")) &
+        "signal_ma_golden_20_60": ((pl.col("ma20") > pl.col("ma60")) &
          (pl.col("ma20").shift(1).over("symbol") <= pl.col("ma60").shift(1).over("symbol")))
             .alias("signal_ma_golden_20_60"),
-        ((pl.col("macd_dif") > pl.col("macd_dea")) &
+        "signal_macd_golden": ((pl.col("macd_dif") > pl.col("macd_dea")) &
          (pl.col("macd_dif").shift(1).over("symbol") <= pl.col("macd_dea").shift(1).over("symbol")))
             .alias("signal_macd_golden"),
-        ((pl.col("macd_dif") < pl.col("macd_dea")) &
+        "signal_macd_dead": ((pl.col("macd_dif") < pl.col("macd_dea")) &
          (pl.col("macd_dif").shift(1).over("symbol") >= pl.col("macd_dea").shift(1).over("symbol")))
             .alias("signal_macd_dead"),
-        ((pl.col("close") > pl.col("ma20")) &
+        "signal_ma20_breakout": ((pl.col("close") > pl.col("ma20")) &
          (pl.col("close").shift(1).over("symbol") <= pl.col("ma20").shift(1).over("symbol")))
             .alias("signal_ma20_breakout"),
-        ((pl.col("close") < pl.col("ma20")) &
+        "signal_ma20_breakdown": ((pl.col("close") < pl.col("ma20")) &
          (pl.col("close").shift(1).over("symbol") >= pl.col("ma20").shift(1).over("symbol")))
             .alias("signal_ma20_breakdown"),
-        (pl.col("close") >= pl.col("high_60d")).alias("signal_n_day_high"),
-        (pl.col("close") <= pl.col("low_60d")).alias("signal_n_day_low"),
-        (pl.col("close") > pl.col("boll_upper")).alias("signal_boll_breakout_upper"),
-        (pl.col("close") < pl.col("boll_lower")).alias("signal_boll_breakdown_lower"),
-        (pl.col("vol_ratio_5d") >= 2.0).alias("signal_volume_surge"),
-    ])
+        "signal_ma5_breakout": ((pl.col("close") > pl.col("ma5")) &
+         (pl.col("close").shift(1).over("symbol") <= pl.col("ma5").shift(1).over("symbol")))
+            .alias("signal_ma5_breakout"),
+        "signal_ma5_breakdown": ((pl.col("close") < pl.col("ma5")) &
+         (pl.col("close").shift(1).over("symbol") >= pl.col("ma5").shift(1).over("symbol")))
+            .alias("signal_ma5_breakdown"),
+        "signal_ma10_breakout": ((pl.col("close") > pl.col("ma10")) &
+         (pl.col("close").shift(1).over("symbol") <= pl.col("ma10").shift(1).over("symbol")))
+            .alias("signal_ma10_breakout"),
+        "signal_ma10_breakdown": ((pl.col("close") < pl.col("ma10")) &
+         (pl.col("close").shift(1).over("symbol") >= pl.col("ma10").shift(1).over("symbol")))
+            .alias("signal_ma10_breakdown"),
+        "signal_n_day_high": (pl.col("close") >= pl.col("high_60d")).alias("signal_n_day_high"),
+        "signal_n_day_low": (pl.col("close") <= pl.col("low_60d")).alias("signal_n_day_low"),
+        "signal_boll_breakout_upper": (pl.col("close") > pl.col("boll_upper")).alias("signal_boll_breakout_upper"),
+        "signal_boll_breakdown_lower": (pl.col("close") < pl.col("boll_lower")).alias("signal_boll_breakdown_lower"),
+        "signal_volume_surge": (pl.col("vol_ratio_5d") >= 2.0).alias("signal_volume_surge"),
+    }
+    if want:
+        df = df.with_columns([expressions[name] for name in SIGNAL_DEPENDENCIES if name in want])
 
     # 自定义信号（用户配置的字段+运算符+值组合，编译为布尔列）
     from app.strategy import custom_signals
-    df = custom_signals.inject(df, _get_custom_signal_exprs())
+    df = custom_signals.inject(df, _get_custom_signal_exprs(), needed=needed)
 
     return df
 
 
-def compute_limit_signals(df: pl.DataFrame, instruments: pl.DataFrame) -> pl.DataFrame:
+def compute_limit_signals(
+    df: pl.DataFrame,
+    instruments: pl.DataFrame,
+    needed: set[str] | None = None,
+) -> pl.DataFrame:
     """计算涨跌停相关信号。
 
     产出:
@@ -487,15 +662,33 @@ def compute_limit_signals(df: pl.DataFrame, instruments: pl.DataFrame) -> pl.Dat
     if df.is_empty():
         return df
 
-    # 从 instruments 取 ST 标记 + 流通股本(换手率用)
+    want = set(LIMIT_SIGNAL_OUTPUTS) if needed is None else set(needed) & set(LIMIT_SIGNAL_OUTPUTS)
+    if not want:
+        return df
+
+    need_up = bool(want & {"signal_limit_up", "consecutive_limit_ups", "signal_broken_limit_up"})
+    need_down = bool(want & {"signal_limit_down", "consecutive_limit_downs", "signal_limit_down_recovery"})
+    need_price_limits = need_up or need_down
+
+    # 从 instruments 取 ST 标记、流通股本(换手率用)以及最新日涨跌停价
     inst_cols = ["symbol"]
-    if "name" in instruments.columns:
-        inst_cols.append("name")
-    if "float_shares" in instruments.columns:
-        inst_cols.append("float_shares")
+    instrument_needs = set()
+    if need_price_limits:
+        instrument_needs.add("name")
+    if "turnover_rate" in want:
+        instrument_needs.add("float_shares")
+    if need_up:
+        instrument_needs.add("limit_up")
+    if need_down:
+        instrument_needs.add("limit_down")
+    for c in ["name", "float_shares", "limit_up", "limit_down"]:
+        if c not in instrument_needs:
+            continue
+        if c in instruments.columns:
+            inst_cols.append(c)
     inst_subset = instruments.select(inst_cols).unique(subset=["symbol"])
 
-    if "name" in instruments.columns:
+    if need_price_limits and "name" in instruments.columns:
         st_flag = (
             instruments
             .select("symbol", pl.col("name").str.contains("ST").alias("_is_st"))
@@ -506,19 +699,23 @@ def compute_limit_signals(df: pl.DataFrame, instruments: pl.DataFrame) -> pl.Dat
     df = df.join(inst_subset, on="symbol", how="left", suffix="_inst")
 
     # 计算换手率(%) = volume(手) * 10000 / float_shares(股)
-    if "float_shares" in df.columns and "volume" in df.columns:
+    if "turnover_rate" in want and "float_shares" in df.columns and "volume" in df.columns:
         df = df.with_columns(
             pl.when(pl.col("float_shares") > 0)
               .then(pl.col("volume") * 10000.0 / pl.col("float_shares"))
               .otherwise(None)
               .alias("turnover_rate")
         )
-    elif "turnover_rate" not in df.columns:
+    elif "turnover_rate" in want and "turnover_rate" not in df.columns:
         df = df.with_columns(pl.lit(None).cast(pl.Float64).alias("turnover_rate"))
 
     # 前一日参考收盘价（交易所涨跌停基准价）
     # 仅在 adj_factor 发生变化（除权除息 XD/DR）时使用前复权昨收作为交易所参考价;
     # 否则使用原始 raw_close.shift(1) 以避免浮点精度误差。
+    if not need_price_limits:
+        cleanup = [c for c in ("name", "float_shares", "limit_up", "limit_down") if c in df.columns]
+        return df.drop(cleanup)
+
     _adj_today = pl.col("close") / pl.col("raw_close")
     _adj_yesterday = pl.col("close").shift(1).over("symbol") / pl.col("raw_close").shift(1).over("symbol")
     _adj_changed = (_adj_today - _adj_yesterday).abs() > 1e-6
@@ -542,10 +739,11 @@ def compute_limit_signals(df: pl.DataFrame, instruments: pl.DataFrame) -> pl.Dat
         .alias("_board_pct")
     )
 
-    # ST → 5%（覆盖板块默认值）
+    # ST → 5%, 但仅限主板风险警示股; 创业板/科创板/北交所 ST 保留各自板块限幅
+    # (注册制改革后 创业板 300/301、科创板 688/689 的 ST 仍执行 20%, 北交所 30%)。
     if "_is_st" in df.columns:
         df = df.with_columns(
-            pl.when(pl.col("_is_st").fill_null(False))
+            pl.when(pl.col("_is_st").fill_null(False) & ~(is_chinext | is_star | is_bj))
             .then(0.05)
             .otherwise(pl.col("_board_pct"))
             .alias("_limit_pct")
@@ -565,105 +763,135 @@ def compute_limit_signals(df: pl.DataFrame, instruments: pl.DataFrame) -> pl.Dat
         .alias("_theoretical_limit_down")
     )
 
+    # 生效涨跌停价: 最新日优先使用维表权威值; 历史日期继续使用理论价。
+    # instruments 只有最新快照, 不能用于历史日期; >=10000 视为新股无涨跌停限制哨兵值。
+    _SENTINEL = 10000.0
+    is_latest_date = pl.col("date") == pl.col("date").max()
+    if "limit_up" in df.columns:
+        effective_limit_up = pl.when(
+            is_latest_date & pl.col("limit_up").is_not_null() & (pl.col("limit_up") < _SENTINEL)
+        ).then(pl.col("limit_up")).otherwise(pl.col("_theoretical_limit_up"))
+    else:
+        effective_limit_up = pl.col("_theoretical_limit_up")
+    if "limit_down" in df.columns:
+        effective_limit_down = pl.when(
+            is_latest_date & pl.col("limit_down").is_not_null() & (pl.col("limit_down") < _SENTINEL)
+        ).then(pl.col("limit_down")).otherwise(pl.col("_theoretical_limit_down"))
+    else:
+        effective_limit_down = pl.col("_theoretical_limit_down")
+    effective_exprs: list[pl.Expr] = []
+    if need_up:
+        effective_exprs.append(effective_limit_up.alias("_effective_limit_up"))
+    if need_down:
+        effective_exprs.append(effective_limit_down.alias("_effective_limit_down"))
+    df = df.with_columns(effective_exprs)
+
     # ── signal_limit_up ──
-    df = df.with_columns(
+    if need_up:
+        df = df.with_columns(
         pl.when(
             pl.col("_prev_raw_close").is_not_null()
             & (pl.col("_prev_raw_close") > 0)
             & (pl.col("raw_close") > 0)
         ).then(
-            (pl.col("raw_close") - pl.col("_theoretical_limit_up")).abs() < 0.005
+            pl.col("raw_close") >= (pl.col("_effective_limit_up") - 0.005)
         ).otherwise(None).cast(pl.Boolean)
         .alias("signal_limit_up")
-    )
+        )
 
     # ── consecutive_limit_ups ──
-    df = df.with_columns(
+    if "consecutive_limit_ups" in want:
+        df = df.with_columns(
         (~pl.col("signal_limit_up").fill_null(False))
         .cast(pl.UInt32)
         .cum_sum()
         .over("symbol")
         .alias("_grp_up")
-    ).with_columns(
+        ).with_columns(
         pl.col("signal_limit_up")
         .cast(pl.UInt32)
         .cum_sum()
         .over("symbol", "_grp_up")
         .cast(pl.UInt32)
         .alias("consecutive_limit_ups")
-    ).with_columns(
+        ).with_columns(
         pl.when(pl.col("signal_limit_up").fill_null(False))
         .then(pl.col("consecutive_limit_ups"))
         .otherwise(0)
         .cast(pl.UInt32)
         .alias("consecutive_limit_ups")
-    )
+        )
 
     # ── signal_limit_down ──
-    df = df.with_columns(
+    if need_down:
+        df = df.with_columns(
         pl.when(
             pl.col("_prev_raw_close").is_not_null()
             & (pl.col("_prev_raw_close") > 0)
             & (pl.col("raw_close") > 0)
         ).then(
-            (pl.col("raw_close") - pl.col("_theoretical_limit_down")).abs() < 0.005
+            pl.col("raw_close") <= (pl.col("_effective_limit_down") + 0.005)
         ).otherwise(None).cast(pl.Boolean)
         .alias("signal_limit_down")
-    )
+        )
 
     # ── consecutive_limit_downs ──
-    df = df.with_columns(
+    if "consecutive_limit_downs" in want:
+        df = df.with_columns(
         (~pl.col("signal_limit_down").fill_null(False))
         .cast(pl.UInt32)
         .cum_sum()
         .over("symbol")
         .alias("_grp_down")
-    ).with_columns(
+        ).with_columns(
         pl.col("signal_limit_down")
         .cast(pl.UInt32)
         .cum_sum()
         .over("symbol", "_grp_down")
         .cast(pl.UInt32)
         .alias("consecutive_limit_downs")
-    ).with_columns(
+        ).with_columns(
         pl.when(pl.col("signal_limit_down").fill_null(False))
         .then(pl.col("consecutive_limit_downs"))
         .otherwise(0)
         .cast(pl.UInt32)
         .alias("consecutive_limit_downs")
-    )
+        )
 
     # ── signal_limit_down_recovery (跌停翘板) ──
     # 条件: 当日最低价曾触及跌停价 + 最终没有跌停 + 收阳
-    df = df.with_columns(
+    if "signal_limit_down_recovery" in want:
+        df = df.with_columns(
         pl.when(
             pl.col("_prev_raw_close").is_not_null()
             & (pl.col("_prev_raw_close") > 0)
         ).then(
             (~pl.col("signal_limit_down").fill_null(False))              # 最终没跌停
-            & (pl.col("low") <= pl.col("_theoretical_limit_down") + 0.005)  # 曾触及跌停
+            & (pl.col("low") <= pl.col("_effective_limit_down") + 0.005)  # 曾触及跌停
             & (pl.col("close") > pl.col("open"))                          # 收阳
         ).otherwise(None).cast(pl.Boolean)
         .alias("signal_limit_down_recovery")
-    )
+        )
 
     # ── signal_broken_limit_up (炸板) ──
     # 条件: 最高价曾触及涨停价 + 最终没有封住涨停
-    df = df.with_columns(
+    if "signal_broken_limit_up" in want:
+        df = df.with_columns(
         pl.when(
             pl.col("_prev_raw_close").is_not_null()
             & (pl.col("_prev_raw_close") > 0)
             & (pl.col("raw_high") > 0)
         ).then(
             (~pl.col("signal_limit_up").fill_null(False))               # 最终没封住涨停
-            & (pl.col("raw_high") >= pl.col("_theoretical_limit_up") - 0.005)  # 曾触及涨停价
+            & (pl.col("raw_high") >= pl.col("_effective_limit_up") - 0.005)  # 曾触及涨停价
         ).otherwise(None).cast(pl.Boolean)
         .alias("signal_broken_limit_up")
-    )
+        )
 
     # 清理临时列 + JOIN 引入的 instruments 列 (不存入 enriched)
     cleanup = ["_prev_raw_close", "_board_pct", "_limit_pct",
                "_theoretical_limit_up", "_theoretical_limit_down",
+               "_effective_limit_up", "_effective_limit_down",
                "_grp_up", "_grp_down"]
     if "_is_st" in df.columns:
         cleanup.append("_is_st")
@@ -671,10 +899,12 @@ def compute_limit_signals(df: pl.DataFrame, instruments: pl.DataFrame) -> pl.Dat
     for c in df.columns:
         if c.endswith("_inst"):
             cleanup.append(c)
-    # name 和 float_shares 只用于计算, 不存入 enriched
-    for c in ["name", "float_shares"]:
+    # name / float_shares / limit_up / limit_down 只用于计算, 不存入 enriched
+    for c in ["name", "float_shares", "limit_up", "limit_down"]:
         if c in df.columns and c != "turnover_rate":
             cleanup.append(c)
+    internal_outputs = {"signal_limit_up", "signal_limit_down"} - want
+    cleanup.extend(c for c in internal_outputs if c in df.columns)
     df = df.drop([c for c in cleanup if c in df.columns])
 
     return df
@@ -808,7 +1038,7 @@ def run_pipeline(data_dir: Path | None = None,
     # 加载 instruments (涨跌停+换手率需要)
     instruments = pl.DataFrame()
     try:
-        instruments = pl.scan_parquet(inst_glob, cast_options=_cast).collect()
+        instruments = scan_parquet_compat(inst_glob, cast_options=_cast).collect()
     except Exception as e:  # noqa: BLE001
         logger.warning("instruments 读取失败: %s", e)
 
@@ -833,9 +1063,9 @@ def run_pipeline(data_dir: Path | None = None,
 
         # 2. 为新日期计算 enriched (所有标的)
         if new_date_dirs:
-            raw_new = pl.scan_parquet(new_date_dirs[0] / "*.parquet", cast_options=_cast)
+            raw_new = scan_daily_parquet(new_date_dirs[0] / "*.parquet", cast_options=_cast)
             for nd in new_date_dirs[1:]:
-                raw_new = pl.concat([raw_new, pl.scan_parquet(nd / "*.parquet", cast_options=_cast)], how="diagonal_relaxed")
+                raw_new = pl.concat([raw_new, scan_daily_parquet(nd / "*.parquet", cast_options=_cast)], how="diagonal_relaxed")
             raw_new = raw_new.sort(["symbol", "date"]).collect(streaming=True)
 
             # 增量模式: 只算新日期, 但指标需要历史窗口
@@ -883,7 +1113,7 @@ def run_pipeline(data_dir: Path | None = None,
         # 3. 受除权因子影响的个股: 重算全部已有日期 (累积因子链变了)
         if symbols:
             sym_set = set(symbols)
-            raw_sym = pl.scan_parquet(daily_glob, cast_options=_cast).sort(["symbol", "date"])
+            raw_sym = scan_daily_parquet(daily_glob, cast_options=_cast).sort(["symbol", "date"])
             raw_sym = raw_sym.filter(pl.col("symbol").is_in(list(sym_set)))
             raw_sym = raw_sym.collect(streaming=True)
             if not raw_sym.is_empty():
@@ -923,7 +1153,7 @@ def run_pipeline(data_dir: Path | None = None,
 
     # ── 按 symbol 分批处理: 每只股只有 ~244 行, 无冗余计算 ──
     # 先获取全部 symbol 列表
-    lf_all = pl.scan_parquet(daily_glob, cast_options=_cast)
+    lf_all = scan_daily_parquet(daily_glob, cast_options=_cast)
     if symbols:
         sym_set = set(symbols)
         lf_all = lf_all.filter(pl.col("symbol").is_in(list(sym_set)))
@@ -950,8 +1180,7 @@ def run_pipeline(data_dir: Path | None = None,
     SYM_BATCH = prefs_mod.get_enriched_batch_size()  # 每批 N 只 × ~244 天, 可在设置中调整
     total_batches = (total_syms + SYM_BATCH - 1) // SYM_BATCH
 
-    # 全量模式: 先清理旧 enriched 目录, 最后一次性按日期写入
-    # 收集所有批次结果, 按日期分区写入
+    # 全量模式: 收集所有批次结果, 最后按日期分区覆盖写入
     from collections import defaultdict
     date_buffers: dict[str, list[pl.DataFrame]] = defaultdict(list)
 
@@ -960,7 +1189,7 @@ def run_pipeline(data_dir: Path | None = None,
         batch_syms = all_symbols[batch_start:batch_end]
 
         # 只读取本批 symbol 的数据
-        lf_batch = pl.scan_parquet(daily_glob, cast_options=_cast)
+        lf_batch = scan_daily_parquet(daily_glob, cast_options=_cast)
         lf_batch = lf_batch.filter(pl.col("symbol").is_in(batch_syms))
         raw = lf_batch.sort(["symbol", "date"]).collect(streaming=True)
 
@@ -1018,9 +1247,17 @@ def run_pipeline(data_dir: Path | None = None,
 
     # 全量模式: 按日期分区写入
     if not symbols and date_buffers:
-        if base.exists():
-            import shutil
-            shutil.rmtree(base)
+        existing_dates = {
+            p.name.removeprefix("date=")
+            for p in base.glob("date=*")
+            if p.is_dir()
+        }
+        rebuilt_dates = set(date_buffers)
+        missing_dates = existing_dates - rebuilt_dates
+        if missing_dates:
+            sample = ", ".join(sorted(missing_dates)[:5])
+            raise RuntimeError(f"全量重建结果缺少已有日期分区,拒绝覆盖: {sample}")
+
         base.mkdir(parents=True, exist_ok=True)
 
         for ds, dfs in date_buffers.items():
@@ -1060,7 +1297,7 @@ def _load_recent_history(enriched_base: Path, symbols: list[str], days: int) -> 
 
     try:
         lf = (
-            pl.scan_parquet(str(enriched_base / "**" / "*.parquet"), cast_options=_cast)
+            scan_enriched_parquet(str(enriched_base / "**" / "*.parquet"), cast_options=_cast)
             .filter(
                 (pl.col("symbol").is_in(symbols))
                 & (pl.col("date") >= cutoff)
@@ -1102,6 +1339,7 @@ def compute_enriched_today(
     prev_enriched: pl.DataFrame,
     today_ohlcv: pl.DataFrame,
     instruments: pl.DataFrame | None = None,
+    elapsed_minutes: float | None = None,
 ) -> pl.DataFrame:
     """用昨天的递推状态 + 今天的 OHLCV 增量计算今天的 enriched 数据。
 
@@ -1112,6 +1350,8 @@ def compute_enriched_today(
         prev_enriched:  repo.get_enriched_latest() — 昨天的完整 enriched (用于信号交叉判断)
         today_ohlcv:    今天的 OHLCV (symbol, date, open, high, low, close, volume, amount)
         instruments:    维表 (涨跌停/换手率需要)
+        elapsed_minutes: 当日已交易分钟数(用于标准量比的时间折算)。
+            None 或 0 表示不折算(盘后或时间不可用, 此时 volume 已是全天量)。
 
     返回:
         今天的 enriched DataFrame (~5500 行, 64 列)
@@ -1247,12 +1487,21 @@ def compute_enriched_today(
         ])
 
     # ---- 量比 ----
+    # vol_ma5/vol_ma10 保留原语义(含当天的均量), 其他地方在用
     vol_ma5 = (pl.col("_vol_ma5_partial_sum") + pl.col("volume")) / 5
     vol_ma10 = (pl.col("_vol_ma10_partial_sum") + pl.col("volume")) / 10
+    # 标准量比(同花顺/东财): 今日累计成交量 / (前5日均量 × 已交易分钟数/240)
+    # _vol_ma5_prev_sum 是前5个交易日成交量之和(tail(5)), 不含当天
+    # 盘中 volume 是部分量, 按 elapsed_minutes 折算到全天量级
+    vol_ma5_prev = pl.col("_vol_ma5_prev_sum") / 5  # 前5日均量(不含当天)
+    if elapsed_minutes and elapsed_minutes > 0:
+        time_factor = 240.0 / elapsed_minutes  # 盘中折算: 部分量 → 全天量级
+    else:
+        time_factor = 1.0  # 盘后/无效时间: 不折算(此时 volume 已是全天量)
     df = df.with_columns([
         vol_ma5.alias("vol_ma5"),
         vol_ma10.alias("vol_ma10"),
-        (pl.col("volume") / vol_ma5).alias("vol_ratio_5d"),
+        ((pl.col("volume") * time_factor) / vol_ma5_prev).alias("vol_ratio_5d"),
     ])
 
     # ---- 极值 60 日 ----
@@ -1289,6 +1538,7 @@ def compute_enriched_today(
         sig_prev = prev_enriched.select(
             "symbol",
             pl.col("ma5").alias("_prev_ma5"),
+            pl.col("ma10").alias("_prev_ma10"),
             pl.col("ma20").alias("_prev_ma20"),
             pl.col("ma60").alias("_prev_ma60"),
             pl.col("macd_dif").alias("_prev_dif"),
@@ -1317,6 +1567,16 @@ def compute_enriched_today(
                 .alias("signal_ma20_breakout"),
             ((pl.col("close") < pl.col("ma20")) & (pl.col("_prev_close_enriched") >= pl.col("_prev_ma20")))
                 .alias("signal_ma20_breakdown"),
+            # MA5 突破/跌破
+            ((pl.col("close") > pl.col("ma5")) & (pl.col("_prev_close_enriched") <= pl.col("_prev_ma5")))
+                .alias("signal_ma5_breakout"),
+            ((pl.col("close") < pl.col("ma5")) & (pl.col("_prev_close_enriched") >= pl.col("_prev_ma5")))
+                .alias("signal_ma5_breakdown"),
+            # MA10 突破/跌破
+            ((pl.col("close") > pl.col("ma10")) & (pl.col("_prev_close_enriched") <= pl.col("_prev_ma10")))
+                .alias("signal_ma10_breakout"),
+            ((pl.col("close") < pl.col("ma10")) & (pl.col("_prev_close_enriched") >= pl.col("_prev_ma10")))
+                .alias("signal_ma10_breakdown"),
             # BOLL 突破
             (pl.col("close") >= pl.col("boll_upper")).alias("signal_boll_breakout_upper"),
             (pl.col("close") <= pl.col("boll_lower")).alias("signal_boll_breakdown_lower"),
@@ -1347,7 +1607,7 @@ def compute_enriched_today(
         "_high_59d", "_low_59d",
         "_close_5d_ago", "_close_10d_ago", "_close_20d_ago",
         "_close_30d_ago", "_close_60d_ago",
-        "_vol_ma5_partial_sum", "_vol_ma10_partial_sum",
+        "_vol_ma5_partial_sum", "_vol_ma10_partial_sum", "_vol_ma5_prev_sum",
         "_kdj_8d_low", "_kdj_8d_high",
         "_window_len",
         "_rsi_avg_gain_6", "_rsi_avg_loss_6",
@@ -1360,9 +1620,15 @@ def compute_enriched_today(
     ]
     df = df.drop([c for c in drop_cols if c in df.columns])
 
-    # 自定义信号（日级实时路径同样注入）
+    # 自定义信号（日级实时路径同样注入, 但不支持日期偏移条件 → allow_shift=False）
     from app.strategy import custom_signals
-    df = custom_signals.inject(df, _get_custom_signal_exprs())
+    try:
+        sigs = custom_signals.load_all(settings.data_dir)
+        today_exprs = custom_signals.build_expressions(sigs, allow_shift=False)
+    except Exception as e:
+        logger.warning("custom signals load failed (today): %s", e)
+        today_exprs = {}
+    df = custom_signals.inject(df, today_exprs)
 
     # 清理 NaN / Inf
     float_cols = [c for c in df.columns if df[c].dtype.is_float()]
@@ -1426,7 +1692,10 @@ def _compute_limit_signals_today(df: pl.DataFrame, instruments: pl.DataFrame) ->
         .otherwise(0.10)
     )
     if "_is_st" in df.columns:
-        limit_pct = pl.when(pl.col("_is_st").fill_null(False)).then(0.05).otherwise(limit_pct)
+        # ST 5% 仅主板生效; 创业板/科创板/北交所 ST 保留板块限幅 (同 compute_limit_signals)
+        limit_pct = pl.when(
+            pl.col("_is_st").fill_null(False) & ~(is_chinext | is_star | is_bj)
+        ).then(0.05).otherwise(limit_pct)
     limit_pct = limit_pct.alias("_limit_pct")
 
     limit_up_price = _limit_price(prev_raw, limit_pct, up=True)

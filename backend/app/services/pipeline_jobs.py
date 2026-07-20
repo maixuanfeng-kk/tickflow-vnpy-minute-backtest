@@ -26,7 +26,16 @@ JobStatus = Literal["pending", "running", "succeeded", "failed"]
 # 运行超过此秒数视为卡死(reload 后孤儿 task / 网络读无限阻塞等)。
 # 由 reap_stale() 在 /run 和 /jobs/{id} 轮询端点检查 — 保证卡死后能自愈,
 # 无需用户再次点击「同步」。
-STALE_JOB_TIMEOUT_S = 600
+#
+# 超时阈值按任务类型区分:
+#   - 普通任务(日K管道/扩展/修正/重算): 1200s (20 分钟)
+#   - 长任务(分钟K全市场同步,数据量是日K的 ~240 倍): 1800s (30 分钟)
+# 分钟K即使流式落盘后仍可能跑十几到数十分钟(限速 sleep 是主因),
+# 用 600s 会误杀正常任务并留下写盘僵尸线程。
+DEFAULT_JOB_TIMEOUT_S = 1200
+LONG_JOB_TIMEOUT_S = 1800
+# 向后兼容: 旧调用方引用 STALE_JOB_TIMEOUT_S
+STALE_JOB_TIMEOUT_S = DEFAULT_JOB_TIMEOUT_S
 
 
 def _default_store_dir() -> Path:
@@ -96,10 +105,24 @@ class JobStore:
 
     # ===== lifecycle =====
 
-    def create(self) -> str:
+    def create(self, timeout_s: int = DEFAULT_JOB_TIMEOUT_S) -> tuple[str, bool]:
+        """单飞创建任务。返回 (job_id, is_new)。
+
+        去重条件为 **pending ∨ running**(而非仅 running):`/run` 先 create() 再在
+        后台任务里 start() 置 running,两者之间存在 pending 窗口。旧实现只在 running 时
+        复用,两次快速点击时首个 job 仍是 pending → 第二次绕过去重、另起并发任务、覆盖
+        _active_id,导致两条全市场拉取同时读改写同一 parquet。纳入 pending 后该窗口关闭。
+
+        is_new=False 表示复用了已有活跃任务,调用方**不得**再调度新的后台任务。
+
+        timeout_s: reap_stale 判定卡死的阈值。普通任务默认 1200s;
+            分钟K全市场同步等长任务传 LONG_JOB_TIMEOUT_S (1800s)。
+        """
         with self._lock:
-            if self._active_id and self._active_jobs.get(self._active_id, {}).get("status") == "running":
-                return self._active_id
+            if self._active_id:
+                active = self._active_jobs.get(self._active_id)
+                if active and active.get("status") in ("pending", "running"):
+                    return self._active_id, False
 
             job_id = uuid.uuid4().hex[:10]
             self._active_jobs[job_id] = {
@@ -114,9 +137,10 @@ class JobStore:
                 "duration_s": None,
                 "result": None,
                 "error": None,
+                "timeout_s": timeout_s,
             }
             self._active_id = job_id
-            return job_id
+            return job_id, True
 
     def start(self, job_id: str) -> None:
         with self._lock:
@@ -213,12 +237,16 @@ class JobStore:
     def active_id(self) -> str | None:
         return self._active_id
 
-    def reap_stale(self, timeout_s: int = STALE_JOB_TIMEOUT_S) -> None:
-        """回收运行超过 timeout_s 的卡死 running job(标记为 failed)。
+    def reap_stale(self, timeout_s: int | None = None) -> None:
+        """回收运行超过阈值(卡死)的 running job(标记为 failed)。
 
         在 /run 和 /jobs/{id} 轮询端点都会调用 — 保证卡死后任意轮询都能自愈,
         无需用户再次手动触发同步。reload 后的孤儿 task(内存里已无 job 记录)
         不在此处理:它们没有 active_id,只能靠 executor 线程自然结束或进程重启。
+
+        timeout_s: 显式覆盖。None 时用 job 自身 create() 时存的 timeout_s,
+        缺失则回退 DEFAULT_JOB_TIMEOUT_S。分钟K长任务在 create 时存了更大阈值,
+        不被普通任务的 1200s 误杀。
         """
         with self._lock:
             jid = self._active_id
@@ -230,6 +258,8 @@ class JobStore:
             started = j.get("started_at")
             if not started:
                 return
+            # 优先用显式传入, 其次 job 自身阈值, 最后默认值
+            effective_timeout = timeout_s if timeout_s is not None else j.get("timeout_s", DEFAULT_JOB_TIMEOUT_S)
         # 时间计算放到锁外(避免 datetime 解析持锁)。
         # started_at 形如 "2026-07-04T12:00:00Z"(start() 用 datetime.utcnow 存)。
         # 两端都用 timezone-aware UTC 比较,避免 naive/aware 混用导致 TypeError。
@@ -238,10 +268,16 @@ class JobStore:
             elapsed = (datetime.now(start_dt.tzinfo) - start_dt).total_seconds()
         except Exception:  # noqa: BLE001
             return
-        if elapsed > timeout_s:
-            logger.warning("reap_stale: 强制取消卡死 job %s (已运行 %.0fs)",
-                           jid, elapsed)
+        if elapsed > effective_timeout:
+            logger.warning("reap_stale: 强制取消卡死 job %s (已运行 %.0fs, 阈值 %ss)",
+                           jid, elapsed, effective_timeout)
             self.fail(jid, f"超时自动取消 (运行 {int(elapsed)}s, 疑似卡死)")
+            # 强制释放重任务锁: 卡死的线程无法被中断, 锁永远不会自然释放。
+            # job 已标记 failed, 即使僵尸线程后续写入 parquet, 下次拉取会覆盖, 安全。
+            try:
+                _heavy_run_lock.release()
+            except RuntimeError:
+                pass
 
     def clear(self) -> None:
         """清空所有任务（内存 + 磁盘文件）。"""
@@ -283,3 +319,32 @@ def _duration_s(j: dict[str, Any]) -> float | None:
 
 # 进程内单例
 job_store = JobStore()
+
+
+# ================================================================
+# 重任务互斥锁 — 防「僵尸并发」
+# ================================================================
+# create() 的单飞去重能挡住 pending/running 窗口内的重复点击, 但挡不住
+# reap_stale 把卡死 job 标记 failed、清掉 _active_id 之后 —— 此时 executor
+# 线程仍在跑(线程无法被中断), 下一次 /run 会视作无活跃任务而另起一条,
+# 与僵尸线程并发读改写同一 parquet。
+#
+# 该锁绑定「实际执行体(协程/线程)」的生命周期而非 job 状态: 每个重任务在真正
+# 开跑前 try_acquire_run_slot(), 结束(含异常)在 finally 里 release_run_slot()。
+# 僵尸任务因卡在 executor await 中始终未 release, 新任务 try_acquire 失败 → 快速
+# 失败而非并发执行。代价: 真卡死时需重启进程才能再次跑重任务(优先保证数据不损坏)。
+_heavy_run_lock = threading.Lock()
+
+
+def try_acquire_run_slot() -> bool:
+    """尝试占用重任务执行槽(非阻塞)。成功返回 True。"""
+    return _heavy_run_lock.acquire(blocking=False)
+
+
+def release_run_slot() -> None:
+    """释放重任务执行槽(允许跨线程释放)。"""
+    try:
+        _heavy_run_lock.release()
+    except RuntimeError:
+        # 未持有(重复释放)—— 幂等忽略
+        pass

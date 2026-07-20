@@ -13,6 +13,7 @@
   pyinstaller packaging/tickflow.spec           # 产物在 dist/TickFlowStockPanel/
 """
 import sys
+from importlib.util import find_spec
 from pathlib import Path
 
 from PyInstaller.utils.hooks import (
@@ -31,6 +32,7 @@ ROOT = Path(SPECPATH).parent
 FRONTEND_DIST = str(ROOT / "frontend" / "dist")
 TIERS_YAML = str(ROOT / "tiers.yaml")
 BUILTIN_STRATEGIES = str(ROOT / "backend" / "app" / "strategy" / "builtin")
+FINSIGHT_RUNNER = str(ROOT / "backend" / "app" / "scripts" / "finsight_job_runner.py")
 # 图标按平台选: Windows 用 .ico, macOS 用 .icns (PyInstaller 对 .ico 在
 # mac 上静默忽略, 不换格式 Dock/Finder 会显示通用图标)。两者都由
 # packaging/generate_icon.py 一并生成。
@@ -48,20 +50,17 @@ for pkg in ("polars", "pyarrow", "duckdb", "fastexcel"):
     binaries += b
     hiddenimports += h
 
-# polars-runtime-32 (rtcompat 兼容内核): release.yml 用 --extra legacy-cpu 安装。
-# 它是独立的伴侣二进制包 (含 .pyd/.so), 与 polars 主包分开发布,
-# collect_all("polars") 抓不到它的目录 —— 必须显式收集, 否则老 CPU 用户
-# 运行时 rtcompat 加载器找不到兼容库仍会崩 (Illegal instruction)。
-# 不存在时 (未装 legacy-cpu) collect_all 返回空, 不影响普通构建。
-try:
-    rt_d, rt_b, rt_h = collect_all("polars_runtime_32")
-    datas += rt_d
-    binaries += rt_b
-    hiddenimports += rt_h
-except Exception:
-    pass
+# Polars 的发行包名为 polars-runtime-32 / polars-runtime-compat, 但实际
+# Python 导入包带前导下划线。release.yml 安装 legacy-cpu 后必须收集二者，
+# 否则 onedir 产物无法在没有 AVX2/FMA 的旧 CPU 上加载兼容内核。
+for pkg in ("_polars_runtime_32", "_polars_runtime_compat"):
+    if find_spec(pkg) is not None:
+        rt_d, rt_b, rt_h = collect_all(pkg)
+        datas += rt_d
+        binaries += rt_b
+        hiddenimports += rt_h
 
-# polars 新 ABI 运行时目录 (_polars_runtime_32) 需显式收集子模块
+# Polars 新 ABI 运行时由加载器选择，需显式收集子模块。
 hiddenimports += collect_submodules("polars")
 
 # ── pywebview 平台后端 (动态导入, PyInstaller 默认抓不到) ────────────
@@ -117,6 +116,8 @@ datas += [(FRONTEND_DIST, "static")]
 datas += [(TIERS_YAML, ".")]
 # 内置策略 → app/strategy/builtin/ (importlib 动态加载, 不能进 PYZ)
 datas += [(BUILTIN_STRATEGIES, "app/strategy/builtin")]
+# FinSight runner 由后台以独立 Python 进程执行，必须保留为实体脚本文件。
+datas += [(FINSIGHT_RUNNER, "app/scripts")]
 
 # ── 排除不需要的重型依赖 (主包不含 vectorbt 回测链) ──────────────────
 excludes = [

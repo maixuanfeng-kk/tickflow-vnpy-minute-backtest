@@ -42,8 +42,14 @@ export const storage = {
   /** 自选列表日K蜡烛图显示状态 */
   watchlistCandle:      kv<boolean>('watchlist_showCandle'),
 
+  /** 自选列表分时图显示状态 */
+  watchlistIntraday:    kv<boolean>('watchlist_showIntraday'),
+
   /** 策略结果列表日K蜡烛图显示状态 */
   screenerCandle:       kv<boolean>('screener_showCandle'),
+
+  /** 策略结果列表分时图显示状态 */
+  screenerIntraday:     kv<boolean>('screener_showIntraday'),
 
   /** 自选列表板块筛选 */
   watchlistBoardFilter: kv<string[]>('watchlist_boardFilter'),
@@ -67,13 +73,13 @@ export const storage = {
   limitLadderSealMode:  kv<'vol' | 'amount'>('limit-ladder-seal-mode'),
 
   /** 策略创建草稿（新建专用） */
-  strategyDraft: kv<{ name: string; description: string; direction: string; style?: string; rules: string; code: string; step: number; strategyId: string } | null>('strategy-draft'),
+  strategyDraft: kv<{ name: string; description: string; direction: string; style?: string; rules: string; code: string; step: number; strategyId: string; source?: 'ai' | 'custom' } | null>('strategy-draft'),
 
   /** 策略修改草稿（AI修改专用，不影响创建按钮） */
-  strategyModify: kv<{ name: string; description: string; direction: string; style?: string; rules: string; code: string; step: number; strategyId: string } | null>('strategy-modify'),
+  strategyModify: kv<{ name: string; description: string; direction: string; style?: string; rules: string; code: string; step: number; strategyId: string; source?: 'ai' | 'custom' } | null>('strategy-modify'),
 
   /** 策略构建器草稿（旧版兼容，逐渐废弃） */
-  strategyBuilderDraft: kv<{ name: string; description: string; direction: string; style?: string; rules: string; code: string; step: number; strategyId: string } | null>('strategy-builder-draft'),
+  strategyBuilderDraft: kv<{ name: string; description: string; direction: string; style?: string; rules: string; code: string; step: number; strategyId: string; source?: 'ai' | 'custom' } | null>('strategy-builder-draft'),
 
   /** 已保存策略的原始规则（策略ID → 规则文本） */
   strategyRules: kv<Record<string, string>>('strategy-rules'),
@@ -85,6 +91,7 @@ export const storage = {
   strategyBacktestLast: kv<{
     selectedStrategy: string | null
     symbols: string
+    assetType?: 'stock' | 'etf'
     start: string
     end: string
     matching: 'close_t' | 'open_t+1'

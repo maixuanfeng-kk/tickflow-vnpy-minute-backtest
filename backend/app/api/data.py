@@ -680,30 +680,9 @@ def clear_data(request: Request):
     from app.api.overview import invalidate_overview_cache
     invalidate_overview_cache()
 
-    # 刷新 DuckDB 视图（空 parquet 目录也需要重新挂载）
-    d = data_dir.as_posix()
-    for name, path in {
-        "kline_daily": f"{d}/kline_daily/**/*.parquet",
-        "kline_enriched": f"{d}/kline_daily_enriched/**/*.parquet",
-        "kline_index_daily": f"{d}/kline_index_daily/**/*.parquet",
-        "kline_index_enriched": f"{d}/kline_index_enriched/**/*.parquet",
-        "kline_etf_daily": f"{d}/kline_etf_daily/**/*.parquet",
-        "kline_etf_enriched": f"{d}/kline_etf_enriched/**/*.parquet",
-        "kline_etf_minute": f"{d}/kline_etf_minute/**/*.parquet",
-        "kline_minute": f"{d}/kline_minute/**/*.parquet",
-        "adj_factor": f"{d}/adj_factor/**/*.parquet",
-        "adj_factor_etf": f"{d}/adj_factor_etf/**/*.parquet",
-        "instruments": f"{d}/instruments/**/*.parquet",
-        "instruments_index": f"{d}/instruments_index/**/*.parquet",
-        "instruments_etf": f"{d}/instruments_etf/**/*.parquet",
-    }.items():
-        try:
-            repo.db.execute(
-                f"CREATE OR REPLACE VIEW {name} AS "
-                f"SELECT * FROM read_parquet('{path}', union_by_name=true)"
-            )
-        except Exception:
-            pass
+    # 刷新 DuckDB 视图（空 parquet 目录也需要重新挂载）——
+    # 委托给 repository 的唯一权威实现, 覆盖全部视图 (此前这里内联的副本漏了几张)。
+    repo.rebuild_views()
 
     logger.info("数据已清除: 删除 %d 个 parquet 文件", deleted)
     invalidate_data_cache(None)
@@ -862,3 +841,22 @@ def get_version(request: Request) -> dict:
             return {"version": v}
 
     return {"version": "v0.0.0"}
+
+
+@router.post("/refresh-cache")
+def refresh_cache(request: Request) -> dict:
+    """重建 Polars 内存缓存 (clear + refresh), 不清数据、不清 alerts。
+
+    用于跨天后缓存残留、或维表更新后手动刷新场景。
+    与设置页「清理并刷新」的区别: 那个清前端 react-query, 这个重建后端 enriched 缓存。
+    """
+    repo = request.app.state.repo
+    repo.clear_cache()
+    repo.refresh_cache()
+    # 清除 Overview 总览聚合结果缓存 + Screener 历史 TTL 缓存
+    from app.api.overview import invalidate_overview_cache
+    invalidate_overview_cache()
+    from app.services.screener import ScreenerService
+    ScreenerService.clear_history_cache()
+    logger.info("refresh-cache: Polars 缓存已重建")
+    return {"ok": True}

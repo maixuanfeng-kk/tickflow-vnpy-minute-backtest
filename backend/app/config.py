@@ -63,6 +63,7 @@ def _project_root() -> Path:
 
 _PROJECT_ROOT = _project_root()
 _RESOURCE_ROOT = _resource_root()
+_RUNTIME_ROOT = Path(sys.executable).resolve().parent if _IS_FROZEN else _PROJECT_ROOT
 
 
 class Settings(BaseSettings):
@@ -77,10 +78,11 @@ class Settings(BaseSettings):
 
     # AI
     ai_provider: str = "openai_compat"
-    ai_base_url: str = "https://api.alysc.top"
+    ai_base_url: str = "https://api.zhaji.dev/v1"
     ai_api_key: str = ""
     ai_model: str = "gpt-5.5"
     ai_codex_command: str = "codex"
+    ai_codex_reasoning_effort: str = ""
     # 默认浏览器风格 UA,绕过 Cloudflare 等 CDN/WAF 的 Bot 拦截(Issue #8)。
     # 用户可在 AI 设置页按需修改。
     ai_user_agent: str = (
@@ -94,6 +96,10 @@ class Settings(BaseSettings):
     port: int = 3018
     log_level: str = "INFO"
     backtest_range_guard: bool = False
+    backtest_matrix_disk_cache_enabled: bool = True
+    backtest_matrix_cache_max_mb: int = 512
+    backtest_matrix_cache_prewarm: bool = True
+    backtest_matrix_cache_prewarm_years: int = 5
 
     # Auth — 首次启动时预置访问密码(明文, 仅用于初始化, 详见 services/auth.bootstrap_from_env)
     # 公网服务器部署时免去 SSH 端口转发设密码的麻烦。写入 auth.json(哈希)后即不再读取。
@@ -109,12 +115,27 @@ class Settings(BaseSettings):
     # 静态文件(前端 dist) — frozen: 资源目录的 static/; 非 frozen: frontend/dist
     static_dir: Path = _RESOURCE_ROOT / "static" if _IS_FROZEN else (_PROJECT_ROOT / "frontend" / "dist")
 
+    # FinSight 深度研报（独立 runtime；必须通过环境变量显式配置）
+    finsight_root: Path | None = None
+    finsight_python: Path | None = None
+    finsight_max_concurrent: int = 1
+
     @model_validator(mode="after")
     def _resolve_paths(self) -> Settings:
         """确保 data_dir 是绝对路径（环境变量传入的相对路径基于项目根目录解析）。"""
         if not self.data_dir.is_absolute():
             # 相对路径基于项目根目录解析，而非 CWD
             self.data_dir = (_PROJECT_ROOT / self.data_dir).resolve()
+        if self.finsight_root is not None and not self.finsight_root.is_absolute():
+            self.finsight_root = (_RUNTIME_ROOT / self.finsight_root).resolve()
+        if self.finsight_python is not None and not self.finsight_python.is_absolute():
+            self.finsight_python = (_RUNTIME_ROOT / self.finsight_python).resolve()
+        if self.finsight_max_concurrent <= 0:
+            raise ValueError("finsight_max_concurrent must be positive")
+        if self.backtest_matrix_cache_max_mb <= 0:
+            raise ValueError("backtest_matrix_cache_max_mb must be positive")
+        if self.backtest_matrix_cache_prewarm_years <= 0:
+            raise ValueError("backtest_matrix_cache_prewarm_years must be positive")
         return self
 
     @property

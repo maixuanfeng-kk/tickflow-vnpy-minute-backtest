@@ -1,14 +1,12 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, Suspense } from 'react'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
-import { useQuoteStream } from '@/lib/useQuoteStream'
+import { useQuoteStream, useQuoteStreamStatus } from '@/lib/useQuoteStream'
 import { ToastContainer } from '@/components/Toast'
 import { AlertToastContainer } from '@/components/AlertToast'
 import { AiAnalysisHost } from '@/components/financials/AiAnalysisHost'
 import { AiReportBubble } from '@/components/financials/AiReportBubble'
-import { StockAnalysisHost } from '@/components/stock-analysis/StockAnalysisHost'
-import { StockAnalysisBubble } from '@/components/stock-analysis/StockAnalysisBubble'
 import {
   useCapabilities,
   useSettings,
@@ -38,7 +36,6 @@ import {
   Sparkles,
   Layers3,
   Landmark,
-  Cable,
   RadioTower,
   CheckCircle2,
   BookOpenCheck,
@@ -46,6 +43,7 @@ import {
   Sun,
   Moon,
   X,
+  WifiOff,
 } from 'lucide-react'
 import { Logo } from './Logo'
 import { api, type IndexQuote } from '@/lib/api'
@@ -71,7 +69,7 @@ const nav = [
   { to: '/watchlist',  label: '自选',   icon: Star },
   { to: '/screener',   label: '策略',   icon: ScanSearch },
   { to: '/backtest',   label: '回测',   icon: History },
-  { to: '/stock-analysis',    label: '个股分析', icon: TrendingUp },
+  { to: '/stock-analysis',    label: '深度研报', icon: TrendingUp },
   { to: '/limit-ladder', label: '连板梯队', icon: Flame },
   { to: '/concept-analysis', label: '概念分析', icon: Layers3 },
   { to: '/industry-analysis', label: '行业分析', icon: Landmark },
@@ -79,7 +77,6 @@ const nav = [
   { to: '/monitor', label: '监控中心', icon: RadioTower },
   { to: '/review',      label: '复盘',   icon: BookOpenCheck },
   { to: '/indices', label: '指数', icon: BarChart3 },
-  { to: '/trading', label: '交易', icon: Cable },
   { to: '/data',       label: '数据',   icon: Database },
 ] as const
 
@@ -90,11 +87,10 @@ function ThemeToggle() {
   return (
     <button
       onClick={() => toggleTheme()}
-      className="flex w-full items-center gap-3 rounded-btn px-3 py-2 text-sm text-foreground/80 transition-colors duration-150 ease-smooth hover:bg-elevated hover:text-foreground cursor-pointer"
+      className="flex items-center justify-center rounded-btn p-2 text-foreground/80 transition-colors duration-150 ease-smooth hover:bg-elevated hover:text-foreground cursor-pointer"
       title={dark ? '切换到亮色模式' : '切换到暗色模式'}
     >
       {dark ? <Sun className="h-4 w-4 shrink-0" /> : <Moon className="h-4 w-4 shrink-0" />}
-      <span>{dark ? '亮色模式' : '暗色模式'}</span>
     </button>
   )
 }
@@ -151,7 +147,7 @@ function SidebarIndexQuotes({ rows, items }: { rows: IndexQuote[] | undefined; i
               <span className="text-[10px] text-secondary">{item.name}</span>
               <span className={`text-[10px] font-mono ${indexPctClass(pct)}`}>{fmtIndexPct(pct)}</span>
             </div>
-            <div className="mt-0.5 truncate font-mono text-[10px] text-foreground/80">
+            <div className={`mt-0.5 truncate font-mono text-[10px] ${indexPctClass(pct)}`}>
               {fmtIndexValue(value)}
             </div>
           </NavLink>
@@ -338,10 +334,14 @@ export function Layout() {
 
   // SSE: 行情更新时自动刷新相关 queries + 告警通知
   useQuoteStream(realtimeEnabled, prefs?.sse_refresh_pages)
+  // 实时 SSE 连接状态 — 断开时底部显示提示, 提示可能漏策略告警
+  const streamStatus = useQuoteStreamStatus()
 
   const toggleQuote = useToggleRealtimeQuotes()
   const isRunning = quoteStatus?.running ?? false
   const isTrading = quoteStatus?.is_trading_hours ?? false
+  // 管道/数据修正运行期间实时行情被临时暂停 — 此时禁止开启
+  const isPaused = quoteStatus?.paused ?? false
   const tier = tierRank(caps?.label ?? '')
   const isNoneTier = tier < 0
   const isWatchlistMode = tier === 0
@@ -476,12 +476,6 @@ export function Layout() {
                 <>
                   <Icon className="h-4 w-4 shrink-0" />
                   <span className="flex-1">{label}</span>
-                  {/* 个股分析 Beta 标识 */}
-                  {(to === '/stock-analysis' || to === '/review') && (
-                    <span className="inline-flex items-center rounded-full border border-amber-400/30 bg-amber-400/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-amber-400 shrink-0">
-                      Beta
-                    </span>
-                  )}
                   {/* 数据同步状态: 同步中转圈, 刚完成显示绿色对勾闪烁 3 秒 */}
                   {to === '/data' && isDataSyncing && (
                     <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-accent" />
@@ -587,12 +581,13 @@ export function Layout() {
               </div>
               <button
                 onClick={() => handleToggle(!realtimeEnabled)}
-                disabled={toggleQuote.isPending}
+                disabled={toggleQuote.isPending || isPaused}
+                title={isPaused ? '数据同步运行中，实时行情已临时暂停' : undefined}
                 className={`relative inline-flex h-4 w-7 items-center rounded-full shrink-0 transition-colors duration-200 ${
                   realtimeEnabled
                     ? 'bg-accent shadow-[0_0_6px_rgba(59,130,246,0.3)]'
                     : 'bg-elevated'
-                } ${toggleQuote.isPending ? 'opacity-50' : 'cursor-pointer'}`}
+                } ${toggleQuote.isPending || isPaused ? 'opacity-50' : 'cursor-pointer'}`}
               >
                 <span className={`inline-block h-3 w-3 rounded-full bg-white shadow-sm transition-transform duration-200 ${
                   realtimeEnabled ? 'translate-x-[14px]' : 'translate-x-0.5'
@@ -616,7 +611,9 @@ export function Layout() {
                   </button>
                 </div>
               )}
-              {isRunning && isTrading ? (
+              {isPaused ? (
+                <div className="text-warning/80">数据同步运行中，实时行情已临时暂停</div>
+              ) : isRunning && isTrading ? (
                 <div className="text-accent">行情运行中</div>
               ) : realtimeEnabled && !isTrading ? (
                 <div className="text-warning/70">非交易时段，将在交易时间自动开启</div>
@@ -628,27 +625,29 @@ export function Layout() {
           )}
         </div>
 
-        <div className="border-t border-border px-2 py-3 space-y-0.5 shrink-0">
-          <ThemeToggle />
-          <NavLink
-            to="/settings"
-            className={({ isActive }) =>
-              cn(
-                'flex items-center justify-between gap-3 px-3 py-2 rounded-btn text-sm transition-colors duration-150 ease-smooth',
-                isActive
-                  ? 'bg-elevated text-foreground font-medium'
-                  : 'text-foreground/80 hover:bg-elevated hover:text-foreground',
-              )
-            }
-          >
-            <span className="flex items-center gap-3">
-              <Settings className="h-4 w-4 shrink-0" />
-              <span>设置</span>
-            </span>
-            <span className="font-mono text-[10px] text-muted/50 select-none">
-              {version ?? ''}
-            </span>
-          </NavLink>
+        <div className="border-t border-border px-2 py-3 shrink-0">
+          <div className="flex items-center gap-1">
+            <ThemeToggle />
+            <NavLink
+              to="/settings"
+              className={({ isActive }) =>
+                cn(
+                  'flex flex-1 items-center justify-between gap-3 px-3 py-2 rounded-btn text-sm transition-colors duration-150 ease-smooth',
+                  isActive
+                    ? 'bg-elevated text-foreground font-medium'
+                    : 'text-foreground/80 hover:bg-elevated hover:text-foreground',
+                )
+              }
+            >
+              <span className="flex items-center gap-3">
+                <Settings className="h-4 w-4 shrink-0" />
+                <span>设置</span>
+              </span>
+              <span className="font-mono text-[10px] text-muted/50 select-none">
+                {version ?? ''}
+              </span>
+            </NavLink>
+          </div>
         </div>
       </aside>
 
@@ -658,14 +657,30 @@ export function Layout() {
         transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
         className="h-full overflow-auto scrollbar-gutter-stable"
       >
-        <Outlet />
+        {streamStatus === 'reconnecting' && (
+          <div
+            role="status"
+            aria-live="polite"
+            className="fixed bottom-4 left-1/2 z-[9998] flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-warning/30 bg-warning/10 px-2.5 py-1 text-[11px] font-medium text-warning shadow-lg backdrop-blur-md"
+          >
+            <WifiOff className="h-3 w-3 shrink-0 animate-pulse" />
+            与服务连接已断开 · 正在重连
+          </div>
+        )}
+        <Suspense
+          fallback={
+            <div className="flex items-center justify-center py-24">
+              <Loader2 className="h-5 w-5 animate-spin text-muted" />
+            </div>
+          }
+        >
+          <Outlet />
+        </Suspense>
       </motion.main>
       <ToastContainer />
       <AlertToastContainer />
       <AiAnalysisHost />
       <AiReportBubble />
-      <StockAnalysisHost />
-      <StockAnalysisBubble />
     </div>
   )
 }

@@ -50,7 +50,7 @@ def get_indices_nav_pinned() -> bool:
 
 
 def get_realtime_quote_interval() -> float:
-    return load().get("realtime_quote_interval", 10.0)
+    return load().get("realtime_quote_interval", 6.0)
 
 
 def get_realtime_watchlist_symbols() -> list[str]:
@@ -90,8 +90,97 @@ def get_minute_sync_enabled() -> bool:
     return load().get("minute_sync_enabled", False)
 
 
+def get_minute_intraday_refresh() -> bool:
+    """自选列表分时图是否跟随实时行情刷新。
+
+    默认值随权限: 有实时行情权限 (Pro+) 的用户默认开启, 否则关闭。
+    用户主动设置过的 (key 存在) 以用户选择为准, 即使是 False 也尊重。
+    """
+    data = load()
+    if "minute_intraday_refresh" in data:
+        return bool(data["minute_intraday_refresh"])
+    # 未设置过: 有权限默认开, 无权限默认关。
+    try:
+        from app.services.quote_service import QuoteService
+        return QuoteService.is_realtime_allowed()
+    except Exception:
+        return False
+
+
+# 分时图实时刷新间隔允许范围 (秒)。下限 3s, 上限 60s。
+_INTRADAY_REFRESH_INTERVAL_MIN = 3
+_INTRADAY_REFRESH_INTERVAL_MAX = 60
+
+
+def get_minute_intraday_refresh_interval() -> int:
+    """分时图实时刷新轮询间隔 (秒)。默认 6s, 范围 [3, 60]。"""
+    return max(_INTRADAY_REFRESH_INTERVAL_MIN,
+               min(_INTRADAY_REFRESH_INTERVAL_MAX,
+                   int(load().get("minute_intraday_refresh_interval", 6))))
+
+
+# 监控中心个股通知 ext 字段默认配置 (与 ext_presets 内置预设对齐)
+_MONITOR_EXT_FIELDS_DEFAULT = {
+    "concept": "ext_gn_ths.所属概念",
+    "industry": "ext_hy_ths.所属同话顺行业",
+}
+
+
+def _normalize_ext_field(raw) -> dict | None:
+    """规范化单个 ext 字段配置, 兼容旧字符串格式 ("id.field") 和新对象格式。
+
+    新格式: {"field": "id.field", "maxTags": N, "hiddenIndices": [...]}
+    maxTags=0 或缺省=不限制; hiddenIndices 指定要隐藏的位置 (0-based)。
+    """
+    if raw is None:
+        return None
+    # 旧格式: 纯字符串 "configId.fieldName"
+    if isinstance(raw, str):
+        return {"field": raw}
+    if isinstance(raw, dict):
+        field = raw.get("field")
+        if not field:
+            return None
+        return {
+            "field": field,
+            "maxTags": int(raw["maxTags"]) if raw.get("maxTags") else 0,
+            "hiddenIndices": [int(i) for i in raw["hiddenIndices"]] if raw.get("hiddenIndices") else [],
+        }
+    return None
+
+
+def get_monitor_ext_fields() -> dict:
+    """监控中心个股通知要展示的 ext 字段 (concept/industry)。
+
+    返回 {"concept": {"field", "maxTags", "hiddenIndices"} | None, ...}。
+    后端只需读 .field 构建 ext_columns; maxTags/hiddenIndices 供前端渲染裁剪。
+    兼容旧字符串格式 ("id.field") 自动升级。
+    """
+    data = load()
+    raw = data.get("monitor_ext_fields")
+    if raw is None:
+        return {
+            "concept": {"field": _MONITOR_EXT_FIELDS_DEFAULT["concept"]},
+            "industry": {"field": _MONITOR_EXT_FIELDS_DEFAULT["industry"]},
+        }
+    return {
+        "concept": _normalize_ext_field(raw.get("concept")),
+        "industry": _normalize_ext_field(raw.get("industry")),
+    }
+
+
 def get_minute_sync_days() -> int:
     return max(1, min(30, load().get("minute_sync_days", 5)))
+
+
+def get_minute_sync_segment_days() -> int:
+    """分钟 K 拉取的单段大小(交易日)。默认 20,范围 [5, 30]。
+
+    每段拉完后立即落盘(流式),避免全量攒内存导致 OOM。
+    段越小内存峰值越低但总耗时越长(限速 sleep 随段数线性增加);
+    物理上限 ~41 交易日(TickFlow 单次 10000 根 / 一天 241 根 ≈ 41 天),max=30 留出余量。
+    """
+    return max(5, min(30, load().get("minute_sync_segment_days", 20)))
 
 
 # ===== 数据源选择 (默认 TickFlow；第一阶段仅日K切换入口) =====
@@ -248,8 +337,8 @@ def get_limit_ladder_monitor_enabled() -> bool:
 
 
 def get_depth_polling_interval() -> float:
-    """depth 盘中轮询间隔(秒)。默认 20(Pro/Expert 都适用)。"""
-    return float(load().get("depth_polling_interval", 20.0))
+    """depth 盘中轮询间隔(秒)。默认 10(Pro/Expert 都适用)。"""
+    return float(load().get("depth_polling_interval", 10.0))
 
 
 def set_depth_polling_interval(interval: float) -> float:
@@ -278,9 +367,9 @@ def set_depth_finalize_time(hour: int, minute: int) -> dict:
     return {"hour": h, "minute": m}
 
 
-# 复盘推送可选渠道白名单 (微信等暂未实现, 不在白名单内, 前端仅作占位)
+# 复盘推送可选渠道白名单 (企业微信已实现, 与飞书并列)
 # 多选: 不推送 = 空数组, 而非 'none'
-REVIEW_PUSH_CHANNELS = {"feishu"}
+REVIEW_PUSH_CHANNELS = {"feishu", "wecom"}
 
 
 def get_review_schedule() -> dict:
@@ -471,19 +560,108 @@ def set_feishu_webhook_secret(secret: str) -> str:
     return get_feishu_webhook_secret()
 
 
-def get_webhook_enabled_default() -> bool:
-    """新建监控规则时是否默认勾选「飞书推送」。
+def get_wecom_webhook_url() -> str:
+    """企业微信群推送 Webhook 地址 — 与飞书并列的第二推送通道。
 
-    数据模型当前只有一个 webhook_enabled 布尔 (即飞书), QMT/ptrade 待定。
-    此默认值供规则编辑器新建规则时预填, 单条规则仍可独立修改。
+    存储完整 URL (https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx);
+    用户也可只填 key, 由 webhook_adapter.normalize_wecom_url 自动补全。
     """
-    return load().get("webhook_enabled_default", False)
+    return load().get("wecom_webhook_url", "")
+
+
+def set_wecom_webhook_url(url: str) -> str:
+    """保存企业微信 Webhook 地址。传入空串表示清空配置。
+
+    存储时统一补全为完整 URL, 避免后续每次推送都要再判一次。
+    """
+    from app.services.webhook_adapter import normalize_wecom_url
+    save({"wecom_webhook_url": normalize_wecom_url(url)})
+    return get_wecom_webhook_url()
+
+
+# ===== 企业微信智能机器人 (API 模式 / 长连接) =====
+
+
+def get_wecom_bot_id() -> str:
+    """企业微信智能机器人 BotID — 机器人的唯一标识。"""
+    return load().get("wecom_bot_id", "")
+
+
+def set_wecom_bot_id(bot_id: str) -> str:
+    """保存智能机器人 BotID。传入空串表示清空。"""
+    save({"wecom_bot_id": (bot_id or "").strip()})
+    return get_wecom_bot_id()
+
+
+def get_wecom_bot_secret() -> str:
+    """企业微信智能机器人 Secret — 长连接专用密钥。"""
+    return load().get("wecom_bot_secret", "")
+
+
+def set_wecom_bot_secret(secret: str) -> str:
+    """保存智能机器人 Secret。传入空串表示清空。"""
+    save({"wecom_bot_secret": (secret or "").strip()})
+    return get_wecom_bot_secret()
+
+
+def get_wecom_bot_enabled() -> bool:
+    """智能机器人长连接是否启用。默认 False(需用户配置凭证后手动开启)。"""
+    return load().get("wecom_bot_enabled", False)
+
+
+def set_wecom_bot_enabled(enabled: bool) -> bool:
+    """保存智能机器人启用状态。"""
+    save({"wecom_bot_enabled": bool(enabled)})
+    return get_wecom_bot_enabled()
+
+
+
+def get_webhook_enabled_default() -> bool:
+    """新建监控规则时是否默认勾选推送 (老布尔, 已由 webhook_default_channels 取代)。
+
+    保留向后兼容: 读取 webhook_default_channels 非空时返回 True。
+    """
+    return bool(get_webhook_default_channels())
 
 
 def set_webhook_enabled_default(enabled: bool) -> bool:
-    """保存飞书推送默认勾选态。"""
-    save({"webhook_enabled_default": bool(enabled)})
+    """保存推送默认勾选态 (老布尔兼容入口)。
+
+    新数据模型为渠道数组; 此处把老布尔转译: True→['feishu','wecom'], False→[]。
+    """
+    set_webhook_default_channels(["feishu", "wecom"] if enabled else [])
     return get_webhook_enabled_default()
+
+
+def get_webhook_default_channels() -> list[str]:
+    """新建监控规则时默认勾选的推送渠道 (多选)。
+
+    空列表 = 新建规则默认不推送; ['feishu'] = 默认推飞书。
+    此默认值供规则编辑器新建规则时预填, 单条规则仍可独立修改。
+
+    向后兼容: 老版本只有布尔 webhook_enabled_default (勾选即飞书+企业微信双推),
+    这里把 True 迁移为 ['feishu','wecom'], 还原当时的实际行为。
+    """
+    d = load()
+    raw = d.get("webhook_default_channels")
+    if isinstance(raw, list):
+        return [c for c in raw if c in REVIEW_PUSH_CHANNELS]
+    # 兼容老布尔开关 (勾选即双推)
+    if d.get("webhook_enabled_default") is True:
+        return ["feishu", "wecom"]
+    return []
+
+
+def set_webhook_default_channels(channels: list[str]) -> list[str]:
+    """保存新建规则默认推送渠道 (多选)。过滤白名单外、去重、保序。空列表 = 不推送。"""
+    seen: set[str] = set()
+    cleaned: list[str] = []
+    for c in channels or []:
+        if c in REVIEW_PUSH_CHANNELS and c not in seen:
+            seen.add(c)
+            cleaned.append(c)
+    save({"webhook_default_channels": cleaned})
+    return cleaned
 
 
 def get_screener_auto_run() -> bool:
@@ -510,6 +688,19 @@ def set_realtime_monitor_config(cfg: dict) -> dict:
         updates["sidebar_index_symbols"] = [s for s in cfg["sidebar_index_symbols"] if s in allowed]
     if "screener_auto_run" in cfg:
         updates["screener_auto_run"] = bool(cfg["screener_auto_run"])
+    if "minute_intraday_refresh" in cfg:
+        updates["minute_intraday_refresh"] = bool(cfg["minute_intraday_refresh"])
+    if "minute_intraday_refresh_interval" in cfg:
+        # clamp 到 [5, 60], 与 getter 一致, 防前端传越界值
+        updates["minute_intraday_refresh_interval"] = max(
+            _INTRADAY_REFRESH_INTERVAL_MIN,
+            min(_INTRADAY_REFRESH_INTERVAL_MAX, int(cfg["minute_intraday_refresh_interval"])))
+    if "monitor_ext_fields" in cfg:
+        raw = cfg["monitor_ext_fields"] or {}
+        updates["monitor_ext_fields"] = {
+            "concept": _normalize_ext_field(raw.get("concept")),
+            "industry": _normalize_ext_field(raw.get("industry")),
+        }
     if updates:
         save(updates)
     return get_realtime_monitor_config()
@@ -523,6 +714,9 @@ def get_realtime_monitor_config() -> dict:
         "strategy_monitor_ids": get_strategy_monitor_ids(),
         "sidebar_index_symbols": get_sidebar_index_symbols(),
         "screener_auto_run": get_screener_auto_run(),
+        "minute_intraday_refresh": get_minute_intraday_refresh(),
+        "minute_intraday_refresh_interval": get_minute_intraday_refresh_interval(),
+        "monitor_ext_fields": get_monitor_ext_fields(),
     }
 
 

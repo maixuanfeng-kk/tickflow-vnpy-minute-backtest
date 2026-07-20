@@ -42,7 +42,7 @@ const BRAND = '#8B5CF6'
 const HIGHLIGHTS = [
   { icon: LineChart,   title: '看板与自选', desc: '市场全景看板、涨跌分布、情绪雷达,自定义自选列表', tint: 'text-accent' },
   { icon: ScanSearch,  title: '策略选股',   desc: '内置多套选股策略,一键扫描全市场命中标的', tint: 'text-bull' },
-  { icon: TrendingUp,  title: '个股分析',   desc: 'AI 四维分析个股,关键价位、技术形态一目了然', tint: 'text-warning' },
+  { icon: TrendingUp,  title: '深度研报',   desc: '多阶段采集与分析,异步生成 Markdown、Word 和 PDF 研报', tint: 'text-warning' },
   { icon: Flame,       title: '连板梯队',   desc: '涨停梯队、封板强度、炸板监控,情绪温度计', tint: 'text-warning' },
   { icon: Landmark,    title: '概念行业',   desc: '概念板块、行业维度的资金流向与热度排名', tint: 'text-accent' },
   { icon: FileText,    title: '财务分析',   desc: 'AI 解读财报,利润、资负、现金流、核心指标', tint: 'text-bear' },
@@ -187,7 +187,7 @@ function DisclaimerStep({ onNext }: { onNext: () => void }) {
             <p>
               本项目为<strong className="text-warning">个人开源项目</strong>,<span className="text-warning">非</span>
               <a
-                href="https://tickflow.org/auth/register?ref=V3KDKGXPEA"
+                href="https://tickflow.org"
                 target="_blank"
                 rel="noreferrer"
                 className="text-accent hover:underline font-medium inline-flex items-baseline gap-0.5"
@@ -195,13 +195,13 @@ function DisclaimerStep({ onNext }: { onNext: () => void }) {
                 TickFlow
                 <ExternalLink className="h-3 w-3 self-center" />
               </a>
-              <span className="text-warning">官方项目</span>,与 TickFlow 官方无任何隶属或合作关系。
+              <span className="text-warning">官方项目</span>。本项目独立维护，当前支持 TickFlow 数据服务。
             </p>
             <p>
               仅供学习研究使用,不构成任何投资建议。股市有风险,使用本项目产生的任何盈亏由使用者自行承担。
             </p>
             <p>
-              本项目面向个人学习与研究,不建议用于<strong className="text-warning">商业用途</strong>。如确有商用需求,请自行评估相关风险与合规要求。
+              本项目基于 MIT 协议开源。使用本项目时,请遵守数据源(TickFlow 等)的服务条款;stock-sdk 等第三方接口插件存在版权与反爬风险,使用需自行评估合规责任。
             </p>
           </div>
         </div>
@@ -588,7 +588,7 @@ function FinishStep({ onNext, onBack, pending }: { onNext: () => void; onBack: (
   // 首要行动:获取数据(不管配没配 Key, 新用户都需要先拉数据)
   // 快速上手入口(精简为核心功能)
   const tips = [
-    { icon: TrendingUp, text: '「个股分析」:输入代码,AI 四维分析 + 关键价位' },
+    { icon: TrendingUp, text: '「深度研报」:选择标的与任务,生成并下载 Word / PDF' },
     { icon: ScanSearch, text: '「选股」页:内置多套策略,一键扫描全市场' },
     { icon: ShieldCheck, text: '「回测」页:用历史数据验证策略表现,用数据说话' },
   ]

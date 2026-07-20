@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
@@ -38,6 +39,7 @@ class RuleModel(BaseModel):
     name: str
     enabled: bool = True
     type: str          # strategy | signal | price | market
+    asset_type: str = "stock"   # stock | etf (etf: strategy 型走 ETF 历史加载器)
     scope: str = "symbols"   # symbols | all | sector
     symbols: list[str] = []
     sector: str | None = None
@@ -48,7 +50,8 @@ class RuleModel(BaseModel):
     cooldown_seconds: int = 3600
     severity: str = "info"    # info | warn | critical
     webhook_url: str = ""     # Webhook 推送地址 (推送到 QMT 等外部软件, 待定)
-    webhook_enabled: bool = False
+    webhook_enabled: bool = False  # 兼容老规则 (已由 webhook_channels 取代, 仅做向后兼容读)
+    webhook_channels: list[str] = []  # 命中时推送的外部渠道 (合法值 'feishu' | 'wecom')
     message: str = ""
     # ladder 专属 (连板梯队封单监控)
     metric: str = "sealed_vol"   # sealed_vol=封单量(手) | sealed_amount=封单额(元)
@@ -111,9 +114,9 @@ def get_options(request: Request):
             {"key": "critical", "label": "重要"},
         ],
         "directions": [
-            {"key": "entry", "label": "买入"},
-            {"key": "exit", "label": "卖出"},
-            {"key": "both", "label": "买卖都报"},
+            {"key": "entry", "label": "入场"},
+            {"key": "exit", "label": "出场"},
+            {"key": "both", "label": "出入都报"},
         ],
     }
 
@@ -141,6 +144,24 @@ def save_rule(req: RuleModel, request: Request):
                 status_code=403,
                 detail="封单监控需要 Pro+ 套餐 (批量五档能力),请升级后在「设置」页配置",
             )
+    if rule.get("type") == "strategy":
+        from app.strategy.engine import StrategyDataContext
+
+        strategy_engine = getattr(request.app.state, "strategy_engine", None)
+        if strategy_engine is None:
+            raise HTTPException(status_code=503, detail="策略引擎未初始化")
+        try:
+            strategy = strategy_engine.get(str(rule.get("strategy_id")))
+            strategy_engine.validate_context(
+                strategy,
+                StrategyDataContext(
+                    asset_type=str(rule.get("asset_type") or "stock"),
+                    timeframe="1d",
+                    as_of=date.today(),
+                ),
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
     # 编辑现有规则时, 保留原 created_at (避免按时间排序时位置跳动)
     existing = monitor_rules.load_one(_data_dir(request), rule["id"])
     if existing and existing.get("created_at"):
@@ -148,7 +169,7 @@ def save_rule(req: RuleModel, request: Request):
     try:
         monitor_rules.validate(rule)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     monitor_rules.save_one(_data_dir(request), rule)
     _sync_engine(request)
     return {"ok": True, "rule": rule}
