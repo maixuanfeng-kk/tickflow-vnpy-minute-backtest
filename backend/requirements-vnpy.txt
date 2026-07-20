@@ -1,0 +1,2 @@
+vnpy>=4.4
+vnpy-ctastrategy>=1.4

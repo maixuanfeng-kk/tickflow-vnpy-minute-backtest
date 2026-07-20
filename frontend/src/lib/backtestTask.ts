@@ -181,6 +181,7 @@ export function startBacktest(params: {
   holding_days?: number
   asset_type?: 'stock' | 'etf'
   minute_fill?: boolean
+  engine?: 'matrix' | 'vnpy'
 }): void {
   // 取消之前的任务状态
   if (eventSource) {
@@ -192,9 +193,18 @@ export function startBacktest(params: {
   current = { id, isPending: true, result: null, progress: null, error: null, reconnecting: false }
   emit()
 
+  const isVnpy = params.engine === 'vnpy'
+  const symbols = params.symbols?.filter(Boolean) ?? []
+  if (isVnpy && symbols.length !== 1) {
+    current = { ...current, isPending: false, error: 'vn.py 分钟回测仅支持单只股票', reconnecting: false }
+    emit()
+    return
+  }
+
   const qs = buildQuery({
     strategy_id: params.strategy_id,
-    symbols: params.symbols?.join(','),
+    symbols: isVnpy ? undefined : symbols.join(','),
+    symbol: isVnpy ? symbols[0] : undefined,
     start: params.start ?? undefined,
     end: params.end ?? undefined,
     matching: params.matching,
@@ -214,12 +224,13 @@ export function startBacktest(params: {
     holding_days: params.holding_days,
     asset_type: params.asset_type,
     minute_fill: params.minute_fill,
+    engine: params.engine,
   })
 
   // 存 reconnect 信息 (刷新后用)
   localStorage.setItem(RECONNECT_KEY, qs)
 
-  connectSSE(`/api/backtest/strategy/stream?${qs}`)
+  connectSSE(`/api/backtest/${isVnpy ? 'vnpy/stream' : 'strategy/stream'}?${qs}`)
 }
 
 /** 停止当前回测任务 (调后端 cancel, 后端 cancel_event → 停止计算) */
@@ -266,7 +277,8 @@ export function tryReconnect(): boolean {
   const id = ++taskSeq
   current = { id, isPending: true, result: null, progress: null, error: null, reconnecting: false }
   emit()
-  connectSSE(`/api/backtest/strategy/stream?${qs}`)
+  const isVnpy = new URLSearchParams(qs).get('engine') === 'vnpy'
+  connectSSE(`/api/backtest/${isVnpy ? 'vnpy/stream' : 'strategy/stream'}?${qs}`)
   return true
 }
 

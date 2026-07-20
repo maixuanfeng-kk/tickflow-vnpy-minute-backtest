@@ -878,7 +878,7 @@ export function StrategyBacktest() {
       ? normalizeStrategyOverrides(detail, overrides)
       : overrides
     startBacktest({
-      strategy_id: selectedStrategy,
+      strategy_id: highGranularity ? 'minute_double_ma_volume' : selectedStrategy,
       asset_type: assetType,
       symbols: symbols ? symbols.split(',').map(s => s.trim()).filter(Boolean) : null,
       start: start || null,
@@ -897,7 +897,8 @@ export function StrategyBacktest() {
       overrides: requestOverrides,
       mode: simMode,
       holding_days: Number(holdingDays) || 5,
-      minute_fill: highGranularity,
+      minute_fill: false,
+      engine: highGranularity ? 'vnpy' : 'matrix',
     })
   }
 

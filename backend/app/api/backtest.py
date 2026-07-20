@@ -505,6 +505,94 @@ async def strategy_stream(
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
+@router.get("/vnpy/stream")
+async def vnpy_stream(
+    request: Request,
+    symbol: str,
+    start: str,
+    end: str,
+    initial_capital: float = 1_000_000.0,
+    commission_pct: float = 0.0002,
+    stamp_tax_pct: float = 0.001,
+    slippage_bps: float = 5.0,
+    params: str | None = None,
+):
+    """Run the dedicated vn.py minute CTA backtest over stored minute K data."""
+    from app.vnpy_backtest.service import VnpyMinuteBacktestConfig, VnpyMinuteBacktestService
+
+    try:
+        start_date = date.fromisoformat(start)
+        end_date = date.fromisoformat(end)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="start and end must be ISO dates") from exc
+    if end_date < start_date:
+        raise HTTPException(status_code=400, detail="end date must not precede start date")
+
+    raw = f"vnpy|{symbol}|{start}|{end}|{initial_capital}|{commission_pct}|{stamp_tax_pct}|{slippage_bps}|{params}"
+    job_key = f"vnpy:{hashlib.md5(raw.encode()).hexdigest()[:12]}"
+    _cleanup_stale_jobs()
+    with _jobs_lock:
+        job = _running_jobs.get(job_key)
+        if job is None:
+            job = _BacktestJob(job_key)
+            _running_jobs[job_key] = job
+            is_new = True
+        else:
+            is_new = False
+
+    if is_new:
+        try:
+            strategy_params = json.loads(params) if params else {}
+        except json.JSONDecodeError as exc:
+            _finish_job(job, error="params must be JSON")
+        else:
+            config = VnpyMinuteBacktestConfig(
+                symbol=symbol,
+                start=start_date,
+                end=end_date,
+                initial_capital=initial_capital,
+                commission_pct=commission_pct,
+                stamp_tax_pct=stamp_tax_pct,
+                slippage_bps=slippage_bps,
+                params=strategy_params,
+            )
+
+            def _run_vnpy() -> None:
+                try:
+                    job.progress.append({"day": 0, "total": 1, "date": "加载分钟K", "equity": initial_capital})
+                    result = VnpyMinuteBacktestService(request.app.state.repo).run(config)
+                    job.progress.append({
+                        "day": 1,
+                        "total": 1,
+                        "date": "完成",
+                        "equity": result.get("stats", {}).get("end_balance", initial_capital),
+                    })
+                    _finish_job(job, result=result)
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception("vn.py minute backtest failed")
+                    _finish_job(job, error=str(exc))
+
+            threading.Thread(target=_run_vnpy, daemon=True).start()
+
+    async def event_generator():
+        cursor = 0
+        while True:
+            while cursor < len(job.progress):
+                yield f"event: progress\ndata: {json.dumps(job.progress[cursor], ensure_ascii=False)}\n\n"
+                cursor += 1
+            if job.done:
+                if job.error:
+                    yield f"event: error\ndata: {json.dumps({'message': job.error}, ensure_ascii=False)}\n\n"
+                else:
+                    yield f"event: done\ndata: {json.dumps(job.result, ensure_ascii=False, default=str)}\n\n"
+                return
+            if await request.is_disconnected():
+                return
+            await asyncio.sleep(0.05)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
 @router.post("/strategy/cancel")
 async def strategy_cancel(request: Request):
     """取消正在运行的回测任务 (前端传 query string, 后端算 job_key)。"""

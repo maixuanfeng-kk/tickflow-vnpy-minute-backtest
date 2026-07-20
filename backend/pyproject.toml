@@ -61,6 +61,11 @@ desktop = [
     "pywebview>=5.0",
 ]
 
+vnpy-backtest = [
+    "vnpy>=4.4",
+    "vnpy-ctastrategy>=1.4",
+]
+
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
