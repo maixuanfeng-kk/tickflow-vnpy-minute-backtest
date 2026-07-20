@@ -56,7 +56,7 @@
 | 📊 **指标流水线** | MA/EMA/MACD/RSI/KDJ/布林/量比等,一次扫表落盘 enriched Parquet          | [features.md](./docs/features.md) |
 | 🧪 **回测引擎**   | 三种模式(个股/策略组合/自由信号),T+1/手续费/滑点/止损,SSE 流式进度     | [features.md](./docs/features.md) |
 | 📡 **监控中心**   | 四类监控(策略/个股信号/价格/异动),多条件 AND/OR + 语音播报 + 飞书推送  | [features.md](./docs/features.md) |
-| 📈 **个股分析**   | 9 类关键价位 + AI 四维分析(技术/基本面/财务/消息面)                    | [features.md](./docs/features.md) |
+| 📈 **深度研报**   | FinSight 多阶段资料采集与分析，异步生成 Markdown / DOCX / PDF          | [deep-report-windows.md](./docs/deep-report-windows.md) |
 | 🏆 **连板梯队**   | 连板层级统计 + 概念涨幅轮动 + 盘后 AI 复盘 + 炸板/翘板预警             | [features.md](./docs/features.md) |
 | 🧰 **数据扩展**   | TickFlow 多源 + 第三方接入(接口/推送/CSV/JSON)同台分析                   | [features.md](./docs/features.md) |
 
@@ -79,7 +79,7 @@
   - **策略回测** — 净值曲线、回撤、夏普、胜率,支持 T+1/手续费/滑点/止损,SSE 流式进度
 
 **📈 个股与板块分析**
-- **个股分析** Stock Analysis (Beta) — 日K + 9 类关键价位 + AI 四维分析(技术/基本面/财务/消息面)
+- **深度研报** Deep Report — 选择标的与任务后异步生成研报，可查看进度、取消任务并下载 Markdown / DOCX / PDF
 - **财务分析** Financials — 利润表/资负表/现金流/关键指标 + AI 解读
 - **概念分析** Concept Analysis — ths 概念涨幅轮动矩阵 + 领涨/领跌主线 + 个股穿透
 - **行业分析** Industry Analysis — 行业分层涨幅轮动 + 领涨/领跌主线 + 成分股
@@ -224,7 +224,7 @@ PORT=3018                      # 服务端口
 | 0-1    | 仓库骨架 · FastAPI 壳 · 能力探测 · K 线同步与分析页                | ✅    |
 | 2-3    | Polars enriched 流水线 · Screener · vectorbt 回测(T+1/手续费/止损) | ✅    |
 | 4-5    | 监控引擎 · 四类监控规则 · 实时 SSE 推送 · 持久化记录               | ✅    |
-| 6      | 个股分析(专用日 K + 9 类关键价位 + AI 四维分析)                    | ✅    |
+| 6      | 深度研报(FinSight 资料采集、分析、任务管理与 Word/PDF 导出)          | ✅    |
 | **v2** | Webhook 推送· 板块异动 · 早晚报 · 更多扩展           | 🚧    |
 
 ---
@@ -235,7 +235,8 @@ PORT=3018                      # 服务端口
 | :------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------- |
 | [docs/deployment.md](./docs/deployment.md)                                                         | 部署方式(Dev / Docker / GH Actions)、老 CPU 兼容、更新代码、访问密码 |
 | [docs/configuration.md](./docs/configuration.md)                                                   | 所有 `.env` 配置项详解(数据源、AI、服务、密码、数据目录)             |
-| [docs/features.md](./docs/features.md)                                                             | 各功能模块详细说明(选股/指标/回测/监控/个股分析/数据扩展)            |
+| [docs/deep-report-windows.md](./docs/deep-report-windows.md)                                       | Windows + Word 深度研报安装、校验、运行与跨机器版式验收              |
+| [docs/features.md](./docs/features.md)                                                             | 各功能模块详细说明(选股/指标/回测/监控/深度研报/数据扩展)            |
 | [docs/custom-data-source.md](./docs/custom-data-source.md)                                         | 自定义数据源接入、YAML 配置与 mock 联调示例                         |
 | [docs/strategy.md](./docs/strategy.md)                                                             | 策略体系(18 内置策略 + 三种扩展方式 + 文件结构)                      |
 | [backend/app/strategy/prompts/strategy-guide.md](./backend/app/strategy/prompts/strategy-guide.md) | 策略开发完整规范(AI 生成与手写)                                      |

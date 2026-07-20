@@ -56,6 +56,12 @@ export const QK = {
   kline:                (symbol: string, start: string, end: string, extColumns?: string) =>
                            ['kline', symbol, start, end, extColumns ?? ''] as const,
   stockLevels:          (symbol: string, days?: number) => ['stock-levels', symbol, days ?? 120] as const,
+  stockDeepReportHealth: ['stock-deep-report-health'] as const,
+  stockDeepReportDefaults: ['stock-deep-report-defaults'] as const,
+  stockDeepReportTaskCatalog: ['stock-deep-report-task-catalog'] as const,
+  stockDeepReportTaskCatalogAdmin: ['stock-deep-report-task-catalog-admin'] as const,
+  stockDeepReportRuns:   (symbol?: string) => ['stock-deep-report-runs', symbol ?? 'all'] as const,
+  stockDeepReportRun:    (id: string) => ['stock-deep-report-run', id] as const,
   klineMinute:          (symbol: string, date: string) =>
                              ['kline-minute', symbol, date] as const,
   indexDaily:           (symbol: string, start: string, end: string) =>

@@ -63,6 +63,7 @@ def _project_root() -> Path:
 
 _PROJECT_ROOT = _project_root()
 _RESOURCE_ROOT = _resource_root()
+_RUNTIME_ROOT = Path(sys.executable).resolve().parent if _IS_FROZEN else _PROJECT_ROOT
 
 
 class Settings(BaseSettings):
@@ -114,12 +115,23 @@ class Settings(BaseSettings):
     # 静态文件(前端 dist) — frozen: 资源目录的 static/; 非 frozen: frontend/dist
     static_dir: Path = _RESOURCE_ROOT / "static" if _IS_FROZEN else (_PROJECT_ROOT / "frontend" / "dist")
 
+    # FinSight 深度研报（独立 runtime；必须通过环境变量显式配置）
+    finsight_root: Path | None = None
+    finsight_python: Path | None = None
+    finsight_max_concurrent: int = 1
+
     @model_validator(mode="after")
     def _resolve_paths(self) -> Settings:
         """确保 data_dir 是绝对路径（环境变量传入的相对路径基于项目根目录解析）。"""
         if not self.data_dir.is_absolute():
             # 相对路径基于项目根目录解析，而非 CWD
             self.data_dir = (_PROJECT_ROOT / self.data_dir).resolve()
+        if self.finsight_root is not None and not self.finsight_root.is_absolute():
+            self.finsight_root = (_RUNTIME_ROOT / self.finsight_root).resolve()
+        if self.finsight_python is not None and not self.finsight_python.is_absolute():
+            self.finsight_python = (_RUNTIME_ROOT / self.finsight_python).resolve()
+        if self.finsight_max_concurrent <= 0:
+            raise ValueError("finsight_max_concurrent must be positive")
         if self.backtest_matrix_cache_max_mb <= 0:
             raise ValueError("backtest_matrix_cache_max_mb must be positive")
         if self.backtest_matrix_cache_prewarm_years <= 0:
