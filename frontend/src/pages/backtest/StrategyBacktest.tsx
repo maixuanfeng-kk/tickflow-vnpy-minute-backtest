@@ -894,6 +894,7 @@ export function StrategyBacktest() {
   const [simMode, setSimMode] = useState<'position' | 'full'>(saved?.mode ?? 'position')
   const [holdingDays, setHoldingDays] = useState(saved?.holdingDays ?? '5')
   const [highGranularity, setHighGranularity] = useState(saved?.minuteFill ?? false)
+  const [minuteDataDir, setMinuteDataDir] = useState('E:\\minute_1min_pytdx')
   const [settingsOpen, setSettingsOpen] = useState(false)
   // 分钟K成交价细化: 不改变信号日或成交日, 需 Pro+ 分钟K能力
   const { data: caps } = useCapabilities()
@@ -1043,6 +1044,7 @@ export function StrategyBacktest() {
       mode: simMode,
       holding_days: Number(holdingDays) || 5,
       minute_fill: false,
+      minute_data_dir: minuteNative ? minuteDataDir.trim() || undefined : undefined,
       engine: minuteNative ? 'minute_portfolio' : highGranularity ? 'vnpy' : 'matrix',
     })
   }
@@ -1585,6 +1587,20 @@ export function StrategyBacktest() {
             </div>
           )}
         </div>
+
+        {minuteNative && (
+          <div>
+            <label className="mb-1.5 block text-xs font-medium text-secondary">本地分钟 Parquet 目录</label>
+            <input
+              type="text"
+              value={minuteDataDir}
+              onChange={e => setMinuteDataDir(e.target.value)}
+              placeholder="E:\\minute_1min_pytdx"
+              className={INPUT_CLS}
+            />
+            <div className="mt-1 text-[10px] leading-4 text-muted">使用当前自选股；支持 `600000_SH.parquet` / `000001_SZ.parquet`。</div>
+          </div>
+        )}
 
         {simMode === 'position' && (
         <div className="grid grid-cols-2 gap-2">

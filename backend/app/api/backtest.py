@@ -8,6 +8,7 @@ import math
 import threading
 from dataclasses import asdict
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
@@ -608,6 +609,7 @@ async def minute_portfolio_stream(
     slippage_bps: float = 5.0,
     initial_capital: float | None = None,
     max_positions: int | None = None,
+    minute_data_dir: str | None = None,
 ):
     """Run the fixed early-session portfolio strategy over a watchlist snapshot."""
     from app.backtest.minute_portfolio import (
@@ -629,6 +631,8 @@ async def minute_portfolio_stream(
         raise HTTPException(status_code=400, detail="initial_capital must be positive")
     if max_positions is not None and max_positions <= 0:
         raise HTTPException(status_code=400, detail="max_positions must be positive")
+    if minute_data_dir and not Path(minute_data_dir).is_dir():
+        raise HTTPException(status_code=400, detail="minute_data_dir must be an existing directory")
     try:
         request_params = json.loads(params) if params else {}
     except json.JSONDecodeError as exc:
@@ -669,10 +673,11 @@ async def minute_portfolio_stream(
         **({"initial_capital": initial_capital} if initial_capital is not None else {}),
         **({"max_positions": max_positions} if max_positions is not None else {}),
         strategy_params=strategy_params,
+        minute_data_dir=minute_data_dir or None,
     )
     raw = (
         f"minute-portfolio|{strategy_id}|{symbols}|{start}|{end}|{commission_pct}|{stamp_tax_pct}|{slippage_bps}|"
-        f"{config.initial_capital}|{config.max_positions}|{json.dumps(saved_params, sort_keys=True, ensure_ascii=False)}"
+        f"{config.initial_capital}|{config.max_positions}|{minute_data_dir}|{json.dumps(saved_params, sort_keys=True, ensure_ascii=False)}"
     )
     job_key = f"minute-portfolio:{hashlib.md5(raw.encode()).hexdigest()[:12]}"
     _cleanup_stale_jobs()

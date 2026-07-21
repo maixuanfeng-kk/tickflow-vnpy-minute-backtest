@@ -7,7 +7,7 @@ from app.api import backtest
 
 
 @pytest.mark.asyncio
-async def test_minute_portfolio_stream_passes_user_capital_and_positions(monkeypatch) -> None:
+async def test_minute_portfolio_stream_passes_user_capital_and_positions(monkeypatch, tmp_path) -> None:
     captured = {}
 
     class Service:
@@ -35,6 +35,7 @@ async def test_minute_portfolio_stream_passes_user_capital_and_positions(monkeyp
         end="2026-01-06",
         initial_capital=2_000_000.0,
         max_positions=4,
+        minute_data_dir=str(tmp_path),
     )
     chunks = [
         chunk.decode() if isinstance(chunk, bytes) else chunk
@@ -44,6 +45,7 @@ async def test_minute_portfolio_stream_passes_user_capital_and_positions(monkeyp
 
     assert captured["config"].initial_capital == 2_000_000.0
     assert captured["config"].max_positions == 4
+    assert captured["config"].minute_data_dir == str(tmp_path)
     assert "event: done" in body
 
 
