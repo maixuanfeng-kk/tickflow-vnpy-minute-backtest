@@ -322,13 +322,23 @@ class MinutePortfolioEngine:
                 entered_today.add((candidate["symbol"], timestamp.date()))
                 pending_buys.append(candidate)
 
+        last_timestamp = max(grouped)
+        last_bars = {row["symbol"]: row for row in grouped[last_timestamp]}
         for symbol, position in positions.items():
+            bar = last_bars.get(symbol, {})
+            close = float(bar.get("close") or position["entry_price"])
+            price = close * (1 - self.config.slippage_bps / 10_000)
+            value = position["shares"] * price
+            cash += value * (1 - self.config.commission_pct - self.config.stamp_tax_pct)
             trades.append({
                 "symbol": symbol,
                 "entry_datetime": position["entry_datetime"].isoformat(sep=" "),
                 "entry_price": round(position["entry_price"], 4),
+                "exit_datetime": last_timestamp.isoformat(sep=" "),
+                "exit_price": round(price, 4),
                 "shares": position["shares"],
                 "entry_reason": position["entry_reason"],
+                "exit_reason": "end_of_backtest",
             })
         return {"cash": cash, "trades": trades}
 
@@ -434,6 +444,10 @@ class MinutePortfolioService:
             config.end,
             config.strategy_params.ma_exit_period,
         )
+        raw_rows = [
+            row for row in raw_rows
+            if config.start <= row["datetime"].date() <= config.end
+        ]
 
         executed = MinutePortfolioEngine(config).run(raw_rows, contexts)
         return {
