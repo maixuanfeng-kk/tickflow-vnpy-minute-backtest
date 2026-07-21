@@ -4,8 +4,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from math import floor
+from time import perf_counter
 from typing import Any, Mapping, TypedDict
 from uuid import uuid4
+
+from app.services import watchlist
 
 
 VOLUME_RATIO_MIN = 1.5
@@ -129,6 +132,74 @@ class MinutePortfolioConfig:
     stamp_tax_pct: float = 0.001
     slippage_bps: float = 5.0
     strategy_params: OpeningVolumeStrategyParams = field(default_factory=OpeningVolumeStrategyParams)
+
+
+@dataclass(frozen=True)
+class OpeningVolumeScanConfig:
+    as_of: date
+    strategy_params: OpeningVolumeStrategyParams
+
+
+def _load_rows_and_context(
+    repo,
+    symbols: list[str],
+    start: date,
+    end: date,
+    ma_exit_period: int,
+) -> tuple[list[dict], dict[tuple[str, date], dict]]:
+    ma_column = f"ma{ma_exit_period}"
+    daily = repo.get_daily_batch(
+        symbols,
+        start - timedelta(days=20),
+        end,
+        columns=["symbol", "date", "open", "high", "close", ma_column],
+    )
+    minutes = repo.get_minute_range(
+        symbols, start - timedelta(days=7), end, asset_type="stock",
+    )
+    if minutes.is_empty():
+        raise ValueError("no minute bars in the selected range")
+
+    history: dict[str, list[dict]] = {}
+    for row in daily.sort(["symbol", "date"]).to_dicts():
+        history.setdefault(row["symbol"], []).append(row)
+    contexts: dict[tuple[str, date], dict] = {}
+    for symbol, rows in history.items():
+        for current in rows:
+            prior = [row for row in rows if row["date"] < current["date"]]
+            if prior:
+                previous = prior[-1]
+                earlier = prior[-2] if len(prior) > 1 else None
+                previous_close = float(previous["close"])
+                change = (
+                    previous_close / float(earlier["close"]) - 1
+                    if earlier and float(earlier["close"]) > 0 else 0.0
+                )
+                contexts[(symbol, current["date"])] = {
+                    "previous_open": previous["open"],
+                    "previous_close": previous_close,
+                    "previous_high": previous["high"],
+                    "previous_change_pct": change,
+                    f"previous_ma{ma_exit_period}": previous.get(ma_column),
+                }
+
+    raw_rows = minutes.sort(["symbol", "datetime"]).to_dicts()
+    cumulative: dict[tuple[str, date, time], float] = {}
+    running: dict[tuple[str, date], float] = {}
+    for row in raw_rows:
+        key = (row["symbol"], row["datetime"].date())
+        running[key] = running.get(key, 0.0) + float(row["volume"] or 0)
+        row["cumulative_volume"] = running[key]
+        cumulative[(row["symbol"], key[1], row["datetime"].time())] = running[key]
+    trade_dates = sorted({row["datetime"].date() for row in raw_rows})
+    previous_date = {trade_dates[index]: trade_dates[index - 1] for index in range(1, len(trade_dates))}
+    for row in raw_rows:
+        prior_day = previous_date.get(row["datetime"].date())
+        row["previous_cumulative_volume"] = (
+            cumulative.get((row["symbol"], prior_day, row["datetime"].time()), 0.0)
+            if prior_day else 0.0
+        )
+    return raw_rows, contexts
 
 
 class MinutePortfolioEngine:
@@ -261,6 +332,91 @@ class MinutePortfolioEngine:
         return {"cash": cash, "trades": trades}
 
 
+class OpeningVolumeScanService:
+    """Run the native opening-volume strategy against the TickFlow watchlist."""
+
+    def __init__(self, repo) -> None:
+        self.repo = repo
+
+    def run(self, config: OpeningVolumeScanConfig) -> dict:
+        started = perf_counter()
+        symbols = [str(row["symbol"]) for row in watchlist.list_symbols() if row.get("symbol")]
+        if not symbols:
+            return {
+                "as_of": str(config.as_of),
+                "strategy": "opening_volume_portfolio",
+                "rows": [],
+                "total": 0,
+                "elapsed_ms": 0.0,
+            }
+        raw_rows, contexts = _load_rows_and_context(
+            self.repo,
+            symbols,
+            config.as_of,
+            config.as_of,
+            config.strategy_params.ma_exit_period,
+        )
+        grouped: dict[datetime, list[dict]] = {}
+        for row in raw_rows:
+            grouped.setdefault(row["datetime"], []).append(row)
+
+        intraday_high: dict[tuple[str, date], float] = {}
+        matched: set[str] = set()
+        candidates: list[dict] = []
+        for timestamp in sorted(grouped):
+            if timestamp.date() != config.as_of:
+                continue
+            for bar in grouped[timestamp]:
+                symbol = bar["symbol"]
+                key = (symbol, timestamp.date())
+                prior_high = intraday_high.get(key, float("-inf"))
+                intraday_high[key] = max(prior_high, float(bar["high"]))
+                context = contexts.get(key)
+                if context is None or symbol in matched:
+                    continue
+                if not is_in_scan_window(timestamp.time(), config.strategy_params):
+                    continue
+                previous_volume = float(bar.get("previous_cumulative_volume") or 0)
+                if previous_volume <= 0:
+                    continue
+                cumulative_volume = float(bar.get("cumulative_volume", bar["volume"]))
+                volume_ratio = cumulative_volume / previous_volume
+                today_return = float(bar["close"]) / float(context["previous_close"]) - 1
+                reason = entry_reason(
+                    previous_open=float(context["previous_open"]),
+                    previous_close=float(context["previous_close"]),
+                    previous_change_pct=float(context["previous_change_pct"]),
+                    today_return=today_return,
+                    volume_ratio=volume_ratio,
+                    crossed_previous_high=(
+                        prior_high < float(context["previous_high"])
+                        and float(bar["high"]) >= float(context["previous_high"])
+                    ),
+                    params=config.strategy_params,
+                )
+                if reason is None:
+                    continue
+                matched.add(symbol)
+                candidates.append({
+                    "symbol": symbol,
+                    "date": str(timestamp.date()),
+                    "time": timestamp.strftime("%H:%M"),
+                    "close": float(bar["close"]),
+                    "volume_ratio": volume_ratio,
+                    "today_return": today_return,
+                    "entry_reason": reason,
+                })
+
+        rows = rank_candidates(candidates)
+        return {
+            "as_of": str(config.as_of),
+            "strategy": "opening_volume_portfolio",
+            "rows": rows,
+            "total": len(rows),
+            "elapsed_ms": round((perf_counter() - started) * 1000, 2),
+        }
+
+
 class MinutePortfolioService:
     """Load TickFlow K lines and adapt the native engine to the backtest result contract."""
 
@@ -270,58 +426,13 @@ class MinutePortfolioService:
     def run(self, config: MinutePortfolioConfig) -> dict:
         if config.start is None or config.end is None:
             raise ValueError("start and end are required")
-        ma_column = f"ma{config.strategy_params.ma_exit_period}"
-        daily = self.repo.get_daily_batch(
+        raw_rows, contexts = _load_rows_and_context(
+            self.repo,
             config.symbols,
-            config.start - timedelta(days=20),
+            config.start,
             config.end,
-            columns=["symbol", "date", "open", "high", "close", ma_column],
+            config.strategy_params.ma_exit_period,
         )
-        minutes = self.repo.get_minute_range(
-            config.symbols, config.start - timedelta(days=7), config.end, asset_type="stock",
-        )
-        if minutes.is_empty():
-            raise ValueError("no minute bars in the selected range")
-
-        history: dict[str, list[dict]] = {}
-        for row in daily.sort(["symbol", "date"]).to_dicts():
-            history.setdefault(row["symbol"], []).append(row)
-        contexts: dict[tuple[str, date], dict] = {}
-        for symbol, rows in history.items():
-            for current in rows:
-                prior = [row for row in rows if row["date"] < current["date"]]
-                if prior:
-                    previous = prior[-1]
-                    earlier = prior[-2] if len(prior) > 1 else None
-                    previous_close = float(previous["close"])
-                    change = (
-                        previous_close / float(earlier["close"]) - 1
-                        if earlier and float(earlier["close"]) > 0 else 0.0
-                    )
-                    contexts[(symbol, current["date"])] = {
-                        "previous_open": previous["open"],
-                        "previous_close": previous_close,
-                        "previous_high": previous["high"],
-                        "previous_change_pct": change,
-                        f"previous_ma{config.strategy_params.ma_exit_period}": previous.get(ma_column),
-                    }
-
-        raw_rows = minutes.sort(["symbol", "datetime"]).to_dicts()
-        cumulative: dict[tuple[str, date, time], float] = {}
-        running: dict[tuple[str, date], float] = {}
-        for row in raw_rows:
-            key = (row["symbol"], row["datetime"].date())
-            running[key] = running.get(key, 0.0) + float(row["volume"] or 0)
-            row["cumulative_volume"] = running[key]
-            cumulative[(row["symbol"], key[1], row["datetime"].time())] = running[key]
-        trade_dates = sorted({row["datetime"].date() for row in raw_rows})
-        previous_date = {trade_dates[index]: trade_dates[index - 1] for index in range(1, len(trade_dates))}
-        for row in raw_rows:
-            prior_day = previous_date.get(row["datetime"].date())
-            row["previous_cumulative_volume"] = (
-                cumulative.get((row["symbol"], prior_day, row["datetime"].time()), 0.0)
-                if prior_day else 0.0
-            )
 
         executed = MinutePortfolioEngine(config).run(raw_rows, contexts)
         return {
