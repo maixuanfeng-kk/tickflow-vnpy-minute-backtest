@@ -12,6 +12,7 @@ from app.services import watchlist
 
 
 VOLUME_RATIO_MIN = 1.5
+MA_EXIT_PERIODS = (5, 10, 20, 30, 60)
 INITIAL_CAPITAL = 10_000_000.0
 MAX_POSITIONS = 8
 LOT_SIZE = 100
@@ -71,8 +72,8 @@ class OpeningVolumeStrategyParams:
             raise ValueError("volume_multiple must be positive")
         if stop_loss_pct < 0:
             raise ValueError("stop_loss_pct must not be negative")
-        if ma_exit_period < 1:
-            raise ValueError("ma_exit_period must be positive")
+        if ma_exit_period not in MA_EXIT_PERIODS:
+            raise ValueError(f"ma_exit_period must be one of {MA_EXIT_PERIODS}")
         return cls(
             scan_start_time=start,
             scan_end_time=end,

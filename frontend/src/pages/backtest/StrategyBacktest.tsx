@@ -545,6 +545,14 @@ function StrategyParamInput({ param, value, onChange }: {
   value: any
   onChange: (value: any) => void
 }) {
+  if (param.type === 'time') {
+    return (
+      <label className="block">
+        <span className="mb-1 block text-[11px] text-secondary">{param.label}</span>
+        <input type="time" value={String(value ?? param.default)} onChange={e => onChange(e.target.value)} className={INPUT_CLS} />
+      </label>
+    )
+  }
   if (param.type === 'bool') {
     const checked = value === true || value === 'true' || value === 'True' || value === true
     return (
@@ -572,6 +580,30 @@ function StrategyParamInput({ param, value, onChange }: {
         <select value={value ?? param.default} onChange={e => onChange(e.target.value)} className={INPUT_CLS}>
           {(param.options ?? []).map(opt => <option key={opt} value={opt}>{opt}</option>)}
         </select>
+      </label>
+    )
+  }
+  if (param.type === 'percent') {
+    const percent = Number(value ?? param.default) * 100
+    return (
+      <label className="block">
+        <span className="mb-1 block text-[11px] text-secondary">{param.label}</span>
+        <div className="flex items-center gap-1.5">
+          <input
+            type="number"
+            value={percent}
+            min={param.min != null ? param.min * 100 : undefined}
+            max={param.max != null ? param.max * 100 : undefined}
+            step={(param.step ?? 0.01) * 100}
+            onChange={e => {
+              const n = numOrNull(e.target.value)
+              if (n == null) return onChange('')
+              onChange(clamp(n, param.min != null ? param.min * 100 : undefined, param.max != null ? param.max * 100 : undefined) / 100)
+            }}
+            className={INPUT_CLS}
+          />
+          <span className="text-xs text-muted">%</span>
+        </div>
       </label>
     )
   }
@@ -764,7 +796,6 @@ export function StrategyBacktest() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   // 分钟K精确回测: 用当日分钟K确定精确成交价 (穿越价/VWAP), 需 Pro+ 分钟K能力
   const [highGranularity, setHighGranularity] = useState(false)
-  const [minutePortfolio, setMinutePortfolio] = useState(false)
   const { data: caps } = useCapabilities()
   const hasMinuteBatch = !!caps?.capabilities?.['kline.minute.batch']
   const [rangeSettingsOpen, setRangeSettingsOpen] = useState(false)
@@ -786,8 +817,8 @@ export function StrategyBacktest() {
   const loadedStrategyRef = useRef<string | null>(null)
 
   const strategies = useQuery({
-    queryKey: QK.screenerStrategies(assetType),
-    queryFn: () => api.screenerStrategies(assetType),
+    queryKey: QK.screenerStrategies(assetType, true),
+    queryFn: () => api.screenerStrategies(assetType, true),
   })
 
   const strategyList = useMemo(() => strategies.data?.presets ?? [], [strategies.data])
@@ -878,14 +909,15 @@ export function StrategyBacktest() {
   }, [backtestTask])
 
   const handleRun = () => {
-    if (!selectedStrategy && !minutePortfolio) return
+    if (!selectedStrategy) return
     const requestOverrides = detail
       ? normalizeStrategyOverrides(detail, overrides)
       : overrides
+    const minuteNative = detail?.execution_backend === 'minute_native'
     startBacktest({
-      strategy_id: minutePortfolio ? 'opening_volume_portfolio' : highGranularity ? 'minute_double_ma_volume' : selectedStrategy!,
-      asset_type: minutePortfolio ? 'stock' : assetType,
-      symbols: minutePortfolio ? null : symbols ? symbols.split(',').map(s => s.trim()).filter(Boolean) : null,
+      strategy_id: minuteNative ? selectedStrategy : highGranularity ? 'minute_double_ma_volume' : selectedStrategy,
+      asset_type: minuteNative ? 'stock' : assetType,
+      symbols: minuteNative ? null : symbols ? symbols.split(',').map(s => s.trim()).filter(Boolean) : null,
       start: start || null,
       end: end || undefined,
       matching,
@@ -903,22 +935,17 @@ export function StrategyBacktest() {
       mode: simMode,
       holding_days: Number(holdingDays) || 5,
       minute_fill: false,
-      engine: minutePortfolio ? 'minute_portfolio' : highGranularity ? 'vnpy' : 'matrix',
+      engine: minuteNative ? 'minute_portfolio' : highGranularity ? 'vnpy' : 'matrix',
     })
   }
-
-  const selectMinutePortfolio = () => {
-    setMinutePortfolio(true)
-    setHighGranularity(false)
-    setSimMode('position')
-    setSelectedStrategy(null)
-    setInitialCapital(MINUTE_PORTFOLIO_DEFAULTS.initialCapital)
-    setMaxPositions(MINUTE_PORTFOLIO_DEFAULTS.maxPositions)
-  }
-
   const selectStrategy = (strategyId: string) => {
     setSelectedStrategy(strategyId)
-    setMinutePortfolio(false)
+    if (strategyList.find(strategy => strategy.id === strategyId)?.execution_backend === 'minute_native') {
+      setHighGranularity(false)
+      setSimMode('position')
+      setInitialCapital(MINUTE_PORTFOLIO_DEFAULTS.initialCapital)
+      setMaxPositions(MINUTE_PORTFOLIO_DEFAULTS.maxPositions)
+    }
   }
 
   // 提取统计
@@ -1061,12 +1088,15 @@ export function StrategyBacktest() {
   }, [result?.trades])
 
   const detail = strategyDetail.data
+  const minuteNative = detail?.execution_backend === 'minute_native'
   const matrixStrategy = detail?.execution_backend === 'matrix_native'
   const visibleAdvancedTabs = useMemo(
-    () => matrixStrategy
+    () => minuteNative
+      ? ADVANCED_TABS.filter(tab => tab.id === 'params')
+      : matrixStrategy
       ? ADVANCED_TABS.filter(tab => tab.id !== 'entry' && tab.id !== 'exit')
       : ADVANCED_TABS,
-    [matrixStrategy],
+    [matrixStrategy, minuteNative],
   )
   const basicFilter = (overrides.basic_filter ?? {}) as Record<string, any>
   const entrySignals = (overrides.entry_signals ?? []) as string[]
@@ -1088,10 +1118,10 @@ export function StrategyBacktest() {
   }, [scoring, editingScoring])
 
   useEffect(() => {
-    if (matrixStrategy && (settingsTab === 'entry' || settingsTab === 'exit')) {
+    if (minuteNative || (matrixStrategy && (settingsTab === 'entry' || settingsTab === 'exit'))) {
       setSettingsTab('params')
     }
-  }, [matrixStrategy, settingsTab])
+  }, [matrixStrategy, minuteNative, settingsTab])
 
   const updateOverride = (key: string, value: any) => {
     setOverrides(prev => ({ ...prev, [key]: value }))
@@ -1132,12 +1162,10 @@ export function StrategyBacktest() {
         maxHoldDaysValue !== '' ? `最长 ${maxHoldDaysValue}天` : '不限持仓',
       ].join(' · ')
     : '选择策略后可调整参数 / 过滤 / 买卖触发器 / 评分 / 风控'
-  const selectedStrategyName = minutePortfolio
-    ? '早盘放量组合（自选股）'
-    : detail?.name ?? strategyList.find(st => st.id === selectedStrategy)?.name ?? '未选择策略'
+  const selectedStrategyName = detail?.name ?? strategyList.find(st => st.id === selectedStrategy)?.name ?? '未选择策略'
   const selectedStrategySource = detail?.source ?? strategyList.find(st => st.id === selectedStrategy)?.source
   const stockPoolCount = symbols.split(',').map(s => s.trim()).filter(Boolean).length
-  const stockPoolSummary = minutePortfolio
+  const stockPoolSummary = minuteNative
     ? '股票池 TickFlow 自选股'
     : stockPoolCount > 0 ? `股票池 已限定 ${stockPoolCount} 只` : '股票池 全市场'
   const resultStartDate = result?.config?.start ?? result?.equity_curve?.[0]?.date ?? start
@@ -1222,20 +1250,6 @@ export function StrategyBacktest() {
             )}
             {!strategies.isLoading && filteredStrategyList.length === 0 && !['all', 'custom'].includes(strategyGroup) && (
               <span className="text-xs text-muted px-2 py-1">当前分组暂无策略</span>
-            )}
-            {['all', 'custom'].includes(strategyGroup) && (
-              <button
-                type="button"
-                onClick={selectMinutePortfolio}
-                className={`px-2 py-1 rounded-btn text-[11px] border transition-all duration-150 ease-smooth cursor-pointer ${minutePortfolio
-                  ? 'border-amber-400/60 bg-amber-400/10 text-amber-300'
-                  : 'border-border bg-base text-secondary hover:border-amber-400/45'
-                }`}
-                title="自定义分钟组合：使用 TickFlow 自选股，1000 万初始资金，最多 8 仓"
-              >
-                <span className="font-medium">早盘放量组合</span>
-                <span className="ml-1 text-[8px] text-amber-400">自定义</span>
-              </button>
             )}
             {filteredStrategyList.map(st => (
               <button
@@ -1482,7 +1496,7 @@ export function StrategyBacktest() {
         ) : (
           <button
             onClick={handleRun}
-            disabled={(!selectedStrategy && !minutePortfolio) || strategyDetail.isLoading}
+            disabled={!selectedStrategy || strategyDetail.isLoading}
             className="group w-full inline-flex items-center justify-center gap-2.5 rounded-btn border border-accent/40
               bg-gradient-to-r from-accent to-blue-500 px-3 py-2.5 text-white shadow-[0_10px_24px_rgba(59,130,246,0.22)]
               transition-all duration-150 ease-smooth hover:-translate-y-0.5 hover:shadow-[0_14px_28px_rgba(59,130,246,0.28)]
@@ -1501,10 +1515,10 @@ export function StrategyBacktest() {
         {/* 模式切换: 仓位模拟 / 全量模拟 */}
         <div className="flex items-center justify-between gap-2">
           <div className="inline-flex rounded-btn border border-border bg-surface/80 p-0.5 shadow-sm">
-            {([['position', '仓位模拟'], ['full', '全量模拟']] as const).map(([val, label]) => (
+            {([['position', '仓位模拟'], ...(!minuteNative ? [['full', '全量模拟'] as const] : [])]).map(([val, label]) => (
               <button
                 key={val}
-                onClick={() => setSimMode(val)}
+                onClick={() => setSimMode(val as 'position' | 'full')}
                 className={`inline-flex items-center gap-1.5 rounded-[5px] px-3 py-1.5 text-xs font-medium transition-colors cursor-pointer ${
                   simMode === val
                     ? 'bg-accent text-white shadow-sm'

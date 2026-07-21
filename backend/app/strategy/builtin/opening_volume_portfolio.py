@@ -16,7 +16,7 @@ META = {
         {"id": "enable_branch_b", "label": "启用 B 入场分支", "type": "bool", "default": True},
         {"id": "enable_branch_c", "label": "启用 C 入场分支", "type": "bool", "default": True},
         {"id": "stop_loss_pct", "label": "止损比例", "type": "percent", "default": 0.02, "min": 0},
-        {"id": "ma_exit_period", "label": "均线出场周期", "type": "int", "default": 5, "min": 1},
+        {"id": "ma_exit_period", "label": "均线出场周期", "type": "enum", "default": 5, "options": [5, 10, 20, 30, 60]},
     ],
 }
 

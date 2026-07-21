@@ -102,6 +102,11 @@ def test_scan_window_uses_configured_start_and_end_times() -> None:
     ) is None
 
 
+def test_strategy_params_reject_unsupported_ma_exit_period() -> None:
+    with pytest.raises(ValueError, match="ma_exit_period must be one of"):
+        OpeningVolumeStrategyParams.from_mapping({"ma_exit_period": 6})
+
+
 def test_rank_candidates_orders_volume_then_return_then_symbol() -> None:
     rows = rank_candidates([
         {"symbol": "000002.SZ", "volume_ratio": 2.0, "today_return": 0.04},

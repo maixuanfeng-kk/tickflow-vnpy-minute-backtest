@@ -599,6 +599,8 @@ async def minute_portfolio_stream(
     request: Request,
     start: str,
     end: str,
+    strategy_id: str = "opening_volume_portfolio",
+    params: str | None = None,
     commission_pct: float = 0.0002,
     stamp_tax_pct: float = 0.001,
     slippage_bps: float = 5.0,
@@ -606,8 +608,13 @@ async def minute_portfolio_stream(
     max_positions: int | None = None,
 ):
     """Run the fixed early-session portfolio strategy over a watchlist snapshot."""
-    from app.backtest.minute_portfolio import MinutePortfolioConfig, MinutePortfolioService
+    from app.backtest.minute_portfolio import (
+        MinutePortfolioConfig,
+        MinutePortfolioService,
+        OpeningVolumeStrategyParams,
+    )
     from app.services import watchlist
+    from app.strategy import config as strategy_config
 
     try:
         start_date = date.fromisoformat(start)
@@ -620,6 +627,32 @@ async def minute_portfolio_stream(
         raise HTTPException(status_code=400, detail="initial_capital must be positive")
     if max_positions is not None and max_positions <= 0:
         raise HTTPException(status_code=400, detail="max_positions must be positive")
+    try:
+        request_params = json.loads(params) if params else {}
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="params must be JSON") from exc
+    if not isinstance(request_params, dict):
+        raise HTTPException(status_code=400, detail="params must be a JSON object")
+
+    strategy_engine = getattr(request.app.state, "strategy_engine", None)
+    if strategy_engine is not None:
+        try:
+            strategy = strategy_engine.get(strategy_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        if strategy.execution_backend != "minute_native":
+            raise HTTPException(status_code=400, detail="strategy is not a minute portfolio strategy")
+
+    repo = request.app.state.repo
+    data_dir = getattr(getattr(repo, "store", None), "data_dir", None)
+    saved_params = {}
+    if data_dir is not None:
+        saved_params = dict(strategy_config.load_override(data_dir, strategy_id).get("params") or {})
+    saved_params.update(request_params)
+    try:
+        strategy_params = OpeningVolumeStrategyParams.from_mapping(saved_params)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     symbols = [row["symbol"] for row in watchlist.list_symbols() if row.get("symbol")]
     if not symbols:
         raise HTTPException(status_code=400, detail="自选股为空，无法运行分钟组合回测")
@@ -633,10 +666,11 @@ async def minute_portfolio_stream(
         slippage_bps=slippage_bps,
         **({"initial_capital": initial_capital} if initial_capital is not None else {}),
         **({"max_positions": max_positions} if max_positions is not None else {}),
+        strategy_params=strategy_params,
     )
     raw = (
-        f"minute-portfolio|{symbols}|{start}|{end}|{commission_pct}|{stamp_tax_pct}|{slippage_bps}|"
-        f"{config.initial_capital}|{config.max_positions}"
+        f"minute-portfolio|{strategy_id}|{symbols}|{start}|{end}|{commission_pct}|{stamp_tax_pct}|{slippage_bps}|"
+        f"{config.initial_capital}|{config.max_positions}|{json.dumps(saved_params, sort_keys=True, ensure_ascii=False)}"
     )
     job_key = f"minute-portfolio:{hashlib.md5(raw.encode()).hexdigest()[:12]}"
     _cleanup_stale_jobs()
@@ -652,7 +686,7 @@ async def minute_portfolio_stream(
         def _run() -> None:
             try:
                 job.progress.append({"day": 0, "total": 1, "date": "加载自选股分钟K", "equity": config.initial_capital})
-                result = MinutePortfolioService(request.app.state.repo).run(config)
+                result = MinutePortfolioService(repo).run(config)
                 job.progress.append({"day": 1, "total": 1, "date": "完成", "equity": result["stats"]["end_balance"]})
                 _finish_job(job, result=result)
             except Exception as exc:  # noqa: BLE001
