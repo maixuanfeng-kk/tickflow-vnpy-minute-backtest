@@ -55,7 +55,7 @@ export function StrategyPoolDialog({ pool, onConfirm, onClose }: Props) {
   const loadStrategies = useCallback(async () => {
     setLoading(true)
     try {
-      const d = await api.strategyList()
+      const d = await api.strategyList(undefined, '')
       setAllStrategies(d.strategies)
     } catch {
       setAllStrategies([])

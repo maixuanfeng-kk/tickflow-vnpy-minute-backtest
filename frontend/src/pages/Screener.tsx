@@ -119,8 +119,8 @@ export function Screener() {
   const screenerAutoRun = prefs?.screener_auto_run ?? true
 
   const strategies = useQuery({
-    queryKey: QK.screenerStrategies(assetType),
-    queryFn: () => api.screenerStrategies(assetType),
+    queryKey: QK.screenerStrategies(assetType, true),
+    queryFn: () => api.screenerStrategies(assetType, true),
   })
 
   // 策略结果缓存 — 文件读取，SSE invalidation 自动刷新
@@ -157,6 +157,16 @@ export function Screener() {
 
   const availableStrategyIds = useMemo(() => new Set((strategies.data?.presets ?? []).map(s => s.id)), [strategies.data])
   const visiblePool = useMemo(() => pool.filter(id => availableStrategyIds.has(id)), [pool, availableStrategyIds])
+  const dailyVisiblePool = useMemo(
+    () => visiblePool.filter(id => strategyMap.get(id)?.execution_backend !== 'minute_native'),
+    [visiblePool, strategyMap],
+  )
+
+  useEffect(() => {
+    if (assetType === 'stock' && availableStrategyIds.has('opening_volume_portfolio')) {
+      addToPool('opening_volume_portfolio')
+    }
+  }, [addToPool, assetType, availableStrategyIds])
 
   // 策略列表加载后,自动清除池中失效的自定义策略(如本地开发残留的、
   // 当前后端已不存在的策略 ID),避免"策略池"对话框持续显示失效项。
@@ -183,7 +193,7 @@ export function Screener() {
     mutationFn: ({ date, strategyIds }: { date?: string; strategyIds?: string[] } = {}) =>
       api.screenerRunAll(
         date,
-        strategyIds ?? visiblePool,
+        strategyIds ?? dailyVisiblePool,
         extColumnsParam || undefined,
         assetType,
       ),
@@ -211,8 +221,8 @@ export function Screener() {
   const cacheCoversPool = useMemo(() => {
     if (!cachedQuery.data?.as_of || cachedQuery.data.as_of !== asOf) return false
     if (!cachedQuery.data.results) return false
-    return visiblePool.length > 0 && visiblePool.every(id => id in cachedQuery.data!.results)
-  }, [cachedQuery.data, asOf, visiblePool])
+    return dailyVisiblePool.length > 0 && dailyVisiblePool.every(id => id in cachedQuery.data!.results)
+  }, [cachedQuery.data, asOf, dailyVisiblePool])
 
   // 统一数据源: 缓存优先，runAll fallback
   const effectiveResults = useMemo(() => {
@@ -406,8 +416,8 @@ export function Screener() {
   useEffect(() => {
     // ETF 模式无股票盘后缓存/ runAll, 单策略走实时单跑, 不触发 runAll
     if (assetType !== 'stock') return
-    if (!asOf || !strategies.data?.presets?.length || runAll.isPending || visiblePool.length === 0) return
-    const runKey = `${asOf}|${visiblePool.join(',')}|${extColumnsParam}`
+    if (!asOf || !strategies.data?.presets?.length || runAll.isPending || dailyVisiblePool.length === 0) return
+    const runKey = `${asOf}|${dailyVisiblePool.join(',')}|${extColumnsParam}`
     if (runAllDateRef.current === runKey) return
     // 缓存已覆盖当前策略池 → 秒加载, 不触发 runAll
     if (cacheCoversPool) {
@@ -422,7 +432,7 @@ export function Screener() {
         if (activeStrategy) applyRunAllResult(activeStrategy, asOf, data)
       },
     })
-  }, [asOf, strategies.data, visiblePool, extColumnsParam, cacheCoversPool, screenerAutoRun, activeStrategy, applyRunAllResult])
+  }, [asOf, strategies.data, dailyVisiblePool, extColumnsParam, cacheCoversPool, screenerAutoRun, activeStrategy, applyRunAllResult])
 
   const qc = useQueryClient()
 
@@ -440,10 +450,23 @@ export function Screener() {
     },
   })
 
+  const nativeRun = useMutation({
+    mutationFn: ({ id, date }: { id: string; date: string }) =>
+      api.strategyRun(id, undefined, date || undefined),
+    onSuccess: (data, vars) => {
+      setResult(data)
+      setHitCounts(prev => ({ ...prev, [vars.id]: data.total }))
+    },
+  })
+
   const handleRun = (s: ScreenerStrategy) => {
     handleStrategySwitch(s.id)
     setActiveStrategy(s.id)
     setShowAll(false)
+    if (s.execution_backend === 'minute_native') {
+      nativeRun.mutate({ id: s.id, date: asOf })
+      return
+    }
     // ETF 模式: 无股票盘后缓存, 始终实时单跑。
     // 传空日期让后端用 ETF 自己的最新交易日 (asOf 跟随的是股票 enriched, 两者可能不同日)。
     if (assetType !== 'stock') {
@@ -472,12 +495,14 @@ export function Screener() {
   // 日期变化时，重新跑全部策略命中数 + 当前激活策略
   const handleDateChange = (newDate: string) => {
     setAsOf(newDate)
-    runAllDateRef.current = `${newDate}|${visiblePool.join(',')}|${extColumnsParam}`
-    runAll.mutate({ date: newDate }, {
-      onSuccess: (data) => {
-        if (activeStrategy) applyRunAllResult(activeStrategy, newDate, data)
-      },
-    })
+    runAllDateRef.current = `${newDate}|${dailyVisiblePool.join(',')}|${extColumnsParam}`
+    if (dailyVisiblePool.length > 0) {
+      runAll.mutate({ date: newDate }, {
+        onSuccess: (data) => {
+          if (activeStrategy) applyRunAllResult(activeStrategy, newDate, data)
+        },
+      })
+    }
     if (activeStrategy) {
       setResult(null)
     }
@@ -513,7 +538,7 @@ export function Screener() {
     mutationFn: api.strategyReload,
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['screener-strategies'] })
-      if (asOf) runAll.mutate({ date: asOf })
+      if (asOf && dailyVisiblePool.length > 0) runAll.mutate({ date: asOf })
     },
   })
 
@@ -705,13 +730,13 @@ export function Screener() {
                   active={activeStrategy === s.id}
                   count={hitCounts[id]}
                   expiredCount={expiredCounts[id]}
-                  loading={runAll.isPending}
+                  loading={s.execution_backend === 'minute_native' ? nativeRun.isPending : runAll.isPending}
                   cardSize={cardSize}
                   onRun={() => handleRun(s)}
-                  disabled={run.isPending && activeStrategy === s.id}
+                  disabled={(s.execution_backend === 'minute_native' ? nativeRun.isPending : run.isPending) && activeStrategy === s.id}
                   onSettings={() => setSettingsStrategyId(s.id)}
-                  monitored={strategyMonitorMap.has(s.id)}
-                  onToggleMonitor={() => toggleStrategyMonitor(s.id, s.name)}
+                  monitored={s.execution_backend === 'minute_native' ? false : strategyMonitorMap.has(s.id)}
+                  onToggleMonitor={s.execution_backend === 'minute_native' ? undefined : () => toggleStrategyMonitor(s.id, s.name)}
                 />
               )
             })}
@@ -931,7 +956,8 @@ export function Screener() {
         onSaved={(limit) => {
           if (settingsStrategyId) {
             setStrategyLimits(prev => ({ ...prev, [settingsStrategyId]: limit }))
-            run.mutate({ id: settingsStrategyId, date: asOf })
+            const strategy = strategyMap.get(settingsStrategyId)
+            if (strategy) handleRun(strategy)
           }
         }}
         onAiModify={async () => {
@@ -971,7 +997,10 @@ export function Screener() {
             reorderPool(newPool)
             if (asOf) {
               runAllDateRef.current = ''
-              runAll.mutate({ date: asOf, strategyIds: newPool })
+              runAll.mutate({
+                date: asOf,
+                strategyIds: newPool.filter(id => strategyMap.get(id)?.execution_backend !== 'minute_native'),
+              })
             }
           }}
           onClose={() => setShowPoolDialog(false)}

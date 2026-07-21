@@ -240,12 +240,15 @@ def run_strategy(req: RunRequest, request: Request):
         if strategy.execution_backend == "minute_native":
             if req.asset_type != "stock":
                 raise HTTPException(status_code=400, detail="分钟策略仅支持股票")
-            native_result = OpeningVolumeScanService(request.app.state.repo).run(
-                OpeningVolumeScanConfig(
-                    as_of=as_of,
-                    strategy_params=OpeningVolumeStrategyParams.from_mapping(params),
+            try:
+                native_result = OpeningVolumeScanService(request.app.state.repo).run(
+                    OpeningVolumeScanConfig(
+                        as_of=as_of,
+                        strategy_params=OpeningVolumeStrategyParams.from_mapping(params),
+                    )
                 )
-            )
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e)) from e
             return _safe(native_result)
         from app.services.screener import ScreenerService
         svc = ScreenerService(request.app.state.repo, asset_type=req.asset_type)

@@ -269,6 +269,8 @@ export interface ScreenerStrategy {
   name: string
   description: string
   source?: string
+  execution_backend?: 'polars_expr' | 'matrix_native' | 'minute_native' | 'python_history_legacy'
+  timeframes?: string[]
 }
 
 export interface StrategyLoadError {
@@ -377,7 +379,7 @@ export interface AiReviewReport {
 export interface StrategyParamDef {
   id: string
   label: string
-  type: 'float' | 'int' | 'select' | 'bool'
+  type: 'float' | 'int' | 'select' | 'bool' | 'time' | 'percent'
   default: number | string | boolean
   min?: number
   max?: number
@@ -391,7 +393,7 @@ export interface StrategyDetail {
   description: string
   tags: string[]
   source: 'builtin' | 'custom' | 'ai'
-  execution_backend: 'polars_expr' | 'matrix_native' | 'python_history_legacy'
+  execution_backend: 'polars_expr' | 'matrix_native' | 'minute_native' | 'python_history_legacy'
   asset_types: string[]
   timeframes: string[]
   version: string
@@ -1354,9 +1356,10 @@ export const api = {
         : '/api/watchlist/enriched',
     ),
 
-  screenerStrategies: async (assetType: 'stock' | 'etf' = 'stock') => {
+  screenerStrategies: async (assetType: 'stock' | 'etf' = 'stock', includeMinute = false) => {
+    const timeframe = includeMinute ? '' : '&timeframe=1d'
     const data = await request<{ strategies: StrategyDetail[]; load_errors?: StrategyLoadError[] }>(
-      `/api/strategies?asset_type=${assetType}&timeframe=1d`,
+      `/api/strategies?asset_type=${assetType}${timeframe}`,
     )
     return { presets: data.strategies, load_errors: data.load_errors }
   },

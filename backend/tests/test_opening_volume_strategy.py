@@ -3,6 +3,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import polars as pl
+import pytest
+from fastapi import HTTPException
 
 from app.api import strategy as strategy_api
 from app.backtest.minute_portfolio import OpeningVolumeScanConfig, OpeningVolumeScanService, OpeningVolumeStrategyParams
@@ -108,3 +110,27 @@ def test_native_strategy_run_uses_saved_params(monkeypatch, tmp_path):
 
     assert result["total"] == 0
     assert captured["config"].strategy_params.volume_multiple == 2.0
+
+
+def test_native_strategy_run_reports_missing_minute_data_as_bad_request(monkeypatch, tmp_path):
+    class ScanService:
+        def __init__(self, repo):
+            self.repo = repo
+
+        def run(self, config):
+            raise ValueError("no minute bars in the selected range")
+
+    monkeypatch.setattr(strategy_api, "OpeningVolumeScanService", ScanService)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+        repo=SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)),
+        strategy_engine=StrategyEngine(strategy_dirs=[BUILTIN_DIR]),
+    )))
+
+    with pytest.raises(HTTPException) as exc_info:
+        strategy_api.run_strategy(strategy_api.RunRequest(
+            strategy_id="opening_volume_portfolio",
+            as_of=date(2026, 1, 5),
+        ), request)
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "no minute bars in the selected range"
