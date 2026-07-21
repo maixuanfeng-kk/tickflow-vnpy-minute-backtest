@@ -1165,12 +1165,6 @@ export function StrategyBacktest() {
                 }`} />
               </button>
               <span className={`text-[9px] font-medium ${highGranularity ? 'text-amber-400' : 'text-muted/50'}`}>分钟K</span>
-              <button
-                type="button"
-                onClick={() => { setMinutePortfolio(v => !v); setHighGranularity(false) }}
-                className={`rounded border px-1.5 py-0.5 text-[9px] font-medium transition-colors ${minutePortfolio ? 'border-amber-400/50 bg-amber-500/20 text-amber-400' : 'border-border text-secondary hover:border-amber-400/40'}`}
-                title="早盘放量组合：使用 TickFlow 自选股、1000 万初始资金、最多 8 仓"
-              >早盘组合</button>
               {!hasMinuteBatch && (
                 <span className="text-[8px] text-accent/70 font-medium bg-accent/10 px-1 py-px rounded">Pro+</span>
               )}
@@ -1186,6 +1180,17 @@ export function StrategyBacktest() {
               </div>
             </div>
           )}
+          <button
+            type="button"
+            onClick={() => { setMinutePortfolio(true); setHighGranularity(false) }}
+            className={`mb-2 w-full rounded-input border px-2.5 py-2 text-left transition-colors ${minutePortfolio
+              ? 'border-amber-400/60 bg-amber-400/10 text-amber-300'
+              : 'border-border bg-surface text-secondary hover:border-amber-400/45 hover:bg-amber-400/5'
+            }`}
+          >
+            <span className="block text-[11px] font-semibold">早盘放量组合（自选股）</span>
+            <span className="mt-0.5 block text-[9px] leading-relaxed text-muted">09:30–10:00｜1000 万｜最多 8 仓｜昨日同期累计量 1.5 倍</span>
+          </button>
           <div className="overflow-hidden rounded-input border border-border bg-surface">
             <div className="flex border-b border-border/60 bg-base/30 p-0.5">
               {STRATEGY_GROUPS.map(group => (
@@ -1212,7 +1217,7 @@ export function StrategyBacktest() {
             {filteredStrategyList.map(st => (
               <button
                 key={st.id}
-                onClick={() => setSelectedStrategy(st.id)}
+                onClick={() => { setSelectedStrategy(st.id); setMinutePortfolio(false) }}
                 className={`px-2 py-1 rounded-btn text-[11px] border transition-all duration-150 ease-smooth cursor-pointer
                   ${selectedStrategy === st.id
                     ? 'border-accent/50 bg-accent/10 text-accent shadow-[0_0_10px_rgba(59,130,246,0.1)]'
