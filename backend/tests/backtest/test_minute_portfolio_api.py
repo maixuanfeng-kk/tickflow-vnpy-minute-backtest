@@ -47,6 +47,7 @@ async def test_minute_portfolio_stream_passes_user_capital_and_positions(monkeyp
     assert captured["config"].max_positions == 4
     assert captured["config"].minute_data_dir == str(tmp_path)
     assert "event: done" in body
+    assert "event: done\ndata:" in body
 
 
 @pytest.mark.asyncio

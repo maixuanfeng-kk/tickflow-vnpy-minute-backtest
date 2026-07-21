@@ -152,6 +152,7 @@ class LocalMinuteParquetRepository:
     def _read(self, symbols: list[str], start: date, end: date) -> pl.DataFrame:
         frames: list[pl.DataFrame] = []
         for symbol in symbols:
+            symbol = self._symbol(symbol)
             path = self.data_dir / f"{symbol}.parquet"
             if not path.exists():
                 path = self.data_dir / f"{symbol.replace('.', '_')}.parquet"

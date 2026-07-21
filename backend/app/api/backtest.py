@@ -592,6 +592,8 @@ async def vnpy_stream(
                 return
             if await request.is_disconnected():
                 return
+            # Keep long local-Parquet loads alive through the dev proxy/browser.
+            yield ": keep-alive\n\n"
             await asyncio.sleep(0.05)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
@@ -706,13 +708,13 @@ async def minute_portfolio_stream(
         cursor = 0
         while True:
             while cursor < len(job.progress):
-                yield f"event: progress\\ndata: {json.dumps(job.progress[cursor], ensure_ascii=False)}\\n\\n"
+                yield f"event: progress\ndata: {json.dumps(job.progress[cursor], ensure_ascii=False)}\n\n"
                 cursor += 1
             if job.done:
                 if job.error:
-                    yield f"event: error\\ndata: {json.dumps({'message': job.error}, ensure_ascii=False)}\\n\\n"
+                    yield f"event: error\ndata: {json.dumps({'message': job.error}, ensure_ascii=False)}\n\n"
                 else:
-                    yield f"event: done\\ndata: {json.dumps(job.result, ensure_ascii=False, default=str)}\\n\\n"
+                    yield f"event: done\ndata: {json.dumps(job.result, ensure_ascii=False, default=str)}\n\n"
                 return
             if await request.is_disconnected():
                 return
