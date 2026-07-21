@@ -161,6 +161,38 @@ def test_engine_fills_top_eight_candidates_at_the_next_minute_open() -> None:
     assert all(trade["shares"] % 100 == 0 for trade in result["trades"])
 
 
+def test_engine_closes_positions_at_the_end_of_the_backtest() -> None:
+    day = date(2026, 1, 5)
+    rows = [
+        {
+            "symbol": "600000.SH", "datetime": datetime(2026, 1, 5, 9, 30),
+            "open": 10.0, "high": 10.6, "low": 10.0, "close": 10.2,
+            "volume": 150.0, "previous_cumulative_volume": 100.0,
+        },
+        {
+            "symbol": "600000.SH", "datetime": datetime(2026, 1, 5, 9, 31),
+            "open": 10.3, "high": 10.4, "low": 10.2, "close": 10.3,
+            "volume": 100.0, "previous_cumulative_volume": 200.0,
+        },
+    ]
+    contexts = {
+        ("600000.SH", day): {
+            "previous_open": 11.0,
+            "previous_close": 10.0,
+            "previous_high": 10.5,
+            "previous_change_pct": -0.02,
+            "previous_ma5": 9.0,
+        },
+    }
+
+    result = MinutePortfolioEngine(MinutePortfolioConfig(
+        symbols=["600000.SH"], max_positions=1,
+    )).run(rows, contexts)
+
+    assert result["trades"][-1]["exit_reason"] == "end_of_backtest"
+    assert result["trades"][-1]["exit_datetime"].endswith("09:31:00")
+
+
 def test_service_reads_daily_and_minute_rows_and_returns_backtest_shape() -> None:
     class Repo:
         minute_start = None
@@ -201,3 +233,43 @@ def test_service_reads_daily_and_minute_rows_and_returns_backtest_shape() -> Non
     assert result["config"]["max_positions"] == 4
     assert result["stats"]["total_trade_count"] == 1
     assert repo.minute_start <= date(2026, 1, 2)
+
+
+def test_service_excludes_warmup_minutes_from_execution(monkeypatch) -> None:
+    captured = {}
+
+    class Repo:
+        def get_daily_batch(self, symbols, start, end, columns):
+            return __import__("polars").DataFrame({
+                "symbol": ["600000.SH", "600000.SH"],
+                "date": [date(2026, 1, 2), date(2026, 1, 5)],
+                "open": [10.0, 10.0], "high": [10.0, 10.0],
+                "close": [10.0, 10.0], "ma5": [10.0, 10.0],
+            })
+
+        def get_minute_range(self, symbols, start, end, asset_type):
+            return __import__("polars").DataFrame({
+                "symbol": ["600000.SH", "600000.SH"],
+                "datetime": [
+                    datetime(2026, 1, 2, 9, 30),
+                    datetime(2026, 1, 5, 9, 30),
+                ],
+                "open": [10.0, 10.0], "high": [10.0, 10.0],
+                "low": [10.0, 10.0], "close": [10.0, 10.0],
+                "volume": [100.0, 100.0], "amount": [1000.0, 1000.0],
+            })
+
+    class Engine:
+        def __init__(self, config):
+            pass
+
+        def run(self, rows, contexts):
+            captured["dates"] = {row["datetime"].date() for row in rows}
+            return {"cash": 1_000_000.0, "trades": []}
+
+    monkeypatch.setattr("app.backtest.minute_portfolio.MinutePortfolioEngine", Engine)
+    MinutePortfolioService(Repo()).run(MinutePortfolioConfig(
+        symbols=["600000.SH"], start=date(2026, 1, 5), end=date(2026, 1, 5),
+    ))
+
+    assert captured["dates"] == {date(2026, 1, 5)}
