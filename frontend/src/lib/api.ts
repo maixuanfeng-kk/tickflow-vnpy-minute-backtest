@@ -183,6 +183,76 @@ export interface AiStockReport {
   created_at: string
 }
 
+export type DeepReportArtifactKind = 'markdown' | 'word' | 'pdf' | 'log'
+export type DeepReportRunStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
+export type DeepReportPdfStatus = 'pending' | 'ready' | 'unavailable'
+
+export interface DeepReportHealth {
+  ready: boolean
+  /** Values are sanitized status labels, never local absolute paths. */
+  paths: Record<string, string>
+  /** The backend may add capability checks without requiring a frontend release. */
+  checks: Record<string, boolean>
+  warnings: string[]
+}
+
+export interface DeepReportDefaults {
+  collect_tasks: string[]
+  analysis_tasks: string[]
+}
+
+export interface DeepReportTask {
+  id: string
+  kind: 'collect' | 'analysis'
+  title: string
+  prompt: string
+  enabled: boolean
+  order: number
+}
+
+export interface DeepReportTaskCatalog {
+  collect_tasks: DeepReportTask[]
+  analysis_tasks: DeepReportTask[]
+}
+
+export interface DeepReportArtifact {
+  kind: DeepReportArtifactKind
+  label: string
+  filename: string
+  available: boolean
+  size: number
+  download_url: string
+}
+
+export interface DeepReportRun {
+  id: string
+  symbol: string
+  stock_code: string
+  market: string
+  market_label: string
+  name: string
+  collect_task_ids: string[]
+  analysis_task_ids: string[]
+  collect_tasks: string[]
+  analysis_tasks: string[]
+  status: DeepReportRunStatus
+  stage: string
+  progress: number
+  message: string
+  error: string
+  pid?: number | null
+  report_title: string
+  pdf_status: DeepReportPdfStatus
+  pdf_error: string
+  created_at: string
+  updated_at: string
+  started_at?: string | null
+  finished_at?: string | null
+  artifacts: Record<DeepReportArtifactKind, DeepReportArtifact>
+  markdown_content?: string
+  log_tail?: string
+}
+
 // ===== Kline =====
 export interface MinuteKlineRow {
   datetime: string
@@ -1800,6 +1870,73 @@ export const api = {
   },
 
   // ===== 个股分析 =====
+  stockDeepReportHealth: () =>
+    request<DeepReportHealth>('/api/stock-analysis/deep-reports/health'),
+
+  stockDeepReportDefaults: () =>
+    request<DeepReportDefaults>('/api/stock-analysis/deep-reports/defaults'),
+
+  stockDeepReportTaskCatalog: () =>
+    request<DeepReportTaskCatalog>('/api/stock-analysis/deep-reports/task-catalog'),
+
+  stockDeepReportTaskCatalogAdmin: () =>
+    request<DeepReportTaskCatalog>('/api/stock-analysis/deep-reports/task-catalog/admin'),
+
+  stockDeepReportTaskCreate: (payload: Omit<DeepReportTask, 'id' | 'order'>) =>
+    request<{ task: DeepReportTask }>('/api/stock-analysis/deep-reports/task-catalog/admin', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  stockDeepReportTaskUpdate: (taskId: string, payload: Omit<DeepReportTask, 'id' | 'order'>) =>
+    request<{ task: DeepReportTask }>(`/api/stock-analysis/deep-reports/task-catalog/admin/${encodeURIComponent(taskId)}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+
+  stockDeepReportTaskDelete: (taskId: string) =>
+    request<{ ok: boolean }>(`/api/stock-analysis/deep-reports/task-catalog/admin/${encodeURIComponent(taskId)}`, {
+      method: 'DELETE',
+    }),
+
+  stockDeepReportTaskReorder: (kind: DeepReportTask['kind'], taskIds: string[]) =>
+    request<DeepReportTaskCatalog>('/api/stock-analysis/deep-reports/task-catalog/admin/reorder', {
+      method: 'POST',
+      body: JSON.stringify({ kind, task_ids: taskIds }),
+    }),
+
+  stockDeepReportRuns: (symbol?: string) =>
+    request<{ runs: DeepReportRun[] }>(
+      `/api/stock-analysis/deep-reports/runs${symbol ? `?symbol=${encodeURIComponent(symbol)}` : ''}`,
+    ),
+
+  stockDeepReportCreate: (payload: {
+    symbol: string
+    name?: string
+    collect_task_ids: string[]
+    analysis_task_ids: string[]
+  }) =>
+    request<{ run: DeepReportRun }>('/api/stock-analysis/deep-reports/runs', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  stockDeepReportDetail: (runId: string) =>
+    request<{ run: DeepReportRun }>(`/api/stock-analysis/deep-reports/runs/${encodeURIComponent(runId)}`),
+
+  stockDeepReportDelete: (runId: string) =>
+    request<{ ok: boolean }>(`/api/stock-analysis/deep-reports/runs/${encodeURIComponent(runId)}`, {
+      method: 'DELETE',
+    }),
+
+  stockDeepReportCancel: (runId: string) =>
+    request<{ run: DeepReportRun }>(`/api/stock-analysis/deep-reports/runs/${encodeURIComponent(runId)}/cancel`, {
+      method: 'POST',
+    }),
+
+  stockDeepReportDownloadUrl: (runId: string, kind: DeepReportArtifactKind) =>
+    `/api/stock-analysis/deep-reports/runs/${encodeURIComponent(runId)}/download/${kind}`,
+
   stockAnalysisLevels: (symbol: string, days = 120) =>
     request<StockLevels>(`/api/stock-analysis/levels?symbol=${encodeURIComponent(symbol)}&days=${days}`),
 

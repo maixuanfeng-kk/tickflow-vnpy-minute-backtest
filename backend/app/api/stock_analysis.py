@@ -1,4 +1,4 @@
-"""个股分析 API — 关键价位 + AI 四维分析 + 报告持久化。
+"""个股分析 API — 关键价位 + AI 四维分析 + FinSight 深度研报 + 报告持久化。
 
 路由前缀: /api/stock-analysis
 
@@ -8,20 +8,22 @@
   GET  /reports                历史报告列表
   POST /reports                保存一条报告
   DELETE /reports/{report_id}  删除一条报告
+  GET/POST /deep-reports/*     FinSight 深度研究报告编排
 """
 from __future__ import annotations
 
 import logging
 import math
 from datetime import date, timedelta
+from typing import Literal
 
 import polars as pl
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from fastapi.responses import FileResponse, StreamingResponse
+from pydantic import BaseModel, Field
 
 from app.indicators.levels import compute_levels, summarize_levels
-from app.services import stock_reports
+from app.services import deep_report_tasks, deep_stock_reports, stock_reports
 from app.services.stock_analyzer import analyze_stock_stream
 
 logger = logging.getLogger(__name__)
@@ -216,3 +218,164 @@ def delete_report(request: Request, report_id: str):
     """删除一条报告。"""
     ok = stock_reports.delete_report(report_id)
     return {"ok": ok}
+
+
+class CreateDeepReportRequest(BaseModel):
+    symbol: str = Field(min_length=1, max_length=24)
+    name: str = Field(default="", max_length=100)
+    collect_task_ids: list[str] = Field(min_length=1, max_length=50)
+    analysis_task_ids: list[str] = Field(min_length=1, max_length=50)
+
+
+class DeepReportTaskIn(BaseModel):
+    kind: Literal["collect", "analysis"]
+    title: str = Field(min_length=1, max_length=120)
+    prompt: str = Field(min_length=1, max_length=8000)
+    enabled: bool = True
+
+
+class DeepReportTaskOrderIn(BaseModel):
+    kind: Literal["collect", "analysis"]
+    task_ids: list[str] = Field(max_length=100)
+
+
+@router.get("/deep-reports/health")
+def get_deep_report_health() -> dict:
+    return deep_stock_reports.integration_health()
+
+
+@router.get("/deep-reports/defaults")
+def get_deep_report_default_tasks() -> dict:
+    return deep_stock_reports.default_task_templates()
+
+
+@router.get("/deep-reports/task-catalog")
+def get_deep_report_task_catalog() -> dict:
+    return deep_report_tasks.get_catalog(active_only=True)
+
+
+@router.get("/deep-reports/task-catalog/admin")
+def get_deep_report_task_catalog_admin() -> dict:
+    return deep_report_tasks.get_catalog(active_only=False)
+
+
+@router.post("/deep-reports/task-catalog/admin")
+def create_deep_report_task(req: DeepReportTaskIn) -> dict:
+    try:
+        task = deep_report_tasks.create_task(
+            kind=req.kind,
+            title=req.title,
+            prompt=req.prompt,
+            enabled=req.enabled,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"task": task}
+
+
+@router.put("/deep-reports/task-catalog/admin/{task_id}")
+def update_deep_report_task(task_id: str, req: DeepReportTaskIn) -> dict:
+    try:
+        task = deep_report_tasks.update_task(
+            task_id,
+            kind=req.kind,
+            title=req.title,
+            prompt=req.prompt,
+            enabled=req.enabled,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"task": task}
+
+
+@router.delete("/deep-reports/task-catalog/admin/{task_id}")
+def delete_deep_report_task(task_id: str) -> dict:
+    try:
+        deep_report_tasks.delete_task(task_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"ok": True}
+
+
+@router.post("/deep-reports/task-catalog/admin/reorder")
+def reorder_deep_report_tasks(req: DeepReportTaskOrderIn) -> dict:
+    try:
+        return deep_report_tasks.reorder_tasks(req.kind, req.task_ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/deep-reports/runs")
+def create_deep_report_run(req: CreateDeepReportRequest) -> dict:
+    try:
+        run = deep_stock_reports.create_run(
+            symbol=req.symbol,
+            name=req.name,
+            collect_task_ids=req.collect_task_ids,
+            analysis_task_ids=req.analysis_task_ids,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except deep_stock_reports.ConcurrentRunLimitError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except deep_stock_reports.IntegrationUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except deep_stock_reports.RunnerStartError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"run": run}
+
+
+@router.get("/deep-reports/runs")
+def list_deep_report_runs(symbol: str | None = Query(default=None)) -> dict:
+    try:
+        return {"runs": deep_stock_reports.list_runs(symbol)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/deep-reports/runs/{run_id}")
+def get_deep_report_run(run_id: str) -> dict:
+    try:
+        return {"run": deep_stock_reports.get_run(run_id)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/deep-reports/runs/{run_id}/cancel")
+def cancel_deep_report_run(run_id: str) -> dict:
+    try:
+        return {"run": deep_stock_reports.cancel_run(run_id)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/deep-reports/runs/{run_id}/download/{kind}")
+def download_deep_report_artifact(run_id: str, kind: str):
+    try:
+        path, media_type, filename = deep_stock_reports.resolve_artifact(run_id, kind)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return FileResponse(path=path, media_type=media_type, filename=filename)
+
+
+@router.delete("/deep-reports/runs/{run_id}")
+def delete_deep_report_run(run_id: str) -> dict:
+    try:
+        deep_stock_reports.delete_run(run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except deep_stock_reports.ActiveRunError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"ok": True}

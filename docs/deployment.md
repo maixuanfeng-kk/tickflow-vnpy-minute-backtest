@@ -4,6 +4,8 @@
 
 > 📌 前置依赖:Python ≥ 3.11 · Node ≥ 20 · [`uv`](https://docs.astral.sh/uv/) · `pnpm`（`npm i -g pnpm`）
 
+深度研报另需 Windows x64、Microsoft Word、Python 3.10.20 与 Pandoc 3.10，并通过独立 FinSight runtime 运行。请使用 `git clone --recurse-submodules`；详细步骤见 [deep-report-windows.md](./deep-report-windows.md)。Docker 部署不支持 Word/PDF 研报生成。
+
 ---
 
 ## 方式 A:Dev 模式(二次开发推荐)

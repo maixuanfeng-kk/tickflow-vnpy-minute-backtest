@@ -15,6 +15,7 @@ import { SOUND_OPTIONS, previewSound } from '@/lib/notificationSound'
 import {
   listZhVoices, previewVoice, activateVoice, getCurrentVoiceURI,
 } from '@/lib/voiceBroadcast'
+import { DeepReportTasksSettings } from './DeepReportTasks'
 
 export function SettingsSystemPanel() {
   const qc = useQueryClient()
@@ -317,6 +318,8 @@ export function SettingsSystemPanel() {
           </button>
         </div>
       </section>
+
+      <DeepReportTasksSettings />
 
       <section className="rounded-card border border-border bg-surface p-5 mt-6">
         <div className="flex items-center gap-2 mb-4">
