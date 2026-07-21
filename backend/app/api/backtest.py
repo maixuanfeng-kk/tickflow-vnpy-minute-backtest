@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import threading
 from dataclasses import asdict
 from datetime import date, timedelta
@@ -194,7 +195,7 @@ class StrategyBacktestRequest(BaseModel):
     # matching 向后兼容; 显式传 entry_fill/exit_fill 时以二者为准。
     matching: Literal["close_t", "open_t+1"] = "open_t+1"
     entry_fill: Literal["close_t", "open_t+1"] | None = None
-    exit_fill: Literal["close_t", "open_t+1"] | None = None
+    exit_fill: Literal["close_t", "open_t+1", "signal_next_minute"] | None = None
     fees_pct: float = 0.0002
     commission_pct: float | None = None
     stamp_tax_pct: float | None = None
@@ -206,6 +207,7 @@ class StrategyBacktestRequest(BaseModel):
     mode: Literal["position", "full"] = "position"
     holding_days: int = 5
     asset_type: str = "stock"
+    minute_fill: bool = False
 
 
 @router.post("/strategy/run")
@@ -239,6 +241,7 @@ def strategy_run(req: StrategyBacktestRequest, request: Request):
         mode=req.mode,
         holding_days=req.holding_days,
         asset_type=req.asset_type,
+        minute_fill=req.minute_fill,
     )
     task = make_worker_task("backtest", settings.data_dir, cfg)
     return run_worker_task(task)
@@ -585,6 +588,126 @@ async def vnpy_stream(
                     yield f"event: error\ndata: {json.dumps({'message': job.error}, ensure_ascii=False)}\n\n"
                 else:
                     yield f"event: done\ndata: {json.dumps(job.result, ensure_ascii=False, default=str)}\n\n"
+                return
+            if await request.is_disconnected():
+                return
+            await asyncio.sleep(0.05)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@router.get("/minute-portfolio/stream")
+async def minute_portfolio_stream(
+    request: Request,
+    start: str,
+    end: str,
+    strategy_id: str = "opening_volume_portfolio",
+    params: str | None = None,
+    commission_pct: float = 0.0002,
+    stamp_tax_pct: float = 0.001,
+    slippage_bps: float = 5.0,
+    initial_capital: float | None = None,
+    max_positions: int | None = None,
+):
+    """Run the fixed early-session portfolio strategy over a watchlist snapshot."""
+    from app.backtest.minute_portfolio import (
+        MinutePortfolioConfig,
+        MinutePortfolioService,
+        OpeningVolumeStrategyParams,
+    )
+    from app.services import watchlist
+    from app.strategy import config as strategy_config
+
+    try:
+        start_date = date.fromisoformat(start)
+        end_date = date.fromisoformat(end)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="start and end must be ISO dates") from exc
+    if end_date < start_date:
+        raise HTTPException(status_code=400, detail="end date must not precede start date")
+    if initial_capital is not None and (not math.isfinite(initial_capital) or initial_capital <= 0):
+        raise HTTPException(status_code=400, detail="initial_capital must be positive")
+    if max_positions is not None and max_positions <= 0:
+        raise HTTPException(status_code=400, detail="max_positions must be positive")
+    try:
+        request_params = json.loads(params) if params else {}
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="params must be JSON") from exc
+    if not isinstance(request_params, dict):
+        raise HTTPException(status_code=400, detail="params must be a JSON object")
+
+    strategy_engine = getattr(request.app.state, "strategy_engine", None)
+    if strategy_engine is not None:
+        try:
+            strategy = strategy_engine.get(strategy_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        if strategy.execution_backend != "minute_native":
+            raise HTTPException(status_code=400, detail="strategy is not a minute portfolio strategy")
+
+    repo = request.app.state.repo
+    data_dir = getattr(getattr(repo, "store", None), "data_dir", None)
+    saved_params = {}
+    if data_dir is not None:
+        saved_params = dict(strategy_config.load_override(data_dir, strategy_id).get("params") or {})
+    saved_params.update(request_params)
+    try:
+        strategy_params = OpeningVolumeStrategyParams.from_mapping(saved_params)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    symbols = [row["symbol"] for row in watchlist.list_symbols() if row.get("symbol")]
+    if not symbols:
+        raise HTTPException(status_code=400, detail="自选股为空，无法运行分钟组合回测")
+
+    config = MinutePortfolioConfig(
+        symbols=symbols,
+        start=start_date,
+        end=end_date,
+        commission_pct=commission_pct,
+        stamp_tax_pct=stamp_tax_pct,
+        slippage_bps=slippage_bps,
+        **({"initial_capital": initial_capital} if initial_capital is not None else {}),
+        **({"max_positions": max_positions} if max_positions is not None else {}),
+        strategy_params=strategy_params,
+    )
+    raw = (
+        f"minute-portfolio|{strategy_id}|{symbols}|{start}|{end}|{commission_pct}|{stamp_tax_pct}|{slippage_bps}|"
+        f"{config.initial_capital}|{config.max_positions}|{json.dumps(saved_params, sort_keys=True, ensure_ascii=False)}"
+    )
+    job_key = f"minute-portfolio:{hashlib.md5(raw.encode()).hexdigest()[:12]}"
+    _cleanup_stale_jobs()
+    with _jobs_lock:
+        job = _running_jobs.get(job_key)
+        if job is None:
+            job = _BacktestJob(job_key)
+            _running_jobs[job_key] = job
+            is_new = True
+        else:
+            is_new = False
+    if is_new:
+        def _run() -> None:
+            try:
+                job.progress.append({"day": 0, "total": 1, "date": "加载自选股分钟K", "equity": config.initial_capital})
+                result = MinutePortfolioService(repo).run(config)
+                job.progress.append({"day": 1, "total": 1, "date": "完成", "equity": result["stats"]["end_balance"]})
+                _finish_job(job, result=result)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("minute portfolio backtest failed")
+                _finish_job(job, error=str(exc))
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    async def event_generator():
+        cursor = 0
+        while True:
+            while cursor < len(job.progress):
+                yield f"event: progress\\ndata: {json.dumps(job.progress[cursor], ensure_ascii=False)}\\n\\n"
+                cursor += 1
+            if job.done:
+                if job.error:
+                    yield f"event: error\\ndata: {json.dumps({'message': job.error}, ensure_ascii=False)}\\n\\n"
+                else:
+                    yield f"event: done\\ndata: {json.dumps(job.result, ensure_ascii=False, default=str)}\\n\\n"
                 return
             if await request.is_disconnected():
                 return
@@ -1094,4 +1217,3 @@ async def walkforward_cancel(request: Request):
         job.cancel_event.set()
         return {"ok": True}
     return {"ok": False, "message": "任务不存在或已完成"}
-

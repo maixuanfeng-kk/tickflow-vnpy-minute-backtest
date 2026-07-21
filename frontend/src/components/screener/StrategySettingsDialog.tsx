@@ -21,6 +21,7 @@ Object.assign(FIELD_LABEL, {
   vol_ratio_5d: '量比', vol_ratio_20d: '20日量比',
   macd_dif: 'MACD-DIF', macd_dea: 'MACD-DEA', macd_hist: 'MACD柱',
   boll_upper: '布林上轨', boll_lower: '布林下轨',
+  ma20_bias: 'MA20乖离率',
 })
 
 interface Props {
@@ -118,6 +119,19 @@ function ParamField({ def, value, onChange }: {
   value: any
   onChange: (v: any) => void
 }) {
+  if (def.type === 'time') {
+    return (
+      <div className="flex items-center gap-2">
+        <span className="text-[11px] text-secondary w-16 shrink-0 text-right">{def.label}</span>
+        <input
+          type="time"
+          value={String(value ?? def.default)}
+          onChange={e => onChange(e.target.value)}
+          className="w-24 px-1.5 py-0.5 rounded bg-base border border-border text-[11px] font-mono text-foreground focus:outline-none focus:border-accent/50"
+        />
+      </div>
+    )
+  }
   if (def.type === 'bool') {
     const checked = value === true || value === 'true' || value === 'True'
     return (
@@ -135,6 +149,25 @@ function ParamField({ def, value, onChange }: {
             checked ? 'translate-x-[14px]' : 'translate-x-0.5'
           }`} />
         </button>
+      </div>
+    )
+  }
+
+  if (def.type === 'percent') {
+    const percent = Number(value ?? def.default) * 100
+    return (
+      <div className="flex items-center gap-2">
+        <span className="text-[11px] text-secondary w-16 shrink-0 text-right">{def.label}</span>
+        <input
+          type="number"
+          value={percent}
+          onChange={e => onChange(e.target.value === '' ? def.default : Number(e.target.value) / 100)}
+          step={(def.step ?? 0.01) * 100}
+          min={def.min != null ? def.min * 100 : undefined}
+          max={def.max != null ? def.max * 100 : undefined}
+          className="w-20 px-1.5 py-0.5 rounded bg-base border border-border text-[11px] font-mono text-foreground text-center focus:outline-none focus:border-accent/50"
+        />
+        <span className="text-[10px] text-muted">%</span>
       </div>
     )
   }
@@ -332,6 +365,7 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
   }
 
   if (!strategyId) return null
+  const isMinuteNative = detail?.execution_backend === 'minute_native'
 
   return (
     <>
@@ -385,7 +419,7 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
                         className="flex-1 h-8 px-3 rounded-lg bg-base border-0 ring-1 ring-border/30 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-accent/30 transition-shadow" />
                     </div>
                   </div>
-                  <div className="flex items-center gap-1.5 pb-0.5 shrink-0">
+                  <div className={`flex items-center gap-1.5 pb-0.5 shrink-0 ${isMinuteNative ? 'hidden' : ''}`}>
                     <span className="text-[10px] text-muted/50">显示上限</span>
                     <input type="number" value={displayLimit ?? ''} onChange={e => setDisplayLimit(e.target.value ? Number(e.target.value) : null)} step={1} min={10} max={200} placeholder="不限"
                       className="w-14 h-8 px-1.5 rounded-lg bg-base border border-border/40 text-xs font-mono text-foreground text-center focus:outline-none focus:border-accent/50" />
@@ -394,9 +428,10 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
                 </div>
 
                 {/* 三列 */}
-                <div className="grid grid-cols-3 gap-5 items-start">
+                <div className={`grid ${isMinuteNative ? 'grid-cols-1 max-w-md' : 'grid-cols-3'} gap-5 items-start`}>
                   {/* 列1：选股条件 */}
-                    <Section icon={Filter} title="基础参数" accent="text-sky-400">
+                  {!isMinuteNative && (
+                  <Section icon={Filter} title="基础参数" accent="text-sky-400">
                       <div className="flex items-center justify-between mb-1">
                         <span className="text-[10px] text-muted">启用基础参数过滤</span>
                         <button onClick={() => setBasicFilterEnabled(v => !v)}
@@ -431,6 +466,7 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
                       </div>
                     </div>
                   </Section>
+                  )}
 
                   {/* 列2：策略参数 */}
                   <div className="space-y-3">
@@ -446,7 +482,7 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
                   </div>
 
                   {/* 列3：评分 + 交易 */}
-                  <div className="space-y-3">
+                  {!isMinuteNative && <div className="space-y-3">
                     <Section icon={Star} title="评分权重" accent="text-amber-400">
                       {Object.entries(scoring).length > 0 ? (() => {
                         const total = Object.values(scoring).reduce((a: number, b: number) => a + b, 0) || 1
@@ -554,7 +590,7 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
                         </div>
                       </Section>
                     )}
-                  </div>
+                  </div>}
                 </div>
               </>
             ) : (

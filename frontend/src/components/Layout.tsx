@@ -620,7 +620,7 @@ export function Layout() {
               ) : null}
             </div>
           )}
-          {showSidebarQuotes && !isWatchlistMode && !isNoneTier && (
+          {showSidebarQuotes && !isWatchlistMode && (!isNoneTier || !!realtimeProviderName) && (
             <SidebarIndexQuotes rows={sidebarIndexQuotes?.rows} items={sidebarIndexes} />
           )}
         </div>

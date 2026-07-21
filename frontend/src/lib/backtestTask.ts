@@ -181,7 +181,7 @@ export function startBacktest(params: {
   holding_days?: number
   asset_type?: 'stock' | 'etf'
   minute_fill?: boolean
-  engine?: 'matrix' | 'vnpy'
+  engine?: 'matrix' | 'vnpy' | 'minute_portfolio'
 }): void {
   // 取消之前的任务状态
   if (eventSource) {
@@ -194,6 +194,7 @@ export function startBacktest(params: {
   emit()
 
   const isVnpy = params.engine === 'vnpy'
+  const isMinutePortfolio = params.engine === 'minute_portfolio'
   const symbols = params.symbols?.filter(Boolean) ?? []
   if (isVnpy && symbols.length !== 1) {
     current = { ...current, isPending: false, error: 'vn.py 分钟回测仅支持单只股票', reconnecting: false }
@@ -203,7 +204,7 @@ export function startBacktest(params: {
 
   const qs = buildQuery({
     strategy_id: params.strategy_id,
-    symbols: isVnpy ? undefined : symbols.join(','),
+    symbols: (isVnpy || isMinutePortfolio) ? undefined : symbols.join(','),
     symbol: isVnpy ? symbols[0] : undefined,
     start: params.start ?? undefined,
     end: params.end ?? undefined,
@@ -230,7 +231,8 @@ export function startBacktest(params: {
   // 存 reconnect 信息 (刷新后用)
   localStorage.setItem(RECONNECT_KEY, qs)
 
-  connectSSE(`/api/backtest/${isVnpy ? 'vnpy/stream' : 'strategy/stream'}?${qs}`)
+  const streamPath = isVnpy ? 'vnpy/stream' : isMinutePortfolio ? 'minute-portfolio/stream' : 'strategy/stream'
+  connectSSE(`/api/backtest/${streamPath}?${qs}`)
 }
 
 /** 停止当前回测任务 (调后端 cancel, 后端 cancel_event → 停止计算) */
@@ -277,8 +279,11 @@ export function tryReconnect(): boolean {
   const id = ++taskSeq
   current = { id, isPending: true, result: null, progress: null, error: null, reconnecting: false }
   emit()
-  const isVnpy = new URLSearchParams(qs).get('engine') === 'vnpy'
-  connectSSE(`/api/backtest/${isVnpy ? 'vnpy/stream' : 'strategy/stream'}?${qs}`)
+  const engine = new URLSearchParams(qs).get('engine')
+  const streamPath = engine === 'vnpy' ? 'vnpy/stream'
+    : engine === 'minute_portfolio' ? 'minute-portfolio/stream'
+      : 'strategy/stream'
+  connectSSE(`/api/backtest/${streamPath}?${qs}`)
   return true
 }
 

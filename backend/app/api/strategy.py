@@ -17,11 +17,17 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from app.backtest.minute_trigger import MINUTE_EXIT_TRIGGER_SIGNALS
 from app.strategy import config as strategy_config
 from app.strategy.ai_generator import AIStrategyGenerator, find_meta_assignment
 from app.strategy.engine import StrategyDef, StrategyEngine
 from app.strategy.monitor import StrategyMonitorService
 from app.strategy.prompt_builder import build_step1, build_step2
+from app.backtest.minute_portfolio import (
+    OpeningVolumeScanConfig,
+    OpeningVolumeScanService,
+    OpeningVolumeStrategyParams,
+)
 
 router = APIRouter(prefix="/api/strategies", tags=["strategies"])
 
@@ -99,6 +105,7 @@ def _strategy_detail(s: StrategyDef, overrides: dict | None = None) -> dict:
         "scoring": scoring,
         "entry_signals": overrides.get("entry_signals", s.entry_signals) if overrides else s.entry_signals,
         "exit_signals": overrides.get("exit_signals", s.exit_signals) if overrides else s.exit_signals,
+        "minute_exit_trigger_supported_signals": sorted(MINUTE_EXIT_TRIGGER_SIGNALS),
         "stop_loss": overrides.get("stop_loss", s.stop_loss) if overrides else s.stop_loss,
         "take_profit": getattr(s, "take_profit", None),
         "trailing_stop": getattr(s, "trailing_stop", None),
@@ -231,6 +238,20 @@ def run_strategy(req: RunRequest, request: Request):
         raise HTTPException(status_code=400, detail="无可用数据日期")
 
     try:
+        strategy = engine.get(req.strategy_id)
+        if strategy.execution_backend == "minute_native":
+            if req.asset_type != "stock":
+                raise HTTPException(status_code=400, detail="分钟策略仅支持股票")
+            try:
+                native_result = OpeningVolumeScanService(request.app.state.repo).run(
+                    OpeningVolumeScanConfig(
+                        as_of=as_of,
+                        strategy_params=OpeningVolumeStrategyParams.from_mapping(params),
+                    )
+                )
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e)) from e
+            return _safe(native_result)
         from app.services.screener import ScreenerService
         svc = ScreenerService(request.app.state.repo, asset_type=req.asset_type)
         context = svc.build_strategy_context(
@@ -504,6 +525,7 @@ def _prepare_strategy_code(req: StrategyCodeValidateRequest | StrategyCodeSaveRe
     # 安全校验始终执行 (此前 strict 字段可被客户端设 false 绕过, 已移除)
     AIStrategyGenerator._validate_safety(code)
     meta = AIStrategyGenerator._extract_meta(code)
+    AIStrategyGenerator._validate_meta_semantics(code, meta)
     return {"code": code, "meta": meta}
 
 

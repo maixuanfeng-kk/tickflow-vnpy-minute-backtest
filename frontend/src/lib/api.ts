@@ -118,6 +118,15 @@ export interface FinancialCashFlowRecord {
   [key: string]: any
 }
 
+export interface FinancialSharesRecord {
+  symbol?: string
+  period_end: string
+  announce_date?: string | null
+  total_shares?: number | null
+  float_shares?: number | null
+  [key: string]: any
+}
+
 /** AI 财务分析历史报告 */
 export interface AiFinancialReport {
   id: string
@@ -255,6 +264,13 @@ export interface MinuteKlineRow {
   amount: number
 }
 
+export interface PriceLimitInfo {
+  rate: number
+  limit_up: number | null
+  limit_down: number | null
+  source: 'rule' | 'instrument'
+}
+
 export interface KlineRow {
   symbol?: string
   date: string
@@ -339,6 +355,8 @@ export interface ScreenerStrategy {
   name: string
   description: string
   source?: string
+  execution_backend?: 'polars_expr' | 'matrix_native' | 'minute_native' | 'python_history_legacy'
+  timeframes?: string[]
 }
 
 export interface StrategyLoadError {
@@ -352,6 +370,25 @@ export interface ScreenerResult {
   rows: any[]
   total: number
   elapsed_ms: number
+}
+
+export interface ScreenerResultSummary {
+  total: number
+  as_of: string
+}
+
+export interface ScreenerCachedSummary {
+  as_of: string | null
+  results: Record<string, ScreenerResultSummary>
+  today_ever_counts: Record<string, number>
+  updated_at: number | null
+}
+
+export interface ScreenerCachedResult {
+  result: ScreenerResult | null
+  today_ever_rows: Record<string, any> | null
+  strategy_ids_by_symbol: Record<string, string[]>
+  updated_at: number | null
 }
 
 export interface MarketSnapshotRow {
@@ -447,7 +484,7 @@ export interface AiReviewReport {
 export interface StrategyParamDef {
   id: string
   label: string
-  type: 'float' | 'int' | 'select' | 'bool'
+  type: 'float' | 'int' | 'select' | 'bool' | 'time' | 'percent'
   default: number | string | boolean
   min?: number
   max?: number
@@ -461,7 +498,7 @@ export interface StrategyDetail {
   description: string
   tags: string[]
   source: 'builtin' | 'custom' | 'ai'
-  execution_backend: 'polars_expr' | 'matrix_native' | 'python_history_legacy'
+  execution_backend: 'polars_expr' | 'matrix_native' | 'minute_native' | 'python_history_legacy'
   asset_types: string[]
   timeframes: string[]
   version: string
@@ -471,6 +508,7 @@ export interface StrategyDetail {
   scoring: Record<string, number>
   entry_signals: string[]
   exit_signals: string[]
+  minute_exit_trigger_supported_signals: string[]
   stop_loss: number | null
   take_profit: number | null
   trailing_stop: number | null
@@ -563,6 +601,7 @@ export interface MonitorRule {
   webhook_enabled?: boolean  // 兼容老规则, 已由 webhook_channels 取代
   webhook_channels?: string[]  // 命中时推送的外部渠道 (合法值 'feishu' | 'wecom')
   created_at?: string
+  runtime_warning?: string
   // ladder 专属: 封单监控
   metric?: 'sealed_vol' | 'sealed_amount'  // 量(手) / 额(元)
   threshold?: number                        // 封单 <= 此值时报警
@@ -578,6 +617,12 @@ export interface MonitorRuleOptions {
   logics: { key: string; label: string }[]
   severities: { key: string; label: string }[]
   directions: { key: string; label: string }[]
+  intraday_signal_support: {
+    available: boolean
+    source: string | null
+    max_symbols: number
+    reason: string
+  }
 }
 
 export interface AlertEvent {
@@ -620,6 +665,8 @@ export interface LimitLadderStock {
   sealed_status?: 'real' | 'fake' | 'pending' | null
   /** 封单量(买一/卖一量), 仅真封板有值 */
   sealed_vol?: number | null
+  /** 最终状态为涨跌停且当天开高低收四价相同 */
+  is_one_word?: boolean
 }
 
 export interface LimitLadderTier {
@@ -865,6 +912,8 @@ export interface DatasetConfig {
   symbols_param?: string
   start_param?: string
   end_param?: string
+  asset_type_param?: string | null
+  freq_param?: string | null
 }
 
 export interface AuthConfig {
@@ -1310,6 +1359,7 @@ export const api = {
       date: string | null
       rows: MinuteKlineRow[]
       source?: 'local' | 'live' | 'none'
+      price_limit?: PriceLimitInfo | null
     }>(
       `/api/kline/minute?symbol=${encodeURIComponent(symbol)}${date ? `&date=${date}` : ''}`,
     ),
@@ -1424,9 +1474,10 @@ export const api = {
         : '/api/watchlist/enriched',
     ),
 
-  screenerStrategies: async (assetType: 'stock' | 'etf' = 'stock') => {
+  screenerStrategies: async (assetType: 'stock' | 'etf' = 'stock', includeMinute = false) => {
+    const timeframe = includeMinute ? '' : '&timeframe=1d'
     const data = await request<{ strategies: StrategyDetail[]; load_errors?: StrategyLoadError[] }>(
-      `/api/strategies?asset_type=${assetType}&timeframe=1d`,
+      `/api/strategies?asset_type=${assetType}${timeframe}`,
     )
     return { presets: data.strategies, load_errors: data.load_errors }
   },
@@ -1440,9 +1491,17 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ conditions, order_by: orderBy, limit, pool, ext_columns: extColumns || null, asset_type: assetType }),
     }),
-  screenerRunAll: (asOf?: string, strategyIds?: string[], extColumns?: string, assetType: 'stock' | 'etf' = 'stock') =>
-    request<{ as_of: string | null; results: Record<string, { total: number; as_of: string; rows: any[] }> }>(
-      '/api/screener/run_all', { method: 'POST', body: JSON.stringify({ as_of: asOf ?? null, strategy_ids: strategyIds ?? null, ext_columns: extColumns || null, asset_type: assetType, timeframe: '1d' }) },
+  screenerRunAll: (asOf?: string, strategyIds?: string[], assetType: 'stock' | 'etf' = 'stock') =>
+    request<{ as_of: string | null; results: Record<string, ScreenerResultSummary> }>(
+      '/api/screener/run_all', { method: 'POST', body: JSON.stringify({ as_of: asOf ?? null, strategy_ids: strategyIds ?? null, asset_type: assetType, timeframe: '1d', summary_only: true }) },
+    ),
+  screenerCachedSummary: () =>
+    request<ScreenerCachedSummary>('/api/screener/cached-summary'),
+  screenerCachedResult: (strategyId: string, extColumns?: string) =>
+    request<ScreenerCachedResult>(
+      extColumns
+        ? `/api/screener/cached-result/${encodeURIComponent(strategyId)}?ext_columns=${encodeURIComponent(extColumns)}`
+        : `/api/screener/cached-result/${encodeURIComponent(strategyId)}`,
     ),
   screenerCached: (extColumns?: string) =>
     request<{ as_of: string | null; results: Record<string, { total: number; as_of: string; rows: any[] }>; today_ever_matched: Record<string, string[]> | null; today_ever_rows: Record<string, Record<string, any>> | null; updated_at: number | null }>(
@@ -1516,7 +1575,7 @@ export const api = {
     overrides?: Record<string, any> | null
     matching?: 'close_t' | 'open_t+1'
     entry_fill?: 'close_t' | 'open_t+1' | null
-    exit_fill?: 'close_t' | 'open_t+1' | null
+    exit_fill?: 'close_t' | 'open_t+1' | 'signal_next_minute' | null
     fees_pct?: number
     commission_pct?: number
     stamp_tax_pct?: number
@@ -1525,6 +1584,7 @@ export const api = {
     initial_capital?: number
     position_sizing?: 'equal' | 'score_weight'
     asset_type?: 'stock' | 'etf'
+    minute_fill?: boolean
   }) =>
     request<StrategyBacktestResult>('/api/backtest/strategy/run', {
       method: 'POST',
@@ -1587,6 +1647,13 @@ export const api = {
     if (opts?.columns?.length) qs.set('columns', opts.columns.join(','))
     const suffix = qs.toString()
     return request<ExtDataRowsResult>(`/api/ext-data/${encodeURIComponent(id)}/rows${suffix ? `?${suffix}` : ''}`)
+  },
+
+  dimensionMembers: (id: string, opts: { field: string; value: string; date?: string; limit?: number }) => {
+    const qs = new URLSearchParams({ field: opts.field, value: opts.value })
+    if (opts.date) qs.set('date', opts.date)
+    if (opts.limit) qs.set('limit', String(opts.limit))
+    return request<DimensionMembersResult>(`/api/ext-data/${encodeURIComponent(id)}/dimension-members?${qs.toString()}`)
   },
 
   analysisMenus: () =>
@@ -1715,6 +1782,11 @@ export const api = {
   financialCashFlow: (symbol?: string) =>
     request<{ data: FinancialCashFlowRecord[] }>(
       `/api/financials/cash-flow${symbol ? `?symbol=${encodeURIComponent(symbol)}` : ''}`,
+    ),
+
+  financialShares: (symbol?: string) =>
+    request<{ data: FinancialSharesRecord[] }>(
+      `/api/financials/shares${symbol ? `?symbol=${encodeURIComponent(symbol)}` : ''}`,
     ),
 
   /** 触发财务数据同步(后台异步执行,接口立即返回 started 状态) */
@@ -2410,6 +2482,17 @@ export interface ExtDataRowsResult {
   total: number
   limit: number
   fields: ExtDataField[]
+  rows: Record<string, any>[]
+}
+
+export interface DimensionMembersResult {
+  id: string
+  label: string
+  date: string | null
+  field: string
+  value: string
+  total: number
+  limit: number
   rows: Record<string, any>[]
 }
 
