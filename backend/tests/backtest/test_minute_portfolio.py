@@ -6,7 +6,9 @@ from app.backtest.minute_portfolio import (
     MinutePortfolioConfig,
     MinutePortfolioEngine,
     MinutePortfolioService,
+    OpeningVolumeStrategyParams,
     entry_reason,
+    is_in_scan_window,
     rank_candidates,
 )
 
@@ -41,6 +43,55 @@ def test_entry_reason_requires_today_return_between_three_and_five_percent() -> 
         volume_ratio=1.5,
         crossed_previous_high=False,
     ) is None
+
+
+def test_entry_reason_requires_volume_and_any_enabled_branch() -> None:
+    params = OpeningVolumeStrategyParams(
+        volume_multiple=2.0,
+        enable_branch_a=False,
+        enable_branch_b=True,
+        enable_branch_c=True,
+    )
+
+    assert entry_reason(
+        previous_open=11.0,
+        previous_close=10.0,
+        previous_change_pct=-0.02,
+        today_return=0.01,
+        volume_ratio=1.9,
+        crossed_previous_high=True,
+        params=params,
+    ) is None
+    assert entry_reason(
+        previous_open=11.0,
+        previous_close=10.0,
+        previous_change_pct=-0.02,
+        today_return=0.01,
+        volume_ratio=2.0,
+        crossed_previous_high=True,
+        params=params,
+    ) is None
+    assert entry_reason(
+        previous_open=10.0,
+        previous_close=10.0,
+        previous_change_pct=0.04,
+        today_return=0.04,
+        volume_ratio=2.0,
+        crossed_previous_high=False,
+        params=params,
+    ) == "two_day_moderate_rise"
+
+
+def test_scan_window_uses_configured_start_and_end_times() -> None:
+    params = OpeningVolumeStrategyParams.from_mapping({
+        "scan_start_time": "09:35",
+        "scan_end_time": "09:45",
+    })
+
+    assert is_in_scan_window(datetime(2026, 1, 5, 9, 34).time(), params) is False
+    assert is_in_scan_window(datetime(2026, 1, 5, 9, 35).time(), params) is True
+    assert is_in_scan_window(datetime(2026, 1, 5, 9, 45).time(), params) is True
+    assert is_in_scan_window(datetime(2026, 1, 5, 9, 46).time(), params) is False
     assert entry_reason(
         previous_open=10.0,
         previous_close=10.0,

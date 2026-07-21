@@ -1,10 +1,10 @@
 """Pure rules for the opening-volume minute portfolio strategy."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from math import floor
-from typing import TypedDict
+from typing import Any, Mapping, TypedDict
 from uuid import uuid4
 
 
@@ -21,6 +21,71 @@ class Candidate(TypedDict):
     today_return: float
 
 
+@dataclass(frozen=True)
+class OpeningVolumeStrategyParams:
+    scan_start_time: time = time(9, 30)
+    scan_end_time: time = time(9, 59)
+    volume_multiple: float = VOLUME_RATIO_MIN
+    enable_branch_a: bool = True
+    enable_branch_b: bool = True
+    enable_branch_c: bool = True
+    stop_loss_pct: float = 0.02
+    ma_exit_period: int = 5
+
+    @classmethod
+    def from_mapping(cls, values: Mapping[str, Any] | None) -> "OpeningVolumeStrategyParams":
+        values = values or {}
+
+        def parse_time(value: Any, field_name: str, default: time) -> time:
+            if value is None:
+                return default
+            if isinstance(value, time):
+                return value
+            if isinstance(value, str):
+                try:
+                    return datetime.strptime(value, "%H:%M").time()
+                except ValueError as exc:
+                    raise ValueError(f"{field_name} must use HH:MM format") from exc
+            raise ValueError(f"{field_name} must use HH:MM format")
+
+        def parse_bool(value: Any, field_name: str, default: bool) -> bool:
+            if value is None:
+                return default
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str) and value.lower() in {"true", "false"}:
+                return value.lower() == "true"
+            raise ValueError(f"{field_name} must be boolean")
+
+        start = parse_time(values.get("scan_start_time"), "scan_start_time", cls.scan_start_time)
+        end = parse_time(values.get("scan_end_time"), "scan_end_time", cls.scan_end_time)
+        if start > end:
+            raise ValueError("scan_start_time must not be after scan_end_time")
+        volume_multiple = float(values.get("volume_multiple", cls.volume_multiple))
+        stop_loss_pct = float(values.get("stop_loss_pct", cls.stop_loss_pct))
+        ma_exit_period = int(values.get("ma_exit_period", cls.ma_exit_period))
+        if volume_multiple <= 0:
+            raise ValueError("volume_multiple must be positive")
+        if stop_loss_pct < 0:
+            raise ValueError("stop_loss_pct must not be negative")
+        if ma_exit_period < 1:
+            raise ValueError("ma_exit_period must be positive")
+        return cls(
+            scan_start_time=start,
+            scan_end_time=end,
+            volume_multiple=volume_multiple,
+            enable_branch_a=parse_bool(values.get("enable_branch_a"), "enable_branch_a", cls.enable_branch_a),
+            enable_branch_b=parse_bool(values.get("enable_branch_b"), "enable_branch_b", cls.enable_branch_b),
+            enable_branch_c=parse_bool(values.get("enable_branch_c"), "enable_branch_c", cls.enable_branch_c),
+            stop_loss_pct=stop_loss_pct,
+            ma_exit_period=ma_exit_period,
+        )
+
+
+def is_in_scan_window(current_time: time, params: OpeningVolumeStrategyParams) -> bool:
+    return params.scan_start_time <= current_time <= params.scan_end_time
+
+
 def entry_reason(
     *,
     previous_open: float,
@@ -29,15 +94,17 @@ def entry_reason(
     today_return: float,
     volume_ratio: float,
     crossed_previous_high: bool,
+    params: OpeningVolumeStrategyParams | None = None,
 ) -> str | None:
     """Return the first configured entry branch satisfied by a minute bar."""
-    if volume_ratio < VOLUME_RATIO_MIN:
+    params = params or OpeningVolumeStrategyParams()
+    if volume_ratio < params.volume_multiple:
         return None
-    if previous_close < previous_open and crossed_previous_high:
+    if params.enable_branch_a and previous_close < previous_open and crossed_previous_high:
         return "previous_bearish_breakout"
-    if 0.03 < today_return < 0.05 and previous_change_pct < 0.05:
+    if params.enable_branch_b and 0.03 < today_return < 0.05 and previous_change_pct < 0.05:
         return "two_day_moderate_rise"
-    if previous_close > previous_open and previous_change_pct < 0.05:
+    if params.enable_branch_c and previous_close > previous_open and previous_change_pct < 0.05:
         return "previous_moderate_rise"
     return None
 
@@ -61,6 +128,7 @@ class MinutePortfolioConfig:
     commission_pct: float = 0.0002
     stamp_tax_pct: float = 0.001
     slippage_bps: float = 5.0
+    strategy_params: OpeningVolumeStrategyParams = field(default_factory=OpeningVolumeStrategyParams)
 
 
 class MinutePortfolioEngine:
@@ -130,12 +198,13 @@ class MinutePortfolioEngine:
                     continue
                 context = daily_context.get((symbol, timestamp.date()))
                 close = float(bars.get(symbol, {}).get("close", 0) or 0)
-                ma5 = float(context.get("previous_ma5") or 0) if context else 0
-                if close > 0 and close <= position["entry_price"] * 0.98:
+                ma_key = f"previous_ma{self.config.strategy_params.ma_exit_period}"
+                ma_value = float(context.get(ma_key) or 0) if context else 0
+                if close > 0 and close <= position["entry_price"] * (1 - self.config.strategy_params.stop_loss_pct):
                     position["exit_reason"] = "stop_loss"
                     pending_sells.add(symbol)
-                elif close > 0 and ma5 > 0 and close < ma5:
-                    position["exit_reason"] = "ma5_breakdown"
+                elif close > 0 and ma_value > 0 and close < ma_value:
+                    position["exit_reason"] = f"ma{self.config.strategy_params.ma_exit_period}_breakdown"
                     pending_sells.add(symbol)
 
             candidates: list[Candidate] = []
@@ -148,7 +217,7 @@ class MinutePortfolioEngine:
                 if context is None or symbol in positions or key in entered_today:
                     continue
                 current_time = timestamp.time()
-                if not time(9, 30) <= current_time <= time(9, 59):
+                if not is_in_scan_window(current_time, self.config.strategy_params):
                     continue
                 previous_volume = float(bar.get("previous_cumulative_volume") or 0)
                 if previous_volume <= 0:
@@ -166,6 +235,7 @@ class MinutePortfolioEngine:
                         prior_high < float(context["previous_high"])
                         and float(bar["high"]) >= float(context["previous_high"])
                     ),
+                    params=self.config.strategy_params,
                 )
                 if reason is not None:
                     candidates.append({
@@ -200,11 +270,12 @@ class MinutePortfolioService:
     def run(self, config: MinutePortfolioConfig) -> dict:
         if config.start is None or config.end is None:
             raise ValueError("start and end are required")
+        ma_column = f"ma{config.strategy_params.ma_exit_period}"
         daily = self.repo.get_daily_batch(
             config.symbols,
             config.start - timedelta(days=20),
             config.end,
-            columns=["symbol", "date", "open", "high", "close", "ma5"],
+            columns=["symbol", "date", "open", "high", "close", ma_column],
         )
         minutes = self.repo.get_minute_range(
             config.symbols, config.start - timedelta(days=7), config.end, asset_type="stock",
@@ -232,7 +303,7 @@ class MinutePortfolioService:
                         "previous_close": previous_close,
                         "previous_high": previous["high"],
                         "previous_change_pct": change,
-                        "previous_ma5": previous.get("ma5"),
+                        f"previous_ma{config.strategy_params.ma_exit_period}": previous.get(ma_column),
                     }
 
         raw_rows = minutes.sort(["symbol", "datetime"]).to_dicts()
