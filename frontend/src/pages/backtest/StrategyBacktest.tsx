@@ -874,13 +874,13 @@ export function StrategyBacktest() {
   }, [backtestTask])
 
   const handleRun = () => {
-    if (!selectedStrategy) return
+    if (!selectedStrategy && !minutePortfolio) return
     const requestOverrides = detail
       ? normalizeStrategyOverrides(detail, overrides)
       : overrides
     startBacktest({
-      strategy_id: minutePortfolio ? 'opening_volume_portfolio' : highGranularity ? 'minute_double_ma_volume' : selectedStrategy,
-      asset_type: assetType,
+      strategy_id: minutePortfolio ? 'opening_volume_portfolio' : highGranularity ? 'minute_double_ma_volume' : selectedStrategy!,
+      asset_type: minutePortfolio ? 'stock' : assetType,
       symbols: minutePortfolio ? null : symbols ? symbols.split(',').map(s => s.trim()).filter(Boolean) : null,
       start: start || null,
       end: end || undefined,
@@ -1114,7 +1114,9 @@ export function StrategyBacktest() {
         maxHoldDaysValue !== '' ? `最长 ${maxHoldDaysValue}天` : '不限持仓',
       ].join(' · ')
     : '选择策略后可调整参数 / 过滤 / 买卖触发器 / 评分 / 风控'
-  const selectedStrategyName = detail?.name ?? strategyList.find(st => st.id === selectedStrategy)?.name ?? '未选择策略'
+  const selectedStrategyName = minutePortfolio
+    ? '早盘放量组合（自选股）'
+    : detail?.name ?? strategyList.find(st => st.id === selectedStrategy)?.name ?? '未选择策略'
   const selectedStrategySource = detail?.source ?? strategyList.find(st => st.id === selectedStrategy)?.source
   const stockPoolCount = symbols.split(',').map(s => s.trim()).filter(Boolean).length
   const stockPoolSummary = stockPoolCount > 0 ? `股票池 已限定 ${stockPoolCount} 只` : '股票池 全市场'
@@ -1165,11 +1167,10 @@ export function StrategyBacktest() {
               <span className={`text-[9px] font-medium ${highGranularity ? 'text-amber-400' : 'text-muted/50'}`}>分钟K</span>
               <button
                 type="button"
-                onClick={() => { if (hasMinuteBatch) { setMinutePortfolio(v => !v); setHighGranularity(false) } }}
-                disabled={!hasMinuteBatch}
-                className={`rounded px-1 text-[9px] ${minutePortfolio ? 'bg-amber-500/20 text-amber-400' : 'text-muted'} ${!hasMinuteBatch ? 'opacity-50 cursor-not-allowed' : ''}`}
+                onClick={() => { setMinutePortfolio(v => !v); setHighGranularity(false) }}
+                className={`rounded border px-1.5 py-0.5 text-[9px] font-medium transition-colors ${minutePortfolio ? 'border-amber-400/50 bg-amber-500/20 text-amber-400' : 'border-border text-secondary hover:border-amber-400/40'}`}
                 title="早盘放量组合：使用 TickFlow 自选股、1000 万初始资金、最多 8 仓"
-              >组合</button>
+              >早盘组合</button>
               {!hasMinuteBatch && (
                 <span className="text-[8px] text-accent/70 font-medium bg-accent/10 px-1 py-px rounded">Pro+</span>
               )}
@@ -1453,7 +1454,7 @@ export function StrategyBacktest() {
         ) : (
           <button
             onClick={handleRun}
-            disabled={!selectedStrategy || strategyDetail.isLoading}
+            disabled={(!selectedStrategy && !minutePortfolio) || strategyDetail.isLoading}
             className="group w-full inline-flex items-center justify-center gap-2.5 rounded-btn border border-accent/40
               bg-gradient-to-r from-accent to-blue-500 px-3 py-2.5 text-white shadow-[0_10px_24px_rgba(59,130,246,0.22)]
               transition-all duration-150 ease-smooth hover:-translate-y-0.5 hover:shadow-[0_14px_28px_rgba(59,130,246,0.28)]
