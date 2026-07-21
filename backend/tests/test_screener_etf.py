@@ -41,16 +41,20 @@ def test_all_builtin_strategies_declare_asset_types_and_timeframes():
     assert engine.load_errors() == []
     for meta in engine.list_strategies():
         assert meta["asset_types"]
-        assert meta["timeframes"] == ["1d"]
+        assert meta["timeframes"] in (["1d"], ["1m"])
 
 
-def test_all_builtin_strategies_use_matrix_backend_only():
+def test_builtin_strategies_include_daily_matrix_and_minute_native_backends():
     engine = _engine()
     assert engine.load_errors() == []
     strategies = [engine.get(meta["id"]) for meta in engine.list_strategies()]
-    assert len(strategies) == 18
-    assert all(strategy.execution_backend == "matrix_native" for strategy in strategies)
-    assert all(strategy.matrix_strategy is not None for strategy in strategies)
+    matrix_strategies = [s for s in strategies if s.execution_backend == "matrix_native"]
+    minute_strategies = [s for s in strategies if s.execution_backend == "minute_native"]
+
+    assert len(matrix_strategies) == 18
+    assert len(minute_strategies) == 1
+    assert minute_strategies[0].meta["id"] == "opening_volume_portfolio"
+    assert all(strategy.matrix_strategy is not None for strategy in matrix_strategies)
     assert all(strategy.filter_fn is None for strategy in strategies)
     assert all(strategy.filter_history_fn is None for strategy in strategies)
 
@@ -79,10 +83,16 @@ def test_all_builtin_matrix_formulas_accept_base_market_matrix():
     from app.backtest.matrix import build_market_data_matrix
 
     fields = set()
-    for strategy in (engine.get(meta["id"]) for meta in engine.list_strategies()):
+    for strategy in (
+        engine.get(meta["id"])
+        for meta in engine.list_strategies()
+        if meta["timeframes"] == ["1d"]
+    ):
         fields.update(engine._matrix_field_columns(strategy))
     market = build_market_data_matrix(panel, field_columns=fields)
     for meta in engine.list_strategies():
+        if meta["timeframes"] != ["1d"]:
+            continue
         strategy = engine.get(meta["id"])
         signals = strategy.matrix_strategy.compute_signals(market, {})
         assert signals.shape == market.shape, meta["id"]
