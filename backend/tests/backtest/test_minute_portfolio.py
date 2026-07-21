@@ -1,8 +1,10 @@
 from datetime import date, datetime, timedelta
 
 import pytest
+import polars as pl
 
 from app.backtest.minute_portfolio import (
+    LocalMinuteParquetRepository,
     MinutePortfolioConfig,
     MinutePortfolioEngine,
     MinutePortfolioService,
@@ -11,6 +13,24 @@ from app.backtest.minute_portfolio import (
     is_in_scan_window,
     rank_candidates,
 )
+
+
+def test_local_parquet_repository_normalizes_tdx_rows_and_builds_daily_ma(tmp_path) -> None:
+    pl.DataFrame({
+        "ts_code": ["600000.XSHG"] * 3,
+        "trade_time": ["2026-01-02 09:30:00", "2026-01-02 09:31:00", "2026-01-05 09:30:00"],
+        "open": [10.0, 10.1, 10.2], "high": [10.1, 10.2, 10.3],
+        "low": [9.9, 10.0, 10.1], "close": [10.05, 10.15, 10.25],
+        "vol": [100, 200, 300], "amount": [1000, 2000, 3000],
+    }).write_parquet(tmp_path / "600000.SH.parquet")
+
+    repo = LocalMinuteParquetRepository(tmp_path)
+    minutes = repo.get_minute_range(["600000.SH"], date(2026, 1, 2), date(2026, 1, 5))
+    daily = repo.get_daily_batch(["600000.SH"], date(2026, 1, 2), date(2026, 1, 5), ["symbol", "date", "ma5"])
+
+    assert minutes.select("symbol").unique().item() == "600000.SH"
+    assert minutes.columns == ["symbol", "datetime", "open", "high", "low", "close", "volume", "amount"]
+    assert daily.columns == ["symbol", "date", "ma5"]
 
 
 @pytest.mark.parametrize(
