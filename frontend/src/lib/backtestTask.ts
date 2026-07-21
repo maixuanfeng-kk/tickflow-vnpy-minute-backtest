@@ -181,6 +181,7 @@ export function startBacktest(params: {
   holding_days?: number
   asset_type?: 'stock' | 'etf'
   minute_fill?: boolean
+  minute_data_dir?: string
   engine?: 'matrix' | 'vnpy' | 'minute_portfolio'
 }): void {
   // 取消之前的任务状态
@@ -225,6 +226,7 @@ export function startBacktest(params: {
     holding_days: params.holding_days,
     asset_type: params.asset_type,
     minute_fill: params.minute_fill,
+    minute_data_dir: params.minute_data_dir,
     engine: params.engine,
   })
 

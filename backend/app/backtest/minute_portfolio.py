@@ -4,9 +4,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from math import floor
+from pathlib import Path
 from time import perf_counter
 from typing import Any, Mapping, TypedDict
 from uuid import uuid4
+
+import polars as pl
 
 from app.services import watchlist
 
@@ -133,6 +136,50 @@ class MinutePortfolioConfig:
     stamp_tax_pct: float = 0.001
     slippage_bps: float = 5.0
     strategy_params: OpeningVolumeStrategyParams = field(default_factory=OpeningVolumeStrategyParams)
+    minute_data_dir: str | None = None
+
+
+class LocalMinuteParquetRepository:
+    """Read pytdx per-symbol minute Parquet files through the repository contract."""
+
+    def __init__(self, data_dir: str | Path) -> None:
+        self.data_dir = Path(data_dir)
+
+    @staticmethod
+    def _symbol(value: str) -> str:
+        return value.replace(".XSHG", ".SH").replace(".XSHE", ".SZ")
+
+    def _read(self, symbols: list[str], start: date, end: date) -> pl.DataFrame:
+        frames: list[pl.DataFrame] = []
+        for symbol in symbols:
+            symbol = self._symbol(symbol)
+            path = self.data_dir / f"{symbol}.parquet"
+            if not path.exists():
+                path = self.data_dir / f"{symbol.replace('.', '_')}.parquet"
+            if not path.exists():
+                continue
+            frame = pl.read_parquet(path).select(["ts_code", "trade_time", "open", "high", "low", "close", "vol", "amount"])
+            frames.append(frame.rename({"ts_code": "symbol", "trade_time": "datetime", "vol": "volume"}).with_columns(
+                pl.col("symbol").str.replace_all(".XSHG", ".SH", literal=True).str.replace_all(".XSHE", ".SZ", literal=True),
+                pl.col("datetime").cast(pl.Utf8).str.strptime(pl.Datetime, strict=False),
+            ).filter(pl.col("datetime").dt.date().is_between(start, end)))
+        if not frames:
+            return pl.DataFrame(schema={"symbol": pl.String, "datetime": pl.Datetime, "open": pl.Float64, "high": pl.Float64, "low": pl.Float64, "close": pl.Float64, "volume": pl.Float64, "amount": pl.Float64})
+        return pl.concat(frames).select(["symbol", "datetime", "open", "high", "low", "close", "volume", "amount"])
+
+    def get_minute_range(self, symbols: list[str], start: date, end: date, asset_type: str = "stock") -> pl.DataFrame:
+        return self._read(symbols, start, end)
+
+    def get_daily_batch(self, symbols: list[str], start: date, end: date, columns: list[str]) -> pl.DataFrame:
+        minutes = self._read(symbols, start, end)
+        if minutes.is_empty():
+            return pl.DataFrame(schema={column: pl.Float64 for column in columns})
+        daily = minutes.sort(["symbol", "datetime"]).with_columns(pl.col("datetime").dt.date().alias("date")).group_by(["symbol", "date"], maintain_order=True).agg(
+            pl.col("open").first(), pl.col("high").max(), pl.col("low").min(), pl.col("close").last(), pl.col("volume").sum(),
+        ).sort(["symbol", "date"])
+        for period in MA_EXIT_PERIODS:
+            daily = daily.with_columns(pl.col("close").rolling_mean(period).over("symbol").alias(f"ma{period}"))
+        return daily.select([column for column in columns if column in daily.columns])
 
 
 @dataclass(frozen=True)
@@ -322,13 +369,23 @@ class MinutePortfolioEngine:
                 entered_today.add((candidate["symbol"], timestamp.date()))
                 pending_buys.append(candidate)
 
+        last_timestamp = max(grouped)
+        last_bars = {row["symbol"]: row for row in grouped[last_timestamp]}
         for symbol, position in positions.items():
+            bar = last_bars.get(symbol, {})
+            close = float(bar.get("close") or position["entry_price"])
+            price = close * (1 - self.config.slippage_bps / 10_000)
+            value = position["shares"] * price
+            cash += value * (1 - self.config.commission_pct - self.config.stamp_tax_pct)
             trades.append({
                 "symbol": symbol,
                 "entry_datetime": position["entry_datetime"].isoformat(sep=" "),
                 "entry_price": round(position["entry_price"], 4),
+                "exit_datetime": last_timestamp.isoformat(sep=" "),
+                "exit_price": round(price, 4),
                 "shares": position["shares"],
                 "entry_reason": position["entry_reason"],
+                "exit_reason": "end_of_backtest",
             })
         return {"cash": cash, "trades": trades}
 
@@ -427,13 +484,18 @@ class MinutePortfolioService:
     def run(self, config: MinutePortfolioConfig) -> dict:
         if config.start is None or config.end is None:
             raise ValueError("start and end are required")
+        repo = LocalMinuteParquetRepository(config.minute_data_dir) if config.minute_data_dir else self.repo
         raw_rows, contexts = _load_rows_and_context(
-            self.repo,
+            repo,
             config.symbols,
             config.start,
             config.end,
             config.strategy_params.ma_exit_period,
         )
+        raw_rows = [
+            row for row in raw_rows
+            if config.start <= row["datetime"].date() <= config.end
+        ]
 
         executed = MinutePortfolioEngine(config).run(raw_rows, contexts)
         return {
