@@ -760,6 +760,7 @@ export function StrategyBacktest() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   // 分钟K精确回测: 用当日分钟K确定精确成交价 (穿越价/VWAP), 需 Pro+ 分钟K能力
   const [highGranularity, setHighGranularity] = useState(false)
+  const [minutePortfolio, setMinutePortfolio] = useState(false)
   const { data: caps } = useCapabilities()
   const hasMinuteBatch = !!caps?.capabilities?.['kline.minute.batch']
   const [rangeSettingsOpen, setRangeSettingsOpen] = useState(false)
@@ -878,9 +879,9 @@ export function StrategyBacktest() {
       ? normalizeStrategyOverrides(detail, overrides)
       : overrides
     startBacktest({
-      strategy_id: highGranularity ? 'minute_double_ma_volume' : selectedStrategy,
+      strategy_id: minutePortfolio ? 'opening_volume_portfolio' : highGranularity ? 'minute_double_ma_volume' : selectedStrategy,
       asset_type: assetType,
-      symbols: symbols ? symbols.split(',').map(s => s.trim()).filter(Boolean) : null,
+      symbols: minutePortfolio ? null : symbols ? symbols.split(',').map(s => s.trim()).filter(Boolean) : null,
       start: start || null,
       end: end || undefined,
       matching,
@@ -889,16 +890,16 @@ export function StrategyBacktest() {
       commission_pct: Number(fees) / 10000,
       stamp_tax_pct: Number(stampTax) / 1000,
       slippage_bps: Number(slippage),
-      max_positions: Number(maxPositions),
+      max_positions: minutePortfolio ? 8 : Number(maxPositions),
       max_exposure_pct: Number(maxExposure) / 100,
-      initial_capital: Number(initialCapital),
+      initial_capital: minutePortfolio ? 10_000_000 : Number(initialCapital),
       position_sizing: positionSizing,
       params: strategyParams,
       overrides: requestOverrides,
       mode: simMode,
       holding_days: Number(holdingDays) || 5,
       minute_fill: false,
-      engine: highGranularity ? 'vnpy' : 'matrix',
+      engine: minutePortfolio ? 'minute_portfolio' : highGranularity ? 'vnpy' : 'matrix',
     })
   }
 
@@ -1162,6 +1163,13 @@ export function StrategyBacktest() {
                 }`} />
               </button>
               <span className={`text-[9px] font-medium ${highGranularity ? 'text-amber-400' : 'text-muted/50'}`}>分钟K</span>
+              <button
+                type="button"
+                onClick={() => { if (hasMinuteBatch) { setMinutePortfolio(v => !v); setHighGranularity(false) } }}
+                disabled={!hasMinuteBatch}
+                className={`rounded px-1 text-[9px] ${minutePortfolio ? 'bg-amber-500/20 text-amber-400' : 'text-muted'} ${!hasMinuteBatch ? 'opacity-50 cursor-not-allowed' : ''}`}
+                title="早盘放量组合：使用 TickFlow 自选股、1000 万初始资金、最多 8 仓"
+              >组合</button>
               {!hasMinuteBatch && (
                 <span className="text-[8px] text-accent/70 font-medium bg-accent/10 px-1 py-px rounded">Pro+</span>
               )}

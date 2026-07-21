@@ -77,12 +77,33 @@ class MinutePortfolioEngine:
         cash = self.config.initial_capital
         positions: dict[str, dict] = {}
         pending_buys: list[dict] = []
+        pending_sells: set[str] = set()
         entered_today: set[tuple[str, date]] = set()
         intraday_high: dict[tuple[str, date], float] = {}
         trades: list[dict] = []
 
         for timestamp in sorted(grouped):
             bars = {row["symbol"]: row for row in grouped[timestamp]}
+            for symbol in list(pending_sells):
+                bar = bars.get(symbol)
+                position = positions.get(symbol)
+                if bar is None or position is None or float(bar["open"]) <= 0:
+                    continue
+                price = float(bar["open"]) * (1 - self.config.slippage_bps / 10_000)
+                value = position["shares"] * price
+                cash += value * (1 - self.config.commission_pct - self.config.stamp_tax_pct)
+                trades.append({
+                    "symbol": symbol,
+                    "entry_datetime": position["entry_datetime"].isoformat(sep=" "),
+                    "entry_price": round(position["entry_price"], 4),
+                    "exit_datetime": timestamp.isoformat(sep=" "),
+                    "exit_price": round(price, 4),
+                    "shares": position["shares"],
+                    "entry_reason": position["entry_reason"],
+                    "exit_reason": position["exit_reason"],
+                })
+                pending_sells.remove(symbol)
+                positions.pop(symbol)
             for order in pending_buys[:]:
                 bar = bars.get(order["symbol"])
                 if bar is None or float(bar["open"]) <= 0 or float(bar["volume"]) <= 0:
@@ -100,8 +121,22 @@ class MinutePortfolioEngine:
                     "shares": shares,
                     "entry_price": price,
                     "entry_datetime": timestamp,
+                    "entry_date": timestamp.date(),
                     "entry_reason": order["reason"],
                 }
+
+            for symbol, position in positions.items():
+                if position["entry_date"] >= timestamp.date() or symbol in pending_sells:
+                    continue
+                context = daily_context.get((symbol, timestamp.date()))
+                close = float(bars.get(symbol, {}).get("close", 0) or 0)
+                ma5 = float(context.get("previous_ma5") or 0) if context else 0
+                if close > 0 and close <= position["entry_price"] * 0.98:
+                    position["exit_reason"] = "stop_loss"
+                    pending_sells.add(symbol)
+                elif close > 0 and ma5 > 0 and close < ma5:
+                    position["exit_reason"] = "ma5_breakdown"
+                    pending_sells.add(symbol)
 
             candidates: list[Candidate] = []
             for symbol, bar in bars.items():
