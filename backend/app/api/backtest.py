@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import threading
 from dataclasses import asdict
 from datetime import date, timedelta
@@ -601,6 +602,8 @@ async def minute_portfolio_stream(
     commission_pct: float = 0.0002,
     stamp_tax_pct: float = 0.001,
     slippage_bps: float = 5.0,
+    initial_capital: float | None = None,
+    max_positions: int | None = None,
 ):
     """Run the fixed early-session portfolio strategy over a watchlist snapshot."""
     from app.backtest.minute_portfolio import MinutePortfolioConfig, MinutePortfolioService
@@ -613,11 +616,28 @@ async def minute_portfolio_stream(
         raise HTTPException(status_code=400, detail="start and end must be ISO dates") from exc
     if end_date < start_date:
         raise HTTPException(status_code=400, detail="end date must not precede start date")
+    if initial_capital is not None and (not math.isfinite(initial_capital) or initial_capital <= 0):
+        raise HTTPException(status_code=400, detail="initial_capital must be positive")
+    if max_positions is not None and max_positions <= 0:
+        raise HTTPException(status_code=400, detail="max_positions must be positive")
     symbols = [row["symbol"] for row in watchlist.list_symbols() if row.get("symbol")]
     if not symbols:
         raise HTTPException(status_code=400, detail="自选股为空，无法运行分钟组合回测")
 
-    raw = f"minute-portfolio|{symbols}|{start}|{end}|{commission_pct}|{stamp_tax_pct}|{slippage_bps}"
+    config = MinutePortfolioConfig(
+        symbols=symbols,
+        start=start_date,
+        end=end_date,
+        commission_pct=commission_pct,
+        stamp_tax_pct=stamp_tax_pct,
+        slippage_bps=slippage_bps,
+        **({"initial_capital": initial_capital} if initial_capital is not None else {}),
+        **({"max_positions": max_positions} if max_positions is not None else {}),
+    )
+    raw = (
+        f"minute-portfolio|{symbols}|{start}|{end}|{commission_pct}|{stamp_tax_pct}|{slippage_bps}|"
+        f"{config.initial_capital}|{config.max_positions}"
+    )
     job_key = f"minute-portfolio:{hashlib.md5(raw.encode()).hexdigest()[:12]}"
     _cleanup_stale_jobs()
     with _jobs_lock:
@@ -629,12 +649,6 @@ async def minute_portfolio_stream(
         else:
             is_new = False
     if is_new:
-        config = MinutePortfolioConfig(
-            symbols=symbols, start=start_date, end=end_date,
-            commission_pct=commission_pct, stamp_tax_pct=stamp_tax_pct,
-            slippage_bps=slippage_bps,
-        )
-
         def _run() -> None:
             try:
                 job.progress.append({"day": 0, "total": 1, "date": "加载自选股分钟K", "equity": config.initial_capital})

@@ -132,10 +132,16 @@ def test_service_reads_daily_and_minute_rows_and_returns_backtest_shape() -> Non
 
     repo = Repo()
     result = MinutePortfolioService(repo).run(MinutePortfolioConfig(
-        symbols=["600000.SH"], start=date(2026, 1, 5), end=date(2026, 1, 5),
+        symbols=["600000.SH"],
+        start=date(2026, 1, 5),
+        end=date(2026, 1, 5),
+        initial_capital=2_000_000.0,
+        max_positions=4,
     ))
 
     assert result["config"]["engine"] == "minute_portfolio"
     assert result["config"]["symbols"] == ["600000.SH"]
+    assert result["config"]["initial_capital"] == 2_000_000.0
+    assert result["config"]["max_positions"] == 4
     assert result["stats"]["total_trade_count"] == 1
     assert repo.minute_start <= date(2026, 1, 2)

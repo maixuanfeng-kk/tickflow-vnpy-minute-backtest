@@ -48,6 +48,10 @@ const DEFAULT_QUICK_RANGES: QuickRangeConfig[] = [
   { id: 'range-3', enabled: true, unit: 'year', value: 1 },
   { id: 'range-4', enabled: true, unit: 'all', value: 0 },
 ]
+const MINUTE_PORTFOLIO_DEFAULTS = {
+  initialCapital: '10000000',
+  maxPositions: '8',
+} as const
 const quickRangeValue = (unit: QuickRangeUnit, value: unknown, fallback: number) => {
   if (unit === 'all') return 0
   const limits = QUICK_RANGE_LIMITS[unit]
@@ -890,9 +894,9 @@ export function StrategyBacktest() {
       commission_pct: Number(fees) / 10000,
       stamp_tax_pct: Number(stampTax) / 1000,
       slippage_bps: Number(slippage),
-      max_positions: minutePortfolio ? 8 : Number(maxPositions),
+      max_positions: Number(maxPositions),
       max_exposure_pct: Number(maxExposure) / 100,
-      initial_capital: minutePortfolio ? 10_000_000 : Number(initialCapital),
+      initial_capital: Number(initialCapital),
       position_sizing: positionSizing,
       params: strategyParams,
       overrides: requestOverrides,
@@ -901,6 +905,20 @@ export function StrategyBacktest() {
       minute_fill: false,
       engine: minutePortfolio ? 'minute_portfolio' : highGranularity ? 'vnpy' : 'matrix',
     })
+  }
+
+  const selectMinutePortfolio = () => {
+    setMinutePortfolio(true)
+    setHighGranularity(false)
+    setSimMode('position')
+    setSelectedStrategy(null)
+    setInitialCapital(MINUTE_PORTFOLIO_DEFAULTS.initialCapital)
+    setMaxPositions(MINUTE_PORTFOLIO_DEFAULTS.maxPositions)
+  }
+
+  const selectStrategy = (strategyId: string) => {
+    setSelectedStrategy(strategyId)
+    setMinutePortfolio(false)
   }
 
   // 提取统计
@@ -1119,7 +1137,9 @@ export function StrategyBacktest() {
     : detail?.name ?? strategyList.find(st => st.id === selectedStrategy)?.name ?? '未选择策略'
   const selectedStrategySource = detail?.source ?? strategyList.find(st => st.id === selectedStrategy)?.source
   const stockPoolCount = symbols.split(',').map(s => s.trim()).filter(Boolean).length
-  const stockPoolSummary = stockPoolCount > 0 ? `股票池 已限定 ${stockPoolCount} 只` : '股票池 全市场'
+  const stockPoolSummary = minutePortfolio
+    ? '股票池 TickFlow 自选股'
+    : stockPoolCount > 0 ? `股票池 已限定 ${stockPoolCount} 只` : '股票池 全市场'
   const resultStartDate = result?.config?.start ?? result?.equity_curve?.[0]?.date ?? start
   const resultEndDate = result?.config?.end ?? result?.equity_curve?.[result.equity_curve.length - 1]?.date ?? end
   const resultTradeDays = result?.equity_curve?.length ?? 0
@@ -1206,7 +1226,7 @@ export function StrategyBacktest() {
             {['all', 'custom'].includes(strategyGroup) && (
               <button
                 type="button"
-                onClick={() => { setMinutePortfolio(true); setHighGranularity(false) }}
+                onClick={selectMinutePortfolio}
                 className={`px-2 py-1 rounded-btn text-[11px] border transition-all duration-150 ease-smooth cursor-pointer ${minutePortfolio
                   ? 'border-amber-400/60 bg-amber-400/10 text-amber-300'
                   : 'border-border bg-base text-secondary hover:border-amber-400/45'
@@ -1220,7 +1240,7 @@ export function StrategyBacktest() {
             {filteredStrategyList.map(st => (
               <button
                 key={st.id}
-                onClick={() => { setSelectedStrategy(st.id); setMinutePortfolio(false) }}
+                onClick={() => selectStrategy(st.id)}
                 className={`px-2 py-1 rounded-btn text-[11px] border transition-all duration-150 ease-smooth cursor-pointer
                   ${selectedStrategy === st.id
                     ? 'border-accent/50 bg-accent/10 text-accent shadow-[0_0_10px_rgba(59,130,246,0.1)]'

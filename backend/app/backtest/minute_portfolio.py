@@ -256,7 +256,7 @@ class MinutePortfolioService:
         return {
             "run_id": uuid4().hex,
             "config": {"engine": "minute_portfolio", "frequency": "1m", "symbols": config.symbols,
-                       "initial_capital": config.initial_capital},
+                       "initial_capital": config.initial_capital, "max_positions": config.max_positions},
             "stats": {"total_trade_count": len(executed["trades"]), "end_balance": executed["cash"]},
             "equity_curve": [], "drawdown_curve": [], "benchmark_curve": [],
             "trades": executed["trades"], "per_symbol_stats": [],
