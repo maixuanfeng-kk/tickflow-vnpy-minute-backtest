@@ -16,6 +16,7 @@ from app.services import watchlist
 
 
 VOLUME_RATIO_MIN = 1.5
+CANDLE_DIRECTIONS = {"bearish", "bullish", "any"}
 MA_EXIT_PERIODS = (5, 10, 20, 30, 60)
 INITIAL_CAPITAL = 10_000_000.0
 MAX_POSITIONS = 8
@@ -33,10 +34,23 @@ class Candidate(TypedDict):
 class OpeningVolumeStrategyParams:
     scan_start_time: time = time(9, 30)
     scan_end_time: time = time(9, 59)
-    volume_multiple: float = VOLUME_RATIO_MIN
+    volume_multiple: float | None = None
     enable_branch_a: bool = True
+    enable_branch_a_volume_filter: bool = True
+    branch_a_volume_multiple: float | None = None
+    branch_a_previous_candle: str = "bearish"
+    branch_a_require_previous_high_breakout: bool = True
     enable_branch_b: bool = True
+    enable_branch_b_volume_filter: bool = True
+    branch_b_volume_multiple: float | None = None
+    branch_b_today_return_min: float = 0.03
+    branch_b_today_return_max: float = 0.05
+    branch_b_previous_return_max: float = 0.05
     enable_branch_c: bool = True
+    enable_branch_c_volume_filter: bool = True
+    branch_c_volume_multiple: float | None = None
+    branch_c_previous_candle: str = "bullish"
+    branch_c_previous_return_max: float = 0.05
     stop_loss_pct: float = 0.02
     ma_exit_period: int = 5
 
@@ -65,15 +79,62 @@ class OpeningVolumeStrategyParams:
                 return value.lower() == "true"
             raise ValueError(f"{field_name} must be boolean")
 
+        def parse_candle_direction(value: Any, field_name: str, default: str) -> str:
+            if value is None:
+                return default
+            aliases = {
+                "bearish": "bearish",
+                "bullish": "bullish",
+                "any": "any",
+                "阴线": "bearish",
+                "阳线": "bullish",
+                "不限": "any",
+            }
+            parsed = aliases.get(str(value))
+            if parsed not in CANDLE_DIRECTIONS:
+                raise ValueError(f"{field_name} must be bearish, bullish, or any")
+            return parsed
+
+        def parse_optional_positive_float(value: Any, field_name: str) -> float | None:
+            if value is None:
+                return None
+            parsed = float(value)
+            if parsed <= 0:
+                raise ValueError(f"{field_name} must be positive")
+            return parsed
+
         start = parse_time(values.get("scan_start_time"), "scan_start_time", cls.scan_start_time)
         end = parse_time(values.get("scan_end_time"), "scan_end_time", cls.scan_end_time)
         if start > end:
             raise ValueError("scan_start_time must not be after scan_end_time")
-        volume_multiple = float(values.get("volume_multiple", cls.volume_multiple))
+        volume_multiple = parse_optional_positive_float(
+            values.get("volume_multiple"), "volume_multiple",
+        )
+        branch_a_volume_multiple = parse_optional_positive_float(
+            values.get("branch_a_volume_multiple"), "branch_a_volume_multiple",
+        )
+        branch_b_volume_multiple = parse_optional_positive_float(
+            values.get("branch_b_volume_multiple"), "branch_b_volume_multiple",
+        )
+        branch_c_volume_multiple = parse_optional_positive_float(
+            values.get("branch_c_volume_multiple"), "branch_c_volume_multiple",
+        )
+        branch_b_today_return_min = float(values.get(
+            "branch_b_today_return_min", cls.branch_b_today_return_min,
+        ))
+        branch_b_today_return_max = float(values.get(
+            "branch_b_today_return_max", cls.branch_b_today_return_max,
+        ))
+        branch_b_previous_return_max = float(values.get(
+            "branch_b_previous_return_max", cls.branch_b_previous_return_max,
+        ))
+        branch_c_previous_return_max = float(values.get(
+            "branch_c_previous_return_max", cls.branch_c_previous_return_max,
+        ))
         stop_loss_pct = float(values.get("stop_loss_pct", cls.stop_loss_pct))
         ma_exit_period = int(values.get("ma_exit_period", cls.ma_exit_period))
-        if volume_multiple <= 0:
-            raise ValueError("volume_multiple must be positive")
+        if branch_b_today_return_min >= branch_b_today_return_max:
+            raise ValueError("branch_b_today_return_min must be below branch_b_today_return_max")
         if stop_loss_pct < 0:
             raise ValueError("stop_loss_pct must not be negative")
         if ma_exit_period not in MA_EXIT_PERIODS:
@@ -83,8 +144,45 @@ class OpeningVolumeStrategyParams:
             scan_end_time=end,
             volume_multiple=volume_multiple,
             enable_branch_a=parse_bool(values.get("enable_branch_a"), "enable_branch_a", cls.enable_branch_a),
+            enable_branch_a_volume_filter=parse_bool(
+                values.get("enable_branch_a_volume_filter"),
+                "enable_branch_a_volume_filter",
+                cls.enable_branch_a_volume_filter,
+            ),
+            branch_a_volume_multiple=branch_a_volume_multiple,
+            branch_a_previous_candle=parse_candle_direction(
+                values.get("branch_a_previous_candle"),
+                "branch_a_previous_candle",
+                cls.branch_a_previous_candle,
+            ),
+            branch_a_require_previous_high_breakout=parse_bool(
+                values.get("branch_a_require_previous_high_breakout"),
+                "branch_a_require_previous_high_breakout",
+                cls.branch_a_require_previous_high_breakout,
+            ),
             enable_branch_b=parse_bool(values.get("enable_branch_b"), "enable_branch_b", cls.enable_branch_b),
+            enable_branch_b_volume_filter=parse_bool(
+                values.get("enable_branch_b_volume_filter"),
+                "enable_branch_b_volume_filter",
+                cls.enable_branch_b_volume_filter,
+            ),
+            branch_b_volume_multiple=branch_b_volume_multiple,
+            branch_b_today_return_min=branch_b_today_return_min,
+            branch_b_today_return_max=branch_b_today_return_max,
+            branch_b_previous_return_max=branch_b_previous_return_max,
             enable_branch_c=parse_bool(values.get("enable_branch_c"), "enable_branch_c", cls.enable_branch_c),
+            enable_branch_c_volume_filter=parse_bool(
+                values.get("enable_branch_c_volume_filter"),
+                "enable_branch_c_volume_filter",
+                cls.enable_branch_c_volume_filter,
+            ),
+            branch_c_volume_multiple=branch_c_volume_multiple,
+            branch_c_previous_candle=parse_candle_direction(
+                values.get("branch_c_previous_candle"),
+                "branch_c_previous_candle",
+                cls.branch_c_previous_candle,
+            ),
+            branch_c_previous_return_max=branch_c_previous_return_max,
             stop_loss_pct=stop_loss_pct,
             ma_exit_period=ma_exit_period,
         )
@@ -92,6 +190,27 @@ class OpeningVolumeStrategyParams:
 
 def is_in_scan_window(current_time: time, params: OpeningVolumeStrategyParams) -> bool:
     return params.scan_start_time <= current_time <= params.scan_end_time
+
+
+def _matches_candle_direction(direction: str, previous_open: float, previous_close: float) -> bool:
+    if direction == "any":
+        return True
+    if direction == "bearish":
+        return previous_close < previous_open
+    return previous_close > previous_open
+
+
+def _passes_volume_filter(
+    *,
+    enabled: bool,
+    branch_multiple: float | None,
+    legacy_multiple: float | None,
+    volume_ratio: float,
+) -> bool:
+    if not enabled:
+        return True
+    required_multiple = branch_multiple or legacy_multiple or VOLUME_RATIO_MIN
+    return volume_ratio >= required_multiple
 
 
 def entry_reason(
@@ -106,13 +225,48 @@ def entry_reason(
 ) -> str | None:
     """Return the first configured entry branch satisfied by a minute bar."""
     params = params or OpeningVolumeStrategyParams()
-    if volume_ratio < params.volume_multiple:
-        return None
-    if params.enable_branch_a and previous_close < previous_open and crossed_previous_high:
+    if (
+        params.enable_branch_a
+        and _passes_volume_filter(
+            enabled=params.enable_branch_a_volume_filter,
+            branch_multiple=params.branch_a_volume_multiple,
+            legacy_multiple=params.volume_multiple,
+            volume_ratio=volume_ratio,
+        )
+        and _matches_candle_direction(
+            params.branch_a_previous_candle, previous_open, previous_close,
+        )
+        and (
+            not params.branch_a_require_previous_high_breakout
+            or crossed_previous_high
+        )
+    ):
         return "previous_bearish_breakout"
-    if params.enable_branch_b and 0.03 < today_return < 0.05 and previous_change_pct < 0.05:
+    if (
+        params.enable_branch_b
+        and _passes_volume_filter(
+            enabled=params.enable_branch_b_volume_filter,
+            branch_multiple=params.branch_b_volume_multiple,
+            legacy_multiple=params.volume_multiple,
+            volume_ratio=volume_ratio,
+        )
+        and params.branch_b_today_return_min < today_return < params.branch_b_today_return_max
+        and previous_change_pct < params.branch_b_previous_return_max
+    ):
         return "two_day_moderate_rise"
-    if params.enable_branch_c and previous_close > previous_open and previous_change_pct < 0.05:
+    if (
+        params.enable_branch_c
+        and _passes_volume_filter(
+            enabled=params.enable_branch_c_volume_filter,
+            branch_multiple=params.branch_c_volume_multiple,
+            legacy_multiple=params.volume_multiple,
+            volume_ratio=volume_ratio,
+        )
+        and _matches_candle_direction(
+            params.branch_c_previous_candle, previous_open, previous_close,
+        )
+        and previous_change_pct < params.branch_c_previous_return_max
+    ):
         return "previous_moderate_rise"
     return None
 

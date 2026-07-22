@@ -102,13 +102,17 @@ async def test_minute_portfolio_stream_passes_opening_volume_strategy_params(mon
         start="2026-01-05",
         end="2026-01-06",
         strategy_id="opening_volume_portfolio",
-        params='{"volume_multiple": 2.0, "enable_branch_a": false}',
+        params=(
+            '{"branch_a_volume_multiple": 2.0, "enable_branch_a": false, '
+            '"branch_c_previous_candle": "阴线"}'
+        ),
     )
     chunks = [
         chunk.decode() if isinstance(chunk, bytes) else chunk
         async for chunk in response.body_iterator
     ]
 
-    assert captured["config"].strategy_params.volume_multiple == 2.0
+    assert captured["config"].strategy_params.branch_a_volume_multiple == 2.0
     assert captured["config"].strategy_params.enable_branch_a is False
+    assert captured["config"].strategy_params.branch_c_previous_candle == "bearish"
     assert "event: done" in "".join(chunks)
