@@ -268,8 +268,30 @@ class MinutePortfolioEngine:
         entered_today: set[tuple[str, date]] = set()
         intraday_high: dict[tuple[str, date], float] = {}
         trades: list[dict] = []
+        equity_curve: list[dict] = []
+        drawdown_curve: list[dict] = []
+        latest_closes: dict[str, float] = {}
+        current_date: date | None = None
+        peak_equity = self.config.initial_capital
+
+        def snapshot(day: date) -> None:
+            nonlocal peak_equity
+            equity = cash + sum(
+                position["shares"] * latest_closes.get(symbol, position["entry_price"])
+                for symbol, position in positions.items()
+            )
+            peak_equity = max(peak_equity, equity)
+            drawdown = (equity - peak_equity) / peak_equity if peak_equity > 0 else 0.0
+            equity_curve.append({
+                "date": str(day), "value": round(equity, 2),
+                "cash": round(cash, 2), "positions": len(positions),
+            })
+            drawdown_curve.append({"date": str(day), "value": round(drawdown, 6)})
 
         for timestamp in sorted(grouped):
+            if current_date is not None and timestamp.date() != current_date:
+                snapshot(current_date)
+            current_date = timestamp.date()
             bars = {row["symbol"]: row for row in grouped[timestamp]}
             for symbol in list(pending_sells):
                 bar = bars.get(symbol)
@@ -278,7 +300,10 @@ class MinutePortfolioEngine:
                     continue
                 price = float(bar["open"]) * (1 - self.config.slippage_bps / 10_000)
                 value = position["shares"] * price
-                cash += value * (1 - self.config.commission_pct - self.config.stamp_tax_pct)
+                net_proceeds = value * (1 - self.config.commission_pct - self.config.stamp_tax_pct)
+                cash += net_proceeds
+                pnl_amount = net_proceeds - position["entry_cost"]
+                pnl_pct = pnl_amount / position["entry_cost"] if position["entry_cost"] else 0.0
                 trades.append({
                     "symbol": symbol,
                     "entry_datetime": position["entry_datetime"].isoformat(sep=" "),
@@ -286,6 +311,10 @@ class MinutePortfolioEngine:
                     "exit_datetime": timestamp.isoformat(sep=" "),
                     "exit_price": round(price, 4),
                     "shares": position["shares"],
+                    "entry_cost": round(position["entry_cost"], 2),
+                    "pnl_amount": round(pnl_amount, 2),
+                    "pnl_pct": round(pnl_pct, 6),
+                    "duration": (timestamp.date() - position["entry_date"]).days,
                     "entry_reason": position["entry_reason"],
                     "exit_reason": position["exit_reason"],
                 })
@@ -310,6 +339,7 @@ class MinutePortfolioEngine:
                     "entry_datetime": timestamp,
                     "entry_date": timestamp.date(),
                     "entry_reason": order["reason"],
+                    "entry_cost": cost,
                 }
 
             for symbol, position in positions.items():
@@ -369,6 +399,11 @@ class MinutePortfolioEngine:
                 entered_today.add((candidate["symbol"], timestamp.date()))
                 pending_buys.append(candidate)
 
+            for symbol, bar in bars.items():
+                close = float(bar.get("close") or 0)
+                if close > 0:
+                    latest_closes[symbol] = close
+
         last_timestamp = max(grouped)
         last_bars = {row["symbol"]: row for row in grouped[last_timestamp]}
         for symbol, position in positions.items():
@@ -376,7 +411,10 @@ class MinutePortfolioEngine:
             close = float(bar.get("close") or position["entry_price"])
             price = close * (1 - self.config.slippage_bps / 10_000)
             value = position["shares"] * price
-            cash += value * (1 - self.config.commission_pct - self.config.stamp_tax_pct)
+            net_proceeds = value * (1 - self.config.commission_pct - self.config.stamp_tax_pct)
+            cash += net_proceeds
+            pnl_amount = net_proceeds - position["entry_cost"]
+            pnl_pct = pnl_amount / position["entry_cost"] if position["entry_cost"] else 0.0
             trades.append({
                 "symbol": symbol,
                 "entry_datetime": position["entry_datetime"].isoformat(sep=" "),
@@ -384,10 +422,20 @@ class MinutePortfolioEngine:
                 "exit_datetime": last_timestamp.isoformat(sep=" "),
                 "exit_price": round(price, 4),
                 "shares": position["shares"],
+                "entry_cost": round(position["entry_cost"], 2),
+                "pnl_amount": round(pnl_amount, 2),
+                "pnl_pct": round(pnl_pct, 6),
+                "duration": (last_timestamp.date() - position["entry_date"]).days,
                 "entry_reason": position["entry_reason"],
                 "exit_reason": "end_of_backtest",
             })
-        return {"cash": cash, "trades": trades}
+        positions.clear()
+        if current_date is not None:
+            snapshot(current_date)
+        return {
+            "cash": cash, "trades": trades,
+            "equity_curve": equity_curve, "drawdown_curve": drawdown_curve,
+        }
 
 
 class OpeningVolumeScanService:

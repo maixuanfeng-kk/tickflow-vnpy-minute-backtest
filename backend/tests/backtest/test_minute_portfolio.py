@@ -213,6 +213,49 @@ def test_engine_closes_positions_at_the_end_of_the_backtest() -> None:
     assert result["trades"][-1]["exit_datetime"].endswith("09:31:00")
 
 
+def test_engine_returns_net_trade_pnl_and_daily_equity() -> None:
+    rows = [
+        {
+            "symbol": "600000.SH", "datetime": datetime(2026, 1, 5, 9, 30),
+            "open": 10.0, "high": 10.6, "low": 10.0, "close": 10.2,
+            "volume": 150.0, "previous_cumulative_volume": 100.0,
+        },
+        {
+            "symbol": "600000.SH", "datetime": datetime(2026, 1, 5, 9, 31),
+            "open": 10.3, "high": 10.4, "low": 10.2, "close": 10.3,
+            "volume": 100.0, "previous_cumulative_volume": 200.0,
+        },
+        {
+            "symbol": "600000.SH", "datetime": datetime(2026, 1, 6, 15, 30),
+            "open": 10.8, "high": 11.0, "low": 10.7, "close": 10.9,
+            "volume": 100.0, "previous_cumulative_volume": 100.0,
+        },
+    ]
+    contexts = {
+        ("600000.SH", date(2026, 1, 5)): {
+            "previous_open": 11.0, "previous_close": 10.0,
+            "previous_high": 10.5, "previous_change_pct": -0.02,
+            "previous_ma5": 9.0,
+        },
+        ("600000.SH", date(2026, 1, 6)): {
+            "previous_open": 10.0, "previous_close": 10.3,
+            "previous_high": 10.4, "previous_change_pct": 0.03,
+            "previous_ma5": 9.0,
+        },
+    }
+
+    result = MinutePortfolioEngine(MinutePortfolioConfig(
+        symbols=["600000.SH"], initial_capital=1_000_000.0, max_positions=1,
+    )).run(rows, contexts)
+
+    trade = result["trades"][0]
+    assert trade["pnl_amount"] == pytest.approx(trade["pnl_pct"] * trade["entry_cost"], abs=0.1)
+    assert trade["duration"] == 1
+    assert [row["date"] for row in result["equity_curve"]] == ["2026-01-05", "2026-01-06"]
+    assert result["equity_curve"][-1]["value"] == pytest.approx(result["cash"], abs=0.01)
+    assert result["drawdown_curve"][-1]["value"] <= 0
+
+
 def test_service_reads_daily_and_minute_rows_and_returns_backtest_shape() -> None:
     class Repo:
         minute_start = None
