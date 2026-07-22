@@ -281,11 +281,18 @@ def test_service_reads_daily_and_minute_rows_and_returns_backtest_shape() -> Non
                 "volume": [100.0, 100.0, 150.0, 100.0], "amount": [1000.0] * 4,
             })
 
+        def get_index_daily(self, symbol, start, end, columns):
+            assert symbol == "000001.XSHG"
+            return __import__("polars").DataFrame({
+                "date": [date(2026, 1, 5), date(2026, 1, 6)],
+                "close": [100.0, 101.0],
+            })
+
     repo = Repo()
     result = MinutePortfolioService(repo).run(MinutePortfolioConfig(
         symbols=["600000.SH"],
         start=date(2026, 1, 5),
-        end=date(2026, 1, 5),
+        end=date(2026, 1, 6),
         initial_capital=2_000_000.0,
         max_positions=4,
     ))
@@ -295,6 +302,18 @@ def test_service_reads_daily_and_minute_rows_and_returns_backtest_shape() -> Non
     assert result["config"]["initial_capital"] == 2_000_000.0
     assert result["config"]["max_positions"] == 4
     assert result["stats"]["total_trade_count"] == 1
+    assert {
+        "total_return", "annual_return", "sharpe", "sortino", "max_drawdown",
+        "mc_maxdd_p50", "mc_maxdd_p95", "win_rate", "n_trades", "final_equity",
+        "total_trade_count", "end_balance",
+    } <= result["stats"].keys()
+    assert result["equity_curve"]
+    assert result["drawdown_curve"]
+    assert result["benchmark_curve"] == [
+        {"date": "2026-01-05", "close": 100.0},
+        {"date": "2026-01-06", "close": 101.0},
+    ]
+    assert result["per_symbol_stats"][0]["symbol"] == "600000.SH"
     assert repo.minute_start <= date(2026, 1, 2)
 
 

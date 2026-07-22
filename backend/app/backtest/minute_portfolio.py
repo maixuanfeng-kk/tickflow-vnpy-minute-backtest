@@ -9,6 +9,7 @@ from time import perf_counter
 from typing import Any, Mapping, TypedDict
 from uuid import uuid4
 
+import numpy as np
 import polars as pl
 
 from app.services import watchlist
@@ -529,6 +530,99 @@ class MinutePortfolioService:
     def __init__(self, repo) -> None:
         self.repo = repo
 
+    @staticmethod
+    def _monte_carlo(pnls: np.ndarray) -> dict[str, float | None]:
+        pnls = pnls[np.isfinite(pnls)]
+        if pnls.size < 3:
+            return {"mc_maxdd_p50": None, "mc_maxdd_p95": None}
+        rng = np.random.default_rng(42)
+        samples = rng.choice(np.clip(pnls, -0.9999, None), size=(1000, pnls.size), replace=True)
+        equity = np.cumprod(1.0 + samples, axis=1)
+        peaks = np.maximum.accumulate(equity, axis=1)
+        max_drawdowns = ((equity - peaks) / peaks).min(axis=1)
+        return {
+            "mc_maxdd_p50": round(float(np.percentile(max_drawdowns, 50)), 4),
+            "mc_maxdd_p95": round(float(np.percentile(max_drawdowns, 5)), 4),
+        }
+
+    @classmethod
+    def _stats(cls, executed: dict, config: MinutePortfolioConfig) -> dict:
+        final_equity = float(executed["cash"])
+        total_return = final_equity / config.initial_capital - 1.0
+        days = max((config.end - config.start).days, 1)
+        annual_return = (
+            (1.0 + total_return) ** (365.25 / days) - 1.0
+            if total_return > -1.0 else total_return
+        )
+        values = np.array(
+            [config.initial_capital]
+            + [float(row["value"]) for row in executed.get("equity_curve", [])],
+            dtype=float,
+        )
+        daily_returns = values[1:] / values[:-1] - 1.0 if values.size > 1 else np.array([])
+        volatility = float(np.std(daily_returns)) if daily_returns.size > 1 else 0.0
+        sharpe = (
+            float(np.mean(daily_returns) / volatility * np.sqrt(252))
+            if volatility > 0 else 0.0
+        )
+        downside = np.minimum(daily_returns, 0.0)
+        downside_deviation = (
+            float(np.sqrt(np.mean(downside ** 2))) if daily_returns.size > 1 else 0.0
+        )
+        sortino = (
+            float(np.mean(daily_returns) / downside_deviation * np.sqrt(252))
+            if downside_deviation > 0 else None
+        )
+        pnls = np.array([float(trade.get("pnl_pct", 0.0)) for trade in executed["trades"]])
+        n_trades = int(pnls.size)
+        drawdowns = [float(row["value"]) for row in executed.get("drawdown_curve", [])]
+        stats = {
+            "total_return": round(total_return, 6),
+            "annual_return": round(float(annual_return), 6),
+            "sharpe": round(sharpe, 4),
+            "sortino": round(sortino, 4) if sortino is not None else None,
+            "max_drawdown": round(min(drawdowns, default=0.0), 6),
+            "win_rate": round(float(np.mean(pnls > 0)), 6) if n_trades else 0.0,
+            "n_trades": n_trades,
+            "final_equity": round(final_equity, 2),
+            "total_trade_count": n_trades,
+            "end_balance": final_equity,
+        }
+        stats.update(cls._monte_carlo(pnls))
+        return stats
+
+    @staticmethod
+    def _per_symbol(trades: list[dict]) -> list[dict]:
+        grouped: dict[str, list[float]] = {}
+        for trade in trades:
+            grouped.setdefault(str(trade["symbol"]), []).append(float(trade.get("pnl_pct", 0.0)))
+        rows = []
+        for symbol, pnls in grouped.items():
+            rows.append({
+                "symbol": symbol,
+                "n_trades": len(pnls),
+                "total_return": round(float(np.prod(1.0 + np.array(pnls)) - 1.0), 6),
+                "win_rate": round(sum(pnl > 0 for pnl in pnls) / len(pnls), 6),
+                "best": round(max(pnls), 6),
+                "worst": round(min(pnls), 6),
+            })
+        return sorted(rows, key=lambda row: row["total_return"], reverse=True)
+
+    def _benchmark(self, start: date, end: date) -> list[dict]:
+        try:
+            frame = self.repo.get_index_daily(
+                "000001.XSHG", start, end, columns=["date", "close"],
+            )
+        except Exception:
+            return []
+        if frame.is_empty() or "close" not in frame.columns:
+            return []
+        return [
+            {"date": str(row["date"])[:10], "close": round(float(row["close"]), 4)}
+            for row in frame.sort("date").iter_rows(named=True)
+            if row["close"] is not None and float(row["close"]) > 0
+        ]
+
     def run(self, config: MinutePortfolioConfig) -> dict:
         if config.start is None or config.end is None:
             raise ValueError("start and end are required")
@@ -546,12 +640,22 @@ class MinutePortfolioService:
         ]
 
         executed = MinutePortfolioEngine(config).run(raw_rows, contexts)
+        equity_curve = executed.get("equity_curve") or [{
+            "date": str(config.end), "value": round(float(executed["cash"]), 2),
+            "cash": round(float(executed["cash"]), 2), "positions": 0,
+        }]
+        drawdown_curve = executed.get("drawdown_curve") or [{"date": str(config.end), "value": 0.0}]
+        executed["equity_curve"] = equity_curve
+        executed["drawdown_curve"] = drawdown_curve
         return {
             "run_id": uuid4().hex,
             "config": {"engine": "minute_portfolio", "frequency": "1m", "symbols": config.symbols,
                        "initial_capital": config.initial_capital, "max_positions": config.max_positions},
-            "stats": {"total_trade_count": len(executed["trades"]), "end_balance": executed["cash"]},
-            "equity_curve": [], "drawdown_curve": [], "benchmark_curve": [],
-            "trades": executed["trades"], "per_symbol_stats": [],
+            "stats": self._stats(executed, config),
+            "equity_curve": equity_curve,
+            "drawdown_curve": drawdown_curve,
+            "benchmark_curve": self._benchmark(config.start, config.end),
+            "trades": executed["trades"],
+            "per_symbol_stats": self._per_symbol(executed["trades"]),
             "strategy_info": {"id": "opening_volume_portfolio", "name": "早盘放量组合", "source": "native"},
         }
