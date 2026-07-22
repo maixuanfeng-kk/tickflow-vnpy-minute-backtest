@@ -248,4 +248,3 @@ git log --oneline -8
 ```
 
 Expected: no whitespace errors; only pre-existing unrelated untracked files remain outside the scoped planning directory; no sync or push has occurred.
-
