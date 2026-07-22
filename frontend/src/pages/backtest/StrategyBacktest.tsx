@@ -894,7 +894,9 @@ export function StrategyBacktest() {
   const [simMode, setSimMode] = useState<'position' | 'full'>(saved?.mode ?? 'position')
   const [holdingDays, setHoldingDays] = useState(saved?.holdingDays ?? '5')
   const [highGranularity, setHighGranularity] = useState(saved?.minuteFill ?? false)
-  const [minuteDataDir, setMinuteDataDir] = useState('E:\\minute_1min_pytdx')
+  const [minuteDataDir, setMinuteDataDir] = useState(
+    saved?.minuteDataDir ?? 'F:\\quant\\data\\minute_1min_pytdx',
+  )
   const [settingsOpen, setSettingsOpen] = useState(false)
   // 分钟K成交价细化: 不改变信号日或成交日, 需 Pro+ 分钟K能力
   const { data: caps } = useCapabilities()
@@ -1010,6 +1012,7 @@ export function StrategyBacktest() {
         mode: simMode,
         holdingDays,
         minuteFill: highGranularity,
+        minuteDataDir,
         params: strategyParams,
         overrides,
         result: backtestTask.result,
@@ -1767,7 +1770,7 @@ export function StrategyBacktest() {
                   {backtestTask?.reconnecting
                     ? '连接中断，重试中…'
                     : backtestTask?.progress
-                      ? `回测中 · 第 ${backtestTask.progress.day}/${backtestTask.progress.total} 天 (${backtestTask.progress.date})`
+                      ? `回测中 · ${backtestTask.progress.date}`
                       : '正在重新计算回测…'}
                 </div>
                 <div className="mt-0.5 text-[11px] text-secondary">

@@ -110,6 +110,7 @@ export const storage = {
     mode: 'position' | 'full'
     holdingDays: string
     minuteFill?: boolean
+    minuteDataDir?: string
     params?: Record<string, any>
     overrides?: Record<string, any>
     result: any
