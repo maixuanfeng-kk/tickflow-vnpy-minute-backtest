@@ -333,13 +333,17 @@ class MinutePortfolioEngine:
                 trades.append({
                     "symbol": symbol,
                     "entry_datetime": position["entry_datetime"].isoformat(sep=" "),
+                    "entry_date": str(position["entry_date"]),
                     "entry_price": round(position["entry_price"], 4),
                     "exit_datetime": timestamp.isoformat(sep=" "),
+                    "exit_date": str(timestamp.date()),
                     "exit_price": round(price, 4),
                     "shares": position["shares"],
                     "entry_cost": round(position["entry_cost"], 2),
                     "pnl_amount": round(pnl_amount, 2),
                     "pnl_pct": round(pnl_pct, 6),
+                    "max_floating_gain_pct": round(position["max_floating_gain_pct"], 6),
+                    "max_floating_loss_pct": round(position["max_floating_loss_pct"], 6),
                     "duration": (timestamp.date() - position["entry_date"]).days,
                     "entry_reason": position["entry_reason"],
                     "exit_reason": position["exit_reason"],
@@ -366,7 +370,25 @@ class MinutePortfolioEngine:
                     "entry_date": timestamp.date(),
                     "entry_reason": order["reason"],
                     "entry_cost": cost,
+                    "max_floating_gain_pct": 0.0,
+                    "max_floating_loss_pct": 0.0,
                 }
+
+            for symbol, position in positions.items():
+                bar = bars.get(symbol)
+                if bar is None:
+                    continue
+                high = float(bar.get("high") or 0)
+                low = float(bar.get("low") or 0)
+                unit_cost = position["entry_cost"] / position["shares"]
+                if high > 0:
+                    position["max_floating_gain_pct"] = max(
+                        position["max_floating_gain_pct"], high / unit_cost - 1.0,
+                    )
+                if low > 0:
+                    position["max_floating_loss_pct"] = min(
+                        position["max_floating_loss_pct"], low / unit_cost - 1.0,
+                    )
 
             for symbol, position in positions.items():
                 if position["entry_date"] >= timestamp.date() or symbol in pending_sells:
@@ -444,13 +466,17 @@ class MinutePortfolioEngine:
             trades.append({
                 "symbol": symbol,
                 "entry_datetime": position["entry_datetime"].isoformat(sep=" "),
+                "entry_date": str(position["entry_date"]),
                 "entry_price": round(position["entry_price"], 4),
                 "exit_datetime": last_timestamp.isoformat(sep=" "),
+                "exit_date": str(last_timestamp.date()),
                 "exit_price": round(price, 4),
                 "shares": position["shares"],
                 "entry_cost": round(position["entry_cost"], 2),
                 "pnl_amount": round(pnl_amount, 2),
                 "pnl_pct": round(pnl_pct, 6),
+                "max_floating_gain_pct": round(position["max_floating_gain_pct"], 6),
+                "max_floating_loss_pct": round(position["max_floating_loss_pct"], 6),
                 "duration": (last_timestamp.date() - position["entry_date"]).days,
                 "entry_reason": position["entry_reason"],
                 "exit_reason": "end_of_backtest",
@@ -618,19 +644,30 @@ class MinutePortfolioService:
 
     @staticmethod
     def _per_symbol(trades: list[dict]) -> list[dict]:
-        grouped: dict[str, list[float]] = {}
+        grouped: dict[str, list[dict]] = {}
         for trade in trades:
-            grouped.setdefault(str(trade["symbol"]), []).append(float(trade.get("pnl_pct", 0.0)))
+            grouped.setdefault(str(trade["symbol"]), []).append(trade)
         rows = []
-        for symbol, pnls in grouped.items():
-            rows.append({
+        for symbol, symbol_trades in grouped.items():
+            pnls = [float(trade.get("pnl_pct", 0.0)) for trade in symbol_trades]
+            row = {
                 "symbol": symbol,
                 "n_trades": len(pnls),
                 "total_return": round(float(np.prod(1.0 + np.array(pnls)) - 1.0), 6),
                 "win_rate": round(sum(pnl > 0 for pnl in pnls) / len(pnls), 6),
-                "best": round(max(pnls), 6),
-                "worst": round(min(pnls), 6),
-            })
+                "best": round(max(
+                    float(trade.get("max_floating_gain_pct", 0.0))
+                    for trade in symbol_trades
+                ), 6),
+                "worst": round(min(
+                    float(trade.get("max_floating_loss_pct", 0.0))
+                    for trade in symbol_trades
+                ), 6),
+            }
+            name = next((trade.get("name") for trade in symbol_trades if trade.get("name")), None)
+            if name:
+                row["name"] = str(name)
+            rows.append(row)
         return sorted(rows, key=lambda row: row["total_return"], reverse=True)
 
     def _benchmark(self, start: date, end: date) -> list[dict]:
@@ -697,6 +734,17 @@ class MinutePortfolioService:
         executed = MinutePortfolioEngine(config).run(
             raw_rows, contexts, progress_callback=on_trade,
         )
+        name_map: dict[str, str] = {}
+        get_name_map = getattr(self.repo, "get_name_map", None)
+        if callable(get_name_map):
+            try:
+                name_map = get_name_map(config.symbols) or {}
+            except Exception:
+                name_map = {}
+        for trade in executed["trades"]:
+            name = name_map.get(str(trade["symbol"]))
+            if name:
+                trade["name"] = str(name)
         emit(950, "计算统计与基准", executed["cash"])
         equity_curve = executed.get("equity_curve") or [{
             "date": str(config.end), "value": round(float(executed["cash"]), 2),

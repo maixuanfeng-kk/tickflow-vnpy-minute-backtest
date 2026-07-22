@@ -264,6 +264,15 @@ def test_engine_returns_net_trade_pnl_and_daily_equity() -> None:
     )).run(rows, contexts)
 
     trade = result["trades"][0]
+    unit_cost = trade["entry_cost"] / trade["shares"]
+    assert trade["entry_date"] == "2026-01-05"
+    assert trade["exit_date"] == "2026-01-06"
+    assert trade["max_floating_gain_pct"] == pytest.approx(
+        max(0.0, 11.0 / unit_cost - 1.0), abs=1e-6,
+    )
+    assert trade["max_floating_loss_pct"] == pytest.approx(
+        min(0.0, 10.2 / unit_cost - 1.0), abs=1e-6,
+    )
     assert trade["pnl_amount"] == pytest.approx(trade["pnl_pct"] * trade["entry_cost"], abs=0.1)
     assert trade["duration"] == 1
     assert [row["date"] for row in result["equity_curve"]] == ["2026-01-05", "2026-01-06"]
@@ -271,9 +280,63 @@ def test_engine_returns_net_trade_pnl_and_daily_equity() -> None:
     assert result["drawdown_curve"][-1]["value"] <= 0
 
 
+def test_engine_excludes_exit_minute_prices_from_holding_excursions() -> None:
+    rows = [
+        {
+            "symbol": "600000.SH", "datetime": datetime(2026, 1, 5, 9, 30),
+            "open": 10.0, "high": 10.6, "low": 10.0, "close": 10.2,
+            "volume": 150.0, "previous_cumulative_volume": 100.0,
+        },
+        {
+            "symbol": "600000.SH", "datetime": datetime(2026, 1, 5, 9, 31),
+            "open": 10.0, "high": 11.0, "low": 9.0, "close": 10.0,
+            "volume": 100.0, "previous_cumulative_volume": 200.0,
+        },
+        {
+            "symbol": "600000.SH", "datetime": datetime(2026, 1, 6, 9, 30),
+            "open": 10.0, "high": 12.0, "low": 8.0, "close": 8.0,
+            "volume": 100.0, "previous_cumulative_volume": 100.0,
+        },
+        {
+            "symbol": "600000.SH", "datetime": datetime(2026, 1, 7, 9, 30),
+            "open": 8.0, "high": 100.0, "low": 0.1, "close": 8.0,
+            "volume": 100.0, "previous_cumulative_volume": 100.0,
+        },
+    ]
+    contexts = {
+        ("600000.SH", date(2026, 1, 5)): {
+            "previous_open": 11.0, "previous_close": 10.0,
+            "previous_high": 10.5, "previous_change_pct": -0.02,
+            "previous_ma5": 9.0,
+        },
+        ("600000.SH", date(2026, 1, 6)): {
+            "previous_open": 10.0, "previous_close": 10.0,
+            "previous_high": 10.5, "previous_change_pct": 0.0,
+            "previous_ma5": 1.0,
+        },
+    }
+
+    result = MinutePortfolioEngine(MinutePortfolioConfig(
+        symbols=["600000.SH"], initial_capital=1_000_000.0, max_positions=1,
+    )).run(rows, contexts)
+
+    trade = result["trades"][0]
+    unit_cost = trade["entry_cost"] / trade["shares"]
+    assert trade["exit_date"] == "2026-01-07"
+    assert trade["max_floating_gain_pct"] == pytest.approx(
+        max(0.0, 12.0 / unit_cost - 1.0), abs=1e-6,
+    )
+    assert trade["max_floating_loss_pct"] == pytest.approx(
+        min(0.0, 8.0 / unit_cost - 1.0), abs=1e-6,
+    )
+
+
 def test_service_reads_daily_and_minute_rows_and_returns_backtest_shape() -> None:
     class Repo:
         minute_start = None
+
+        def get_name_map(self, symbols):
+            return {"600000.SH": "浦发银行"}
 
         def get_daily_batch(self, symbols, start, end, columns):
             return __import__("polars").DataFrame({
@@ -329,7 +392,33 @@ def test_service_reads_daily_and_minute_rows_and_returns_backtest_shape() -> Non
         {"date": "2026-01-06", "close": 101.0},
     ]
     assert result["per_symbol_stats"][0]["symbol"] == "600000.SH"
+    assert result["trades"][0]["name"] == "浦发银行"
+    assert result["per_symbol_stats"][0]["name"] == "浦发银行"
+    assert result["per_symbol_stats"][0]["best"] == result["trades"][0]["max_floating_gain_pct"]
+    assert result["per_symbol_stats"][0]["worst"] == result["trades"][0]["max_floating_loss_pct"]
     assert repo.minute_start <= date(2026, 1, 2)
+
+
+def test_per_symbol_best_and_worst_use_holding_excursions() -> None:
+    rows = MinutePortfolioService._per_symbol([
+        {
+            "symbol": "600000.SH", "pnl_pct": 0.08,
+            "max_floating_gain_pct": 0.15, "max_floating_loss_pct": -0.03,
+        },
+        {
+            "symbol": "600000.SH", "pnl_pct": -0.02,
+            "max_floating_gain_pct": 0.05, "max_floating_loss_pct": -0.12,
+        },
+    ])
+
+    assert rows == [{
+        "symbol": "600000.SH",
+        "n_trades": 2,
+        "total_return": round((1.08 * 0.98) - 1.0, 6),
+        "win_rate": 0.5,
+        "best": 0.15,
+        "worst": -0.12,
+    }]
 
 
 def test_service_excludes_warmup_minutes_from_execution(monkeypatch) -> None:
