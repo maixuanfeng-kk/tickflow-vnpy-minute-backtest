@@ -1404,10 +1404,12 @@ export const api = {
         : '/api/watchlist/enriched',
     ),
 
-  screenerStrategies: async (assetType: 'stock' | 'etf' = 'stock', includeMinute = false) => {
-    const timeframe = includeMinute ? '' : '&timeframe=1d'
+  screenerStrategies: async (assetType?: 'stock' | 'etf', includeMinute = false) => {
+    const query = new URLSearchParams()
+    if (assetType) query.set('asset_type', assetType)
+    if (!includeMinute) query.set('timeframe', '1d')
     const data = await request<{ strategies: StrategyDetail[]; load_errors?: StrategyLoadError[] }>(
-      `/api/strategies?asset_type=${assetType}${timeframe}`,
+      `/api/strategies?${query.toString()}`,
     )
     return { presets: data.strategies, load_errors: data.load_errors }
   },
