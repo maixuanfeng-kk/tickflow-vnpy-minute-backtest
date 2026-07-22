@@ -5,16 +5,11 @@ import { StockPanel } from '@/components/StockPanel'
 import type { ChartPriceLine, ChartRange } from '@/components/EChartsCandlestick'
 import type { StrategyBacktestTrade } from '@/lib/api'
 import { fmtPct, fmtPrice, priceColorClass } from '@/lib/format'
+import { addCalendarDays, resolveTradeDates } from './tradeDates'
 
 interface Props {
   trade: StrategyBacktestTrade | null
   onClose: () => void
-}
-
-function addDays(date: string, days: number): string {
-  const d = new Date(date)
-  d.setDate(d.getDate() + days)
-  return d.toISOString().slice(0, 10)
 }
 
 function fmtMoney(v: number | null | undefined): string {
@@ -48,28 +43,36 @@ export function TradeKlineModal({ trade, onClose }: Props) {
     if (trade) setShowIntraday(false)
   }, [trade])
 
-  const dateRange = useMemo(() => {
+  const tradeDates = useMemo(() => {
     if (!trade) return null
-    return {
-      start: addDays(String(trade.entry_date).slice(0, 10), -45),
-      end: addDays(String(trade.exit_date).slice(0, 10), 20),
-    }
+    return resolveTradeDates(trade)
   }, [trade])
 
+  const dateRange = useMemo(() => {
+    if (!tradeDates) return null
+    const start = addCalendarDays(tradeDates.entry, -45)
+    const end = addCalendarDays(tradeDates.exit, 20)
+    if (!start || !end) return null
+    return {
+      start,
+      end,
+    }
+  }, [tradeDates])
+
   const ranges = useMemo<ChartRange[]>(() => {
-    if (!trade) return []
+    if (!tradeDates) return []
     return [{
-      start: String(trade.entry_date).slice(0, 10),
-      end: String(trade.exit_date).slice(0, 10),
+      start: tradeDates.entry,
+      end: tradeDates.exit,
       label: '持仓区间',
       color: 'rgba(59,130,246,0.07)',
     }]
-  }, [trade])
+  }, [tradeDates])
 
   const priceLines = useMemo<ChartPriceLine[]>(() => {
-    if (!trade) return []
-    const start = String(trade.entry_date).slice(0, 10)
-    const end = String(trade.exit_date).slice(0, 10)
+    if (!trade || !tradeDates) return []
+    const start = tradeDates.entry
+    const end = tradeDates.exit
     return [
       {
         value: Number(trade.entry_price),
@@ -86,11 +89,11 @@ export function TradeKlineModal({ trade, onClose }: Props) {
         end,
       },
     ]
-  }, [trade])
+  }, [trade, tradeDates])
 
   return (
     <AnimatePresence>
-      {trade && dateRange && (
+      {trade && (
         <div className="fixed inset-0 z-[70] flex items-center justify-center">
           <motion.div
             initial={{ opacity: 0 }}
@@ -115,7 +118,9 @@ export function TradeKlineModal({ trade, onClose }: Props) {
                   <span className="rounded border border-accent/30 bg-accent/10 px-1.5 py-0.5 text-[10px] text-accent">交易回放</span>
                 </div>
                 <div className="mt-1 text-[11px] text-muted">
-                  {String(trade.entry_date).slice(0, 10)} 买入 → {String(trade.exit_date).slice(0, 10)} 卖出 · 持仓 {trade.duration ?? '—'} 天
+                  {tradeDates
+                    ? `${tradeDates.entry} 买入 → ${tradeDates.exit} 卖出 · 持仓 ${trade.duration ?? '—'} 天`
+                    : '缺少有效交易日期'}
                 </div>
               </div>
               <div className="flex shrink-0 items-center gap-3 text-xs">
@@ -150,17 +155,23 @@ export function TradeKlineModal({ trade, onClose }: Props) {
             </div>
 
             <div className="flex-1 overflow-auto p-4">
-              <StockPanel
-                symbol={trade.symbol}
-                height={520}
-                dateRange={dateRange}
-                ranges={ranges}
-                priceLines={priceLines}
-                showLimitMarkers={false}
-                showMarkerToggle={false}
-                showIntraday={showIntraday}
-                onSelectDate={() => { if (!showIntraday) setShowIntraday(true) }}
-              />
+              {dateRange ? (
+                <StockPanel
+                  symbol={trade.symbol}
+                  height={520}
+                  dateRange={dateRange}
+                  ranges={ranges}
+                  priceLines={priceLines}
+                  showLimitMarkers={false}
+                  showMarkerToggle={false}
+                  showIntraday={showIntraday}
+                  onSelectDate={() => { if (!showIntraday) setShowIntraday(true) }}
+                />
+              ) : (
+                <div className="flex h-[520px] items-center justify-center text-sm text-muted">
+                  缺少有效交易日期，无法加载交易回放
+                </div>
+              )}
             </div>
           </motion.div>
         </div>

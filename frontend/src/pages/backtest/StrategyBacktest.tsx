@@ -2202,8 +2202,18 @@ export function StrategyBacktest() {
                         <th className="px-4 py-2.5 font-medium text-right">选股次数</th>
                         <th className="px-4 py-2.5 font-medium text-right">总收益</th>
                         <th className="px-4 py-2.5 font-medium text-right">胜率</th>
-                        <th className="px-4 py-2.5 font-medium text-right">最佳</th>
-                        <th className="px-4 py-2.5 font-medium text-right">最差</th>
+                        <th
+                          className="px-4 py-2.5 font-medium text-right"
+                          title={result.config.engine === 'minute_portfolio' ? '单笔持仓期间达到的最高浮动收益率' : undefined}
+                        >
+                          {result.config.engine === 'minute_portfolio' ? '最高浮盈' : '最佳'}
+                        </th>
+                        <th
+                          className="px-4 py-2.5 font-medium text-right"
+                          title={result.config.engine === 'minute_portfolio' ? '单笔持仓期间达到的最大浮动亏损率' : undefined}
+                        >
+                          {result.config.engine === 'minute_portfolio' ? '最大浮亏' : '最差'}
+                        </th>
                       </tr>
                     </thead>
                     <tbody>
@@ -2211,7 +2221,7 @@ export function StrategyBacktest() {
                         <tr key={r.symbol} className="border-t border-border hover:bg-elevated/50 transition-colors group">
                           <td className="px-4 py-2">
                             <div className="font-medium text-foreground group-hover:text-accent transition-colors">
-                              {symbolNames[r.symbol] || r.symbol}
+                              {r.name || symbolNames[r.symbol] || r.symbol}
                             </div>
                             <div className="mt-0.5 font-mono text-[11px] text-muted">{r.symbol}</div>
                           </td>
@@ -2220,8 +2230,8 @@ export function StrategyBacktest() {
                             {fmtPct(r.total_return)}
                           </td>
                           <td className="px-4 py-2 text-right num">{fmtPct(r.win_rate)}</td>
-                          <td className="px-4 py-2 text-right num text-bull">{fmtPct(r.best)}</td>
-                          <td className="px-4 py-2 text-right num text-bear">{fmtPct(r.worst)}</td>
+                          <td className={`px-4 py-2 text-right num ${priceColorClass(r.best)}`}>{fmtPct(r.best)}</td>
+                          <td className={`px-4 py-2 text-right num ${priceColorClass(r.worst)}`}>{fmtPct(r.worst)}</td>
                         </tr>
                       ))}
                     </tbody>

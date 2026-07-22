@@ -674,8 +674,10 @@ export interface FactorBacktestResult {
 export interface StrategyBacktestTrade {
   symbol: string
   name?: string
-  entry_date: string
-  exit_date: string
+  entry_date?: string
+  exit_date?: string
+  entry_datetime?: string
+  exit_datetime?: string
   entry_price: number
   exit_price: number
   pnl_pct: number
@@ -687,6 +689,8 @@ export interface StrategyBacktestTrade {
   entry_value?: number
   exit_value?: number
   pnl_amount?: number
+  max_floating_gain_pct?: number
+  max_floating_loss_pct?: number
   entry_score?: number | null
   entry_signal_date?: string | null
   exit_signal_date?: string | null
@@ -705,11 +709,14 @@ export interface StrategyBacktestResult {
   trades: StrategyBacktestTrade[]
   per_symbol_stats: {
     symbol: string
+    name?: string
     n_trades: number
     total_return: number
     win_rate: number
     best: number
     worst: number
+    max_floating_gain_pct?: number
+    max_floating_loss_pct?: number
   }[]
   strategy_info: {
     id: string
