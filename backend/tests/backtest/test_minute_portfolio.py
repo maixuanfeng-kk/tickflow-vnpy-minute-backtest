@@ -32,6 +32,21 @@ def test_local_parquet_repository_normalizes_tdx_rows_and_builds_daily_ma(tmp_pa
     assert minutes.columns == ["symbol", "datetime", "open", "high", "low", "close", "volume", "amount"]
     assert daily.columns == ["symbol", "date", "ma5"]
 
+    class Repo:
+        def get_index_daily(self, symbol, start, end, columns):
+            return pl.DataFrame()
+
+    messages: list[dict] = []
+    MinutePortfolioService(Repo()).run(MinutePortfolioConfig(
+        symbols=["600000.SH"], start=date(2026, 1, 5), end=date(2026, 1, 5),
+        minute_data_dir=str(tmp_path),
+    ), progress_callback=messages.append)
+    days = [message["day"] for message in messages]
+    assert days == sorted(days)
+    assert any("读取分钟数据" in message["date"] for message in messages)
+    assert any("撮合交易日" in message["date"] for message in messages)
+    assert messages[-1]["day"] == messages[-1]["total"] == 1000
+
 
 @pytest.mark.parametrize(
     ("volume_ratio", "expected"),
@@ -345,7 +360,7 @@ def test_service_excludes_warmup_minutes_from_execution(monkeypatch) -> None:
         def __init__(self, config):
             pass
 
-        def run(self, rows, contexts):
+        def run(self, rows, contexts, progress_callback=None):
             captured["dates"] = {row["datetime"].date() for row in rows}
             return {"cash": 1_000_000.0, "trades": []}
 

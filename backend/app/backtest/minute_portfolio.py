@@ -6,7 +6,7 @@ from datetime import date, datetime, time, timedelta
 from math import floor
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Mapping, TypedDict
+from typing import Any, Callable, Mapping, TypedDict
 from uuid import uuid4
 
 import numpy as np
@@ -143,8 +143,16 @@ class MinutePortfolioConfig:
 class LocalMinuteParquetRepository:
     """Read pytdx per-symbol minute Parquet files through the repository contract."""
 
-    def __init__(self, data_dir: str | Path) -> None:
+    def __init__(
+        self,
+        data_dir: str | Path,
+        progress_callback: Callable[[int, int], None] | None = None,
+        progress_total: int = 0,
+    ) -> None:
         self.data_dir = Path(data_dir)
+        self.progress_callback = progress_callback
+        self.progress_total = progress_total
+        self.progress_done = 0
 
     @staticmethod
     def _symbol(value: str) -> str:
@@ -158,15 +166,24 @@ class LocalMinuteParquetRepository:
             if not path.exists():
                 path = self.data_dir / f"{symbol.replace('.', '_')}.parquet"
             if not path.exists():
+                self._advance_progress()
                 continue
             frame = pl.read_parquet(path).select(["ts_code", "trade_time", "open", "high", "low", "close", "vol", "amount"])
             frames.append(frame.rename({"ts_code": "symbol", "trade_time": "datetime", "vol": "volume"}).with_columns(
                 pl.col("symbol").str.replace_all(".XSHG", ".SH", literal=True).str.replace_all(".XSHE", ".SZ", literal=True),
                 pl.col("datetime").cast(pl.Utf8).str.strptime(pl.Datetime, strict=False),
             ).filter(pl.col("datetime").dt.date().is_between(start, end)))
+            self._advance_progress()
         if not frames:
             return pl.DataFrame(schema={"symbol": pl.String, "datetime": pl.Datetime, "open": pl.Float64, "high": pl.Float64, "low": pl.Float64, "close": pl.Float64, "volume": pl.Float64, "amount": pl.Float64})
         return pl.concat(frames).select(["symbol", "datetime", "open", "high", "low", "close", "volume", "amount"])
+
+    def _advance_progress(self) -> None:
+        self.progress_done += 1
+        if self.progress_callback and (
+            self.progress_done % 5 == 0 or self.progress_done >= self.progress_total
+        ):
+            self.progress_callback(self.progress_done, self.progress_total)
 
     def get_minute_range(self, symbols: list[str], start: date, end: date, asset_type: str = "stock") -> pl.DataFrame:
         return self._read(symbols, start, end)
@@ -257,7 +274,12 @@ class MinutePortfolioEngine:
     def __init__(self, config: MinutePortfolioConfig) -> None:
         self.config = config
 
-    def run(self, rows: list[dict], daily_context: dict[tuple[str, date], dict]) -> dict:
+    def run(
+        self,
+        rows: list[dict],
+        daily_context: dict[tuple[str, date], dict],
+        progress_callback: Callable[[int, int, float, date], None] | None = None,
+    ) -> dict:
         grouped: dict[datetime, list[dict]] = {}
         for row in rows:
             grouped.setdefault(row["datetime"], []).append(row)
@@ -274,6 +296,7 @@ class MinutePortfolioEngine:
         latest_closes: dict[str, float] = {}
         current_date: date | None = None
         peak_equity = self.config.initial_capital
+        trade_dates = sorted({timestamp.date() for timestamp in grouped})
 
         def snapshot(day: date) -> None:
             nonlocal peak_equity
@@ -288,6 +311,8 @@ class MinutePortfolioEngine:
                 "cash": round(cash, 2), "positions": len(positions),
             })
             drawdown_curve.append({"date": str(day), "value": round(drawdown, 6)})
+            if progress_callback:
+                progress_callback(len(equity_curve), len(trade_dates), equity, day)
 
         for timestamp in sorted(grouped):
             if current_date is not None and timestamp.date() != current_date:
@@ -623,10 +648,35 @@ class MinutePortfolioService:
             if row["close"] is not None and float(row["close"]) > 0
         ]
 
-    def run(self, config: MinutePortfolioConfig) -> dict:
+    def run(
+        self,
+        config: MinutePortfolioConfig,
+        progress_callback: Callable[[dict], None] | None = None,
+    ) -> dict:
         if config.start is None or config.end is None:
             raise ValueError("start and end are required")
-        repo = LocalMinuteParquetRepository(config.minute_data_dir) if config.minute_data_dir else self.repo
+
+        def emit(day: int, label: str, equity: float) -> None:
+            if progress_callback:
+                progress_callback({
+                    "day": max(0, min(day, 1000)), "total": 1000,
+                    "date": label, "equity": round(float(equity), 2),
+                })
+
+        emit(0, "准备回测", config.initial_capital)
+        if config.minute_data_dir:
+            total_reads = max(len(config.symbols) * 2, 1)
+
+            def on_read(done: int, total: int) -> None:
+                emit(round(done / total * 650), f"读取分钟数据 {done}/{total}", config.initial_capital)
+
+            repo = LocalMinuteParquetRepository(
+                config.minute_data_dir,
+                progress_callback=on_read,
+                progress_total=total_reads,
+            )
+        else:
+            repo = self.repo
         raw_rows, contexts = _load_rows_and_context(
             repo,
             config.symbols,
@@ -638,8 +688,16 @@ class MinutePortfolioService:
             row for row in raw_rows
             if config.start <= row["datetime"].date() <= config.end
         ]
+        emit(650, f"分钟数据就绪 {len(config.symbols)} 只股票", config.initial_capital)
 
-        executed = MinutePortfolioEngine(config).run(raw_rows, contexts)
+        def on_trade(done: int, total: int, equity: float, trading_day: date) -> None:
+            progress = 650 + round(done / max(total, 1) * 300)
+            emit(progress, f"撮合交易日 {done}/{total} ({trading_day})", equity)
+
+        executed = MinutePortfolioEngine(config).run(
+            raw_rows, contexts, progress_callback=on_trade,
+        )
+        emit(950, "计算统计与基准", executed["cash"])
         equity_curve = executed.get("equity_curve") or [{
             "date": str(config.end), "value": round(float(executed["cash"]), 2),
             "cash": round(float(executed["cash"]), 2), "positions": 0,
@@ -647,7 +705,7 @@ class MinutePortfolioService:
         drawdown_curve = executed.get("drawdown_curve") or [{"date": str(config.end), "value": 0.0}]
         executed["equity_curve"] = equity_curve
         executed["drawdown_curve"] = drawdown_curve
-        return {
+        result = {
             "run_id": uuid4().hex,
             "config": {"engine": "minute_portfolio", "frequency": "1m", "symbols": config.symbols,
                        "initial_capital": config.initial_capital, "max_positions": config.max_positions},
@@ -659,3 +717,5 @@ class MinutePortfolioService:
             "per_symbol_stats": self._per_symbol(executed["trades"]),
             "strategy_info": {"id": "opening_volume_portfolio", "name": "早盘放量组合", "source": "native"},
         }
+        emit(1000, "完成", executed["cash"])
+        return result

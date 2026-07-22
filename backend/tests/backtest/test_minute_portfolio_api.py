@@ -14,8 +14,11 @@ async def test_minute_portfolio_stream_passes_user_capital_and_positions(monkeyp
         def __init__(self, repo) -> None:
             assert repo == "repo"
 
-        def run(self, config):
+        def run(self, config, progress_callback=None):
             captured["config"] = config
+            if progress_callback:
+                progress_callback({"day": 325, "total": 1000, "date": "读取分钟数据 1/2", "equity": config.initial_capital})
+                progress_callback({"day": 800, "total": 1000, "date": "撮合交易日 1/2", "equity": config.initial_capital})
             return {"stats": {"end_balance": config.initial_capital}}
 
     async def not_disconnected() -> bool:
@@ -46,6 +49,9 @@ async def test_minute_portfolio_stream_passes_user_capital_and_positions(monkeyp
     assert captured["config"].initial_capital == 2_000_000.0
     assert captured["config"].max_positions == 4
     assert captured["config"].minute_data_dir == str(tmp_path)
+    assert "读取分钟数据 1/2" in body
+    assert "撮合交易日 1/2" in body
+    assert body.index("读取分钟数据 1/2") < body.index("event: done")
     assert "event: done" in body
     assert "event: done\ndata:" in body
 
@@ -73,7 +79,7 @@ async def test_minute_portfolio_stream_passes_opening_volume_strategy_params(mon
         def __init__(self, repo) -> None:
             assert repo.store.data_dir == tmp_path
 
-        def run(self, config):
+        def run(self, config, progress_callback=None):
             captured["config"] = config
             return {"stats": {"end_balance": config.initial_capital}}
 
