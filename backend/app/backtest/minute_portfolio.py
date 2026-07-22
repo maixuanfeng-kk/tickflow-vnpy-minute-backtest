@@ -36,18 +36,14 @@ class OpeningVolumeStrategyParams:
     scan_end_time: time = time(9, 59)
     volume_multiple: float | None = None
     enable_branch_a: bool = True
-    enable_branch_a_volume_filter: bool = True
     branch_a_volume_multiple: float | None = None
     branch_a_previous_candle: str = "bearish"
-    branch_a_require_previous_high_breakout: bool = True
     enable_branch_b: bool = True
-    enable_branch_b_volume_filter: bool = True
     branch_b_volume_multiple: float | None = None
     branch_b_today_return_min: float = 0.03
     branch_b_today_return_max: float = 0.05
     branch_b_previous_return_max: float = 0.05
     enable_branch_c: bool = True
-    enable_branch_c_volume_filter: bool = True
     branch_c_volume_multiple: float | None = None
     branch_c_previous_candle: str = "bullish"
     branch_c_previous_return_max: float = 0.05
@@ -144,38 +140,18 @@ class OpeningVolumeStrategyParams:
             scan_end_time=end,
             volume_multiple=volume_multiple,
             enable_branch_a=parse_bool(values.get("enable_branch_a"), "enable_branch_a", cls.enable_branch_a),
-            enable_branch_a_volume_filter=parse_bool(
-                values.get("enable_branch_a_volume_filter"),
-                "enable_branch_a_volume_filter",
-                cls.enable_branch_a_volume_filter,
-            ),
             branch_a_volume_multiple=branch_a_volume_multiple,
             branch_a_previous_candle=parse_candle_direction(
                 values.get("branch_a_previous_candle"),
                 "branch_a_previous_candle",
                 cls.branch_a_previous_candle,
             ),
-            branch_a_require_previous_high_breakout=parse_bool(
-                values.get("branch_a_require_previous_high_breakout"),
-                "branch_a_require_previous_high_breakout",
-                cls.branch_a_require_previous_high_breakout,
-            ),
             enable_branch_b=parse_bool(values.get("enable_branch_b"), "enable_branch_b", cls.enable_branch_b),
-            enable_branch_b_volume_filter=parse_bool(
-                values.get("enable_branch_b_volume_filter"),
-                "enable_branch_b_volume_filter",
-                cls.enable_branch_b_volume_filter,
-            ),
             branch_b_volume_multiple=branch_b_volume_multiple,
             branch_b_today_return_min=branch_b_today_return_min,
             branch_b_today_return_max=branch_b_today_return_max,
             branch_b_previous_return_max=branch_b_previous_return_max,
             enable_branch_c=parse_bool(values.get("enable_branch_c"), "enable_branch_c", cls.enable_branch_c),
-            enable_branch_c_volume_filter=parse_bool(
-                values.get("enable_branch_c_volume_filter"),
-                "enable_branch_c_volume_filter",
-                cls.enable_branch_c_volume_filter,
-            ),
             branch_c_volume_multiple=branch_c_volume_multiple,
             branch_c_previous_candle=parse_candle_direction(
                 values.get("branch_c_previous_candle"),
@@ -202,13 +178,10 @@ def _matches_candle_direction(direction: str, previous_open: float, previous_clo
 
 def _passes_volume_filter(
     *,
-    enabled: bool,
     branch_multiple: float | None,
     legacy_multiple: float | None,
     volume_ratio: float,
 ) -> bool:
-    if not enabled:
-        return True
     required_multiple = branch_multiple or legacy_multiple or VOLUME_RATIO_MIN
     return volume_ratio >= required_multiple
 
@@ -228,7 +201,6 @@ def entry_reason(
     if (
         params.enable_branch_a
         and _passes_volume_filter(
-            enabled=params.enable_branch_a_volume_filter,
             branch_multiple=params.branch_a_volume_multiple,
             legacy_multiple=params.volume_multiple,
             volume_ratio=volume_ratio,
@@ -236,16 +208,12 @@ def entry_reason(
         and _matches_candle_direction(
             params.branch_a_previous_candle, previous_open, previous_close,
         )
-        and (
-            not params.branch_a_require_previous_high_breakout
-            or crossed_previous_high
-        )
+        and crossed_previous_high
     ):
         return "previous_bearish_breakout"
     if (
         params.enable_branch_b
         and _passes_volume_filter(
-            enabled=params.enable_branch_b_volume_filter,
             branch_multiple=params.branch_b_volume_multiple,
             legacy_multiple=params.volume_multiple,
             volume_ratio=volume_ratio,
@@ -257,7 +225,6 @@ def entry_reason(
     if (
         params.enable_branch_c
         and _passes_volume_filter(
-            enabled=params.enable_branch_c_volume_filter,
             branch_multiple=params.branch_c_volume_multiple,
             legacy_multiple=params.volume_multiple,
             volume_ratio=volume_ratio,

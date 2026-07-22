@@ -122,9 +122,7 @@ def test_entry_reason_applies_volume_threshold_per_branch() -> None:
         enable_branch_a=True,
         enable_branch_b=True,
         enable_branch_c=False,
-        enable_branch_a_volume_filter=True,
         branch_a_volume_multiple=2.0,
-        enable_branch_b_volume_filter=True,
         branch_b_volume_multiple=1.2,
     )
 
@@ -139,24 +137,34 @@ def test_entry_reason_applies_volume_threshold_per_branch() -> None:
     ) == "two_day_moderate_rise"
 
 
-def test_entry_reason_can_disable_volume_condition_for_one_branch() -> None:
-    params = OpeningVolumeStrategyParams(
-        enable_branch_a=True,
-        enable_branch_b=False,
-        enable_branch_c=False,
-        enable_branch_a_volume_filter=False,
-        branch_a_volume_multiple=99.0,
-    )
+def test_legacy_volume_switches_cannot_disable_branch_volume_requirement() -> None:
+    params = OpeningVolumeStrategyParams.from_mapping({
+        "enable_branch_a_volume_filter": False,
+        "enable_branch_b_volume_filter": False,
+        "enable_branch_c_volume_filter": False,
+        "branch_a_volume_multiple": 1.5,
+        "branch_b_volume_multiple": 1.5,
+        "branch_c_volume_multiple": 1.5,
+    })
 
     assert entry_reason(
         previous_open=11.0,
         previous_close=10.0,
         previous_change_pct=-0.02,
         today_return=0.01,
-        volume_ratio=0.1,
+        volume_ratio=1.49,
         crossed_previous_high=True,
         params=params,
-    ) == "previous_bearish_breakout"
+    ) is None
+    assert entry_reason(
+        previous_open=10.0,
+        previous_close=11.0,
+        previous_change_pct=0.01,
+        today_return=0.04,
+        volume_ratio=1.49,
+        crossed_previous_high=False,
+        params=params,
+    ) is None
 
 
 def test_entry_reason_uses_editable_branch_a_conditions() -> None:
@@ -164,9 +172,8 @@ def test_entry_reason_uses_editable_branch_a_conditions() -> None:
         enable_branch_a=True,
         enable_branch_b=False,
         enable_branch_c=False,
-        enable_branch_a_volume_filter=False,
+        branch_a_volume_multiple=1.5,
         branch_a_previous_candle="bullish",
-        branch_a_require_previous_high_breakout=False,
     )
 
     assert entry_reason(
@@ -174,10 +181,30 @@ def test_entry_reason_uses_editable_branch_a_conditions() -> None:
         previous_close=11.0,
         previous_change_pct=0.10,
         today_return=0.01,
-        volume_ratio=0.1,
-        crossed_previous_high=False,
+        volume_ratio=1.5,
+        crossed_previous_high=True,
         params=params,
     ) == "previous_bearish_breakout"
+
+
+def test_legacy_branch_a_breakout_switch_cannot_disable_breakout_requirement() -> None:
+    params = OpeningVolumeStrategyParams.from_mapping({
+        "enable_branch_a": True,
+        "enable_branch_b": False,
+        "enable_branch_c": False,
+        "branch_a_volume_multiple": 1.5,
+        "branch_a_require_previous_high_breakout": False,
+    })
+
+    assert entry_reason(
+        previous_open=11.0,
+        previous_close=10.0,
+        previous_change_pct=-0.02,
+        today_return=0.01,
+        volume_ratio=1.5,
+        crossed_previous_high=False,
+        params=params,
+    ) is None
 
 
 def test_entry_reason_uses_editable_branch_b_return_bounds() -> None:
@@ -185,7 +212,7 @@ def test_entry_reason_uses_editable_branch_b_return_bounds() -> None:
         enable_branch_a=False,
         enable_branch_b=True,
         enable_branch_c=False,
-        enable_branch_b_volume_filter=False,
+        branch_b_volume_multiple=0.1,
         branch_b_today_return_min=0.01,
         branch_b_today_return_max=0.02,
         branch_b_previous_return_max=0.0,
@@ -207,7 +234,7 @@ def test_entry_reason_uses_editable_branch_c_conditions() -> None:
         enable_branch_a=False,
         enable_branch_b=False,
         enable_branch_c=True,
-        enable_branch_c_volume_filter=False,
+        branch_c_volume_multiple=0.1,
         branch_c_previous_candle="bearish",
         branch_c_previous_return_max=-0.01,
     )

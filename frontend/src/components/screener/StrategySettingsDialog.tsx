@@ -7,6 +7,7 @@ import { color } from '@/lib/colors'
 import { SignalPicker } from './SignalPicker'
 import { SignalTriggerActions } from '@/components/signals/SignalTriggerActions'
 import { Modal } from '@/components/Modal'
+import { OpeningVolumeParamsEditor } from '@/components/strategy/OpeningVolumeParamsEditor'
 
 // 内置列名 → 中文标签
 const FIELD_LABEL: Record<string, string> = {}
@@ -366,6 +367,7 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
 
   if (!strategyId) return null
   const isMinuteNative = detail?.execution_backend === 'minute_native'
+  const isOpeningVolume = detail?.id === 'opening_volume_portfolio'
 
   return (
     <>
@@ -428,7 +430,7 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
                 </div>
 
                 {/* 三列 */}
-                <div className={`grid ${isMinuteNative ? 'grid-cols-1 max-w-md' : 'grid-cols-3'} gap-5 items-start`}>
+                <div className={`grid ${isOpeningVolume ? 'grid-cols-1' : isMinuteNative ? 'grid-cols-1 max-w-md' : 'grid-cols-3'} gap-5 items-start`}>
                   {/* 列1：选股条件 */}
                   {!isMinuteNative && (
                   <Section icon={Filter} title="基础参数" accent="text-sky-400">
@@ -471,11 +473,19 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
                   {/* 列2：策略参数 */}
                   <div className="space-y-3">
                     {detail.params.length > 0 ? (
-                      <Section icon={Settings2} title="策略参数" accent="text-muted">
-                        <div className="space-y-1.5">
-                          {detail.params.map(p => <ParamField key={p.id} def={p} value={params[p.id]} onChange={v => setParams({ ...params, [p.id]: v })} />)}
-                        </div>
-                      </Section>
+                      isOpeningVolume ? (
+                        <OpeningVolumeParamsEditor
+                          definitions={detail.params}
+                          values={params}
+                          onChange={(id, value) => setParams(current => ({ ...current, [id]: value }))}
+                        />
+                      ) : (
+                        <Section icon={Settings2} title="策略参数" accent="text-muted">
+                          <div className="space-y-1.5">
+                            {detail.params.map(p => <ParamField key={p.id} def={p} value={params[p.id]} onChange={v => setParams({ ...params, [p.id]: v })} />)}
+                          </div>
+                        </Section>
+                      )
                     ) : (
                       <div className="rounded-xl border border-border/15 bg-surface/20 px-3.5 py-4 text-[11px] text-muted/50 text-center">无策略参数</div>
                     )}

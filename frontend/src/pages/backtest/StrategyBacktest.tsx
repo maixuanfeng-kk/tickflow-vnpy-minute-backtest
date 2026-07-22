@@ -25,6 +25,7 @@ import { StrategyNavChart } from './charts/StrategyNavChart'
 import { ReturnDistributionChart } from './charts/ReturnDistributionChart'
 import { TradeKlineModal } from './components/TradeKlineModal'
 import { SignalTriggerActions } from '@/components/signals/SignalTriggerActions'
+import { OpeningVolumeParamsEditor } from '@/components/strategy/OpeningVolumeParamsEditor'
 
 const formatDate = (date: Date) => date.toISOString().slice(0, 10)
 const monthsAgo = (months: number) => {
@@ -1202,6 +1203,7 @@ export function StrategyBacktest() {
 
   const detail = strategyDetail.data
   const minuteNative = detail?.execution_backend === 'minute_native'
+  const openingVolumeStrategy = detail?.id === 'opening_volume_portfolio'
   const matrixStrategy = detail?.execution_backend === 'matrix_native'
   const visibleAdvancedTabs = useMemo(
     () => minuteNative
@@ -2335,22 +2337,30 @@ export function StrategyBacktest() {
               )}
 
               {settingsTab === 'params' && (
-                <ConfigSection title="策略参数" hint="自动限制 min/max">
-                  {detail.params.length > 0 ? (
-                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                      {detail.params.map(param => (
-                        <StrategyParamInput
-                          key={param.id}
-                          param={param}
-                          value={strategyParams[param.id]}
-                          onChange={value => setStrategyParams(prev => ({ ...prev, [param.id]: value }))}
-                        />
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="text-xs text-muted">当前策略没有可调参数。</div>
-                  )}
-                </ConfigSection>
+                openingVolumeStrategy ? (
+                  <OpeningVolumeParamsEditor
+                    definitions={detail.params}
+                    values={strategyParams}
+                    onChange={(id, value) => setStrategyParams(current => ({ ...current, [id]: value }))}
+                  />
+                ) : (
+                  <ConfigSection title="策略参数" hint="自动限制 min/max">
+                    {detail.params.length > 0 ? (
+                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                        {detail.params.map(param => (
+                          <StrategyParamInput
+                            key={param.id}
+                            param={param}
+                            value={strategyParams[param.id]}
+                            onChange={value => setStrategyParams(prev => ({ ...prev, [param.id]: value }))}
+                          />
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="text-xs text-muted">当前策略没有可调参数。</div>
+                    )}
+                  </ConfigSection>
+                )
               )}
 
               {settingsTab === 'filter' && (

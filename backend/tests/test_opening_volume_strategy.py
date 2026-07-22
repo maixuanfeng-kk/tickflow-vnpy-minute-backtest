@@ -26,18 +26,14 @@ def test_opening_volume_strategy_is_registered_with_editable_defaults():
         "scan_start_time": "09:30",
         "scan_end_time": "09:59",
         "enable_branch_a": True,
-        "enable_branch_a_volume_filter": True,
         "branch_a_volume_multiple": 1.5,
         "branch_a_previous_candle": "阴线",
-        "branch_a_require_previous_high_breakout": True,
         "enable_branch_b": True,
-        "enable_branch_b_volume_filter": True,
         "branch_b_volume_multiple": 1.5,
         "branch_b_today_return_min": 0.03,
         "branch_b_today_return_max": 0.05,
         "branch_b_previous_return_max": 0.05,
         "enable_branch_c": True,
-        "enable_branch_c_volume_filter": True,
         "branch_c_volume_multiple": 1.5,
         "branch_c_previous_candle": "阳线",
         "branch_c_previous_return_max": 0.05,
@@ -109,7 +105,7 @@ def test_native_strategy_run_uses_saved_params(monkeypatch, tmp_path):
     monkeypatch.setattr(strategy_api, "OpeningVolumeScanService", ScanService)
     strategy_config.save_override(tmp_path, "opening_volume_portfolio", {
         "params": {
-            "enable_branch_a_volume_filter": False,
+            "branch_a_volume_multiple": 2.1,
             "branch_b_today_return_min": 0.015,
         },
     })
@@ -124,7 +120,7 @@ def test_native_strategy_run_uses_saved_params(monkeypatch, tmp_path):
     ), request)
 
     assert result["total"] == 0
-    assert captured["config"].strategy_params.enable_branch_a_volume_filter is False
+    assert captured["config"].strategy_params.branch_a_volume_multiple == 2.1
     assert captured["config"].strategy_params.branch_b_today_return_min == 0.015
 
 
