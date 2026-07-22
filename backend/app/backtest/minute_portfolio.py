@@ -738,7 +738,11 @@ class MinutePortfolioService:
         get_name_map = getattr(self.repo, "get_name_map", None)
         if callable(get_name_map):
             try:
-                name_map = get_name_map(config.symbols) or {}
+                name_symbols = [
+                    LocalMinuteParquetRepository._symbol(symbol)
+                    for symbol in config.symbols
+                ]
+                name_map = get_name_map(name_symbols) or {}
             except Exception:
                 name_map = {}
         for trade in executed["trades"]:
