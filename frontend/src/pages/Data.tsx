@@ -495,7 +495,7 @@ export function Data() {
         return (
           <StatCard
             title="分钟 K"
-            hint="全市场同步"
+            hint="本地导入或全市场同步"
             stats={s?.minute}
             loading={isLoading}
             active={activeCard === 'minute'}
@@ -507,6 +507,9 @@ export function Data() {
             tierLabel={caps.data?.label}
             customProvider={getCustomProviderName('minute')}
             auto={minuteAuto}
+            subLabel={s?.local_minute_import
+              ? `本地 CSV 导入 · ${s.local_minute_import.earliest_date ?? '—'} 至 ${s.local_minute_import.latest_date ?? '—'} · 原始价格（复权未知）`
+              : undefined}
             onShowFields={() => setSchemaTable('minute')}
             onSettings={hasData ? () => setOpenSettings(v => v === 'minute' ? null : 'minute') : undefined}
             settingsOpen={openSettings === 'minute'}

@@ -763,6 +763,54 @@ export interface StrategyBacktestTrade {
   blocked_exit_days?: number
   entry_signal_id?: string | null
   exit_signal_id?: string | null
+  duration_minutes?: number
+  entry_datetime?: string
+  exit_datetime?: string | null
+  direction?: string
+}
+
+export interface VnpyDailyLedgerRow {
+  date: string
+  buy_count: number
+  sell_count: number
+  buy_amount: number
+  sell_amount: number
+  commission: number
+  stamp_tax: number
+  slippage: number
+  realized_pnl: number
+  end_equity?: number
+  daily_return?: number | null
+  fills: StrategyBacktestTrade[]
+}
+
+export interface VnpySignalDiagnostic {
+  id: number
+  symbol: string
+  name?: string | null
+  direction: string
+  timestamp: string
+  reason: string
+  conditions: string[]
+  status: 'triggered' | 'queued' | 'filled' | 'rejected'
+  due_at?: string | null
+  fill_datetime?: string | null
+  rejection_reason?: string | null
+}
+
+export interface VnpyOpenPosition {
+  symbol: string
+  name?: string | null
+  volume: number
+  average_cost: number
+  mark_price: number
+  market_value: number
+  unrealized_pnl: number
+  unrealized_pnl_pct?: number | null
+  position_pct?: number | null
+  entry_date?: string | null
+  holding_days: number
+  holding_minutes: number
 }
 
 export interface StrategyBacktestResult {
@@ -775,12 +823,21 @@ export interface StrategyBacktestResult {
   trades: StrategyBacktestTrade[]
   per_symbol_stats: {
     symbol: string
+    name?: string | null
     n_trades: number
     total_return: number
     win_rate: number
     best: number
     worst: number
+    realized_pnl?: number
+    open_volume?: number
+    open_market_value?: number
+    avg_holding_days?: number | null
+    avg_holding_minutes?: number | null
   }[]
+  daily_ledger?: VnpyDailyLedgerRow[]
+  positions?: VnpyOpenPosition[]
+  signal_diagnostics?: VnpySignalDiagnostic[]
   strategy_info: {
     id: string
     name: string
@@ -1888,6 +1945,8 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
+  vnpyStrategies: () => request<{ strategies: VnpyStrategy[] }>('/api/backtest/vnpy/strategies'),
+
   stockDeepReportTaskUpdate: (taskId: string, payload: Omit<DeepReportTask, 'id' | 'order'>) =>
     request<{ task: DeepReportTask }>(`/api/stock-analysis/deep-reports/task-catalog/admin/${encodeURIComponent(taskId)}`, {
       method: 'PUT',
@@ -2358,6 +2417,43 @@ interface InstrumentsStats {
   named: number
 }
 
+export interface VnpyStrategy {
+  id: string
+  name: string
+  kind: 'portfolio'
+  min_symbols: number
+  max_symbols: number
+  description: string
+  parameters: Array<{
+    name: string
+    label: string
+    default: unknown
+    kind: string
+    minimum?: number | null
+    maximum?: number | null
+  }>
+}
+
+export interface LocalMinuteImportStatus {
+  status: 'succeeded' | 'failed' | 'running' | 'preview'
+  dry_run: boolean
+  source_label: string
+  adjustment: 'unknown'
+  volume_unit: string
+  files_discovered: number
+  files_imported: number
+  rows_read: number
+  rows_valid: number
+  rows_invalid: number
+  rows_added: number
+  rows_skipped_existing: number
+  earliest_date: string | null
+  latest_date: string | null
+  imported_at: string | null
+  skipped_files: Array<{ file: string; reason: string }>
+  failed_files: Array<{ file: string; reason: string }>
+}
+
 export interface DataStatus {
   daily: TableStats | null
   enriched: TableStats | null
@@ -2368,6 +2464,7 @@ export interface DataStatus {
   etf_enriched: TableStats | null
   etf_instruments: InstrumentsStats | null
   minute: TableStats | null
+  local_minute_import: LocalMinuteImportStatus | null
   adj_factor: TableStats | null
   instruments: InstrumentsStats | null
   financials: { rows: number; tables: Record<string, { rows: number; symbols: number }> } | null

@@ -107,6 +107,7 @@ export const storage = {
     maxExposure: string
     initialCapital: string
     positionSizing: 'equal' | 'score_weight'
+    volumeLimitEnabled?: boolean
     mode: 'position' | 'full'
     holdingDays: string
     minuteFill?: boolean
