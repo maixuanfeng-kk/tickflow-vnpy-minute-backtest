@@ -1,5 +1,9 @@
 # vn.py Minute CTA Backtest Implementation Plan
 
+> **已替代（2026-07-27）：** 本计划描述的单标的分钟双均线 CTA 引擎已由“本地 CSV + 股票池组合撮合 + 策略注册表”框架替代，仅保留作历史审计参考。
+
+> **已替代（2026-07-27）：** 本计划描述的单标的分钟双均线 CTA 引擎已由“本地 CSV + 股票池组合撮合 + 策略注册表”框架替代，仅保留作历史审计参考。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Expose a single-stock, local-CSV, minute CTA backtest powered by vn.py through TickFlow's existing SSE workflow.

@@ -7,7 +7,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.api import strategy as strategy_api
-from app.backtest.minute_portfolio import OpeningVolumeScanConfig, OpeningVolumeScanService, OpeningVolumeStrategyParams
+from app.strategy.opening_volume_scan import OpeningVolumeScanConfig, OpeningVolumeScanService, OpeningVolumeStrategyParams
 from app.strategy import config as strategy_config
 from app.strategy.engine import StrategyEngine
 
@@ -67,7 +67,7 @@ def test_opening_volume_scan_service_reads_tickflow_watchlist_only(monkeypatch):
             })
 
     monkeypatch.setattr(
-        "app.backtest.minute_portfolio.watchlist.list_symbols",
+        "app.strategy.opening_volume_scan.watchlist.list_symbols",
         lambda: [{"symbol": "600000.SH"}, {"symbol": "510300.SH"}],
     )
     repo = Repo()

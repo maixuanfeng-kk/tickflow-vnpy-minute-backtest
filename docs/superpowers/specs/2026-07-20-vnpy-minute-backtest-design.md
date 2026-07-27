@@ -1,5 +1,9 @@
 # vn.py Minute CTA Backtest Design
 
+> **已替代（2026-07-27）：** 本设计中的单标的分钟 CTA 路径不再是运行时能力；当前实现使用本地分钟 Parquet、股票池组合引擎和独立策略注册表。本文仅保留作历史审计参考。
+
+> **已替代（2026-07-27）：** 本设计中的单标的分钟 CTA 路径不再是运行时能力；当前实现使用本地分钟 Parquet、股票池组合引擎和独立策略注册表。本文仅保留作历史审计参考。
+
 ## Goal
 
 Add a dedicated vn.py-backed, single-stock minute CTA backtest to TickFlow without

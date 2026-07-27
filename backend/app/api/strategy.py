@@ -23,7 +23,7 @@ from app.strategy.ai_generator import AIStrategyGenerator, find_meta_assignment
 from app.strategy.engine import StrategyDef, StrategyEngine
 from app.strategy.monitor import StrategyMonitorService
 from app.strategy.prompt_builder import build_step1, build_step2
-from app.backtest.minute_portfolio import (
+from app.strategy.opening_volume_scan import (
     OpeningVolumeScanConfig,
     OpeningVolumeScanService,
     OpeningVolumeStrategyParams,
