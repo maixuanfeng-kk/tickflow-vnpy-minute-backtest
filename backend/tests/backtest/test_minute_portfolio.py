@@ -49,6 +49,34 @@ def test_local_parquet_repository_normalizes_tdx_rows_and_builds_daily_ma(tmp_pa
     assert messages[-1]["day"] == messages[-1]["total"] == 1000
 
 
+def test_local_daily_aggregation_starts_with_0925_auction(tmp_path) -> None:
+    symbol = "600000.SH"
+    pl.DataFrame({
+        "ts_code": ["600000.XSHG"] * 4,
+        "trade_time": [
+            "2026-01-05 09:15:00", "2026-01-05 09:24:00",
+            "2026-01-05 09:25:00", "2026-01-05 09:30:00",
+        ],
+        "open": [9.0, 9.1, 10.0, 10.1],
+        "high": [99.0, 98.0, 10.2, 10.3],
+        "low": [1.0, 2.0, 9.8, 10.0],
+        "close": [9.0, 9.1, 10.1, 10.2],
+        "vol": [1_000.0, 2_000.0, 100.0, 200.0],
+        "amount": [9_000.0, 18_200.0, 1_010.0, 2_040.0],
+    }).write_parquet(tmp_path / f"{symbol}.parquet")
+
+    daily = LocalMinuteParquetRepository(tmp_path).get_daily_batch(
+        [symbol], date(2026, 1, 5), date(2026, 1, 5),
+        ["symbol", "date", "open", "high", "low", "close", "volume"],
+    ).row(0, named=True)
+
+    assert daily == {
+        "symbol": symbol, "date": date(2026, 1, 5),
+        "open": 10.0, "high": 10.3, "low": 9.8,
+        "close": 10.2, "volume": 300.0,
+    }
+
+
 @pytest.mark.parametrize(
     ("volume_ratio", "expected"),
     [

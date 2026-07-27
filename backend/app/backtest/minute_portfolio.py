@@ -315,8 +315,13 @@ class LocalMinuteParquetRepository:
         minutes = self._read(symbols, start, end)
         if minutes.is_empty():
             return pl.DataFrame(schema={column: pl.Float64 for column in columns})
-        daily = minutes.sort(["symbol", "datetime"]).with_columns(pl.col("datetime").dt.date().alias("date")).group_by(["symbol", "date"], maintain_order=True).agg(
-            pl.col("open").first(), pl.col("high").max(), pl.col("low").min(), pl.col("close").last(), pl.col("volume").sum(),
+        daily = minutes.filter(
+            pl.col("datetime").dt.time() >= time(9, 25)
+        ).sort(["symbol", "datetime"]).with_columns(
+            pl.col("datetime").dt.date().alias("date")
+        ).group_by(["symbol", "date"], maintain_order=True).agg(
+            pl.col("open").first(), pl.col("high").max(), pl.col("low").min(),
+            pl.col("close").last(), pl.col("volume").sum(),
         ).sort(["symbol", "date"])
         for period in MA_EXIT_PERIODS:
             daily = daily.with_columns(pl.col("close").rolling_mean(period).over("symbol").alias(f"ma{period}"))
