@@ -693,12 +693,16 @@ def test_service_reads_daily_and_minute_rows_and_returns_backtest_shape() -> Non
         end=date(2026, 1, 6),
         initial_capital=2_000_000.0,
         max_positions=4,
+        cash_reserve_ratio=0.03,
+        max_buy_volume_ratio=1.0,
     ))
 
     assert result["config"]["engine"] == "minute_portfolio"
     assert result["config"]["symbols"] == ["600000.XSHG"]
     assert result["config"]["initial_capital"] == 2_000_000.0
     assert result["config"]["max_positions"] == 4
+    assert result["config"]["cash_reserve_ratio"] == 0.03
+    assert result["config"]["max_buy_volume_ratio"] == 1.0
     assert result["stats"]["total_trade_count"] == 1
     assert {
         "total_return", "annual_return", "sharpe", "sortino", "max_drawdown",

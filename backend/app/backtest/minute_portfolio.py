@@ -902,7 +902,9 @@ class MinutePortfolioService:
         result = {
             "run_id": uuid4().hex,
             "config": {"engine": "minute_portfolio", "frequency": "1m", "symbols": config.symbols,
-                       "initial_capital": config.initial_capital, "max_positions": config.max_positions},
+                       "initial_capital": config.initial_capital, "max_positions": config.max_positions,
+                       "cash_reserve_ratio": config.cash_reserve_ratio,
+                       "max_buy_volume_ratio": config.max_buy_volume_ratio},
             "stats": self._stats(executed, config),
             "equity_curve": equity_curve,
             "drawdown_curve": drawdown_curve,
