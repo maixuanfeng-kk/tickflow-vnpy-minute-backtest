@@ -980,3 +980,55 @@ def test_service_excludes_warmup_minutes_from_execution(monkeypatch) -> None:
     ))
 
     assert captured["dates"] == {date(2026, 1, 5)}
+
+
+def test_service_ignores_preopen_bars_when_triggering_exits() -> None:
+    symbol = "600000.SH"
+
+    class Repo:
+        def get_daily_batch(self, symbols, start, end, columns):
+            return pl.DataFrame({
+                "symbol": [symbol, symbol],
+                "date": [date(2026, 1, 2), date(2026, 1, 5)],
+                "open": [11.0, 10.0],
+                "high": [10.5, 10.6],
+                "close": [10.0, 10.0],
+                "ma5": [9.0, 9.0],
+            })
+
+        def get_minute_range(self, symbols, start, end, asset_type):
+            return pl.DataFrame({
+                "symbol": [symbol] * 7,
+                "datetime": [
+                    datetime(2026, 1, 2, 9, 30),
+                    datetime(2026, 1, 5, 9, 30),
+                    datetime(2026, 1, 5, 9, 31),
+                    datetime(2026, 1, 6, 9, 16),
+                    datetime(2026, 1, 6, 9, 17),
+                    datetime(2026, 1, 6, 9, 30),
+                    datetime(2026, 1, 6, 9, 31),
+                ],
+                "open": [10.0, 10.0, 10.0, 9.0, 9.0, 9.0, 8.8],
+                "high": [10.0, 10.6, 10.1, 9.1, 9.1, 9.1, 8.9],
+                "low": [10.0, 10.0, 9.9, 8.9, 8.9, 8.9, 8.7],
+                "close": [10.0, 10.2, 10.0, 9.0, 9.0, 9.0, 8.8],
+                "volume": [100.0, 150.0, 1_000.0, 100.0, 100.0, 100.0, 1_000.0],
+                "amount": [1_000.0] * 7,
+            })
+
+        def get_index_daily(self, symbol, start, end, columns):
+            return pl.DataFrame()
+
+    result = MinutePortfolioService(Repo()).run(MinutePortfolioConfig(
+        symbols=[symbol],
+        start=date(2026, 1, 5),
+        end=date(2026, 1, 6),
+        initial_capital=100_000.0,
+        max_positions=1,
+        commission_pct=0.0,
+        stamp_tax_pct=0.0,
+        slippage_bps=0.0,
+    ))
+
+    assert result["trades"][0]["exit_reason"] == "stop_loss"
+    assert result["trades"][0]["exit_datetime"] == "2026-01-06 09:31:00"

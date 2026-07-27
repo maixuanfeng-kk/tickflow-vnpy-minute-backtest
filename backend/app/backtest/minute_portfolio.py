@@ -884,6 +884,7 @@ class MinutePortfolioService:
         raw_rows = [
             row for row in raw_rows
             if config.start <= row["datetime"].date() <= config.end
+            and row["datetime"].time() >= time(9, 30)
         ]
         emit(650, f"分钟数据就绪 {len(config.symbols)} 只股票", config.initial_capital)
 
