@@ -479,8 +479,25 @@ class MinutePortfolioEngine:
                 if bar is None or float(bar["open"]) <= 0 or float(bar["volume"]) <= 0:
                     continue
                 price = float(bar["open"]) * (1 + self.config.slippage_bps / 10_000)
-                target = self.config.initial_capital / self.config.max_positions
-                spendable_cash = cash * (1 - self.config.cash_reserve_ratio)
+                current_equity = cash
+                for held_symbol, position in positions.items():
+                    held_bar = bars.get(held_symbol)
+                    mark_price = (
+                        float(held_bar.get("open") or held_bar.get("close") or 0)
+                        if held_bar else 0.0
+                    )
+                    if mark_price <= 0:
+                        mark_price = float(
+                            latest_closes.get(held_symbol) or position["entry_price"]
+                        )
+                    current_equity += position["shares"] * mark_price
+                reserve_cash = current_equity * self.config.cash_reserve_ratio
+                target = (
+                    current_equity
+                    * (1 - self.config.cash_reserve_ratio)
+                    / self.config.max_positions
+                )
+                spendable_cash = max(cash - reserve_cash, 0.0)
                 shares = floor(
                     min(target, spendable_cash)
                     / (price * (1 + self.config.commission_pct))
