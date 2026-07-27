@@ -280,7 +280,7 @@ Expected entry times: eight at 09:31, one at 09:32, and one at 09:33.
 Run:
 
 ```powershell
-backend\.venv\Scripts\python.exe -m pytest backend/tests/backtest/test_minute_portfolio.py backend/tests/test_opening_volume_strategy.py backend/tests/backtest/test_api.py -q
+backend\.venv\Scripts\python.exe -m pytest backend/tests/backtest/test_minute_portfolio.py backend/tests/test_opening_volume_strategy.py backend/tests/backtest/test_minute_portfolio_api.py -q
 ```
 
 Expected: all tests pass with zero failures.
