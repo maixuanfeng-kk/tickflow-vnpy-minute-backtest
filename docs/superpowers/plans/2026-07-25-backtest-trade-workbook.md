@@ -77,4 +77,3 @@ Render compact populated ranges from all 12 sheets, create a contact sheet for v
 - [ ] **Step 4: Re-export and perform final reconciliation**
 
 After any visual fixes, export once more, inspect summary/check ranges, and confirm all checks are `OK`.
-
