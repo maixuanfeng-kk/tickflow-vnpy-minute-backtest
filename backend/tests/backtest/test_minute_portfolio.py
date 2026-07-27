@@ -9,6 +9,7 @@ from app.backtest.minute_portfolio import (
     MinutePortfolioEngine,
     MinutePortfolioService,
     OpeningVolumeStrategyParams,
+    _load_rows_and_context,
     entry_reason,
     is_in_scan_window,
     rank_candidates,
@@ -413,6 +414,105 @@ def test_engine_uses_stricter_cash_or_volume_buy_limit() -> None:
     )
 
     assert trade["shares"] == 500
+
+
+def test_load_context_keeps_four_previous_closes_for_intraday_ma5() -> None:
+    symbol = "600000.SH"
+    dates = [date(2026, 1, day) for day in (2, 5, 6, 7, 8)]
+
+    class Repo:
+        def get_daily_batch(self, symbols, start, end, columns):
+            return pl.DataFrame({
+                "symbol": [symbol] * 5,
+                "date": dates,
+                "open": [10.0, 10.5, 11.0, 11.5, 12.0],
+                "high": [10.2, 10.7, 11.2, 11.7, 12.2],
+                "close": [10.0, 10.5, 11.0, 11.5, 12.0],
+                "ma5": [None, None, None, None, 11.0],
+            })
+
+        def get_minute_range(self, symbols, start, end, asset_type):
+            return pl.DataFrame({
+                "symbol": [symbol],
+                "datetime": [datetime(2026, 1, 8, 9, 30)],
+                "open": [12.0], "high": [12.1], "low": [11.9], "close": [12.0],
+                "volume": [100.0], "amount": [1_200.0],
+            })
+
+    _, contexts = _load_rows_and_context(
+        Repo(), [symbol], date(2026, 1, 8), date(2026, 1, 8), 5,
+    )
+
+    assert contexts[(symbol, date(2026, 1, 8))]["previous_closes"] == [
+        10.0, 10.5, 11.0, 11.5,
+    ]
+
+
+def _two_day_ma_exit_trade(previous_closes: list[float], previous_ma5: float):
+    symbol = "600000.SH"
+    rows = [
+        {
+            "symbol": symbol, "datetime": datetime(2026, 1, 5, 9, 30),
+            "open": 10.0, "high": 10.6, "low": 10.0, "close": 10.2,
+            "volume": 150.0, "previous_cumulative_volume": 100.0,
+        },
+        {
+            "symbol": symbol, "datetime": datetime(2026, 1, 5, 9, 31),
+            "open": 10.0, "high": 10.1, "low": 9.9, "close": 10.0,
+            "volume": 20_000.0, "previous_cumulative_volume": 200.0,
+        },
+        {
+            "symbol": symbol, "datetime": datetime(2026, 1, 6, 9, 30),
+            "open": 10.1, "high": 10.2, "low": 10.0, "close": 10.1,
+            "volume": 1_000.0, "previous_cumulative_volume": 500.0,
+        },
+        {
+            "symbol": symbol, "datetime": datetime(2026, 1, 6, 9, 31),
+            "open": 10.0, "high": 10.1, "low": 9.9, "close": 10.0,
+            "volume": 1_000.0, "previous_cumulative_volume": 600.0,
+        },
+    ]
+    contexts = {
+        (symbol, date(2026, 1, 5)): {
+            "previous_open": 11.0, "previous_close": 10.0,
+            "previous_high": 10.5, "previous_change_pct": -0.02,
+            "previous_ma5": 9.0,
+        },
+        (symbol, date(2026, 1, 6)): {
+            "previous_open": 10.0, "previous_close": 10.0,
+            "previous_high": 10.1, "previous_change_pct": 0.0,
+            "previous_ma5": previous_ma5,
+            "previous_closes": previous_closes,
+        },
+    }
+    config = MinutePortfolioConfig(
+        symbols=[symbol],
+        initial_capital=100_000.0,
+        max_positions=1,
+        commission_pct=0.0,
+        stamp_tax_pct=0.0,
+        slippage_bps=0.0,
+    )
+    return MinutePortfolioEngine(config).run(rows, contexts)["trades"][0]
+
+
+def test_engine_uses_current_minute_close_in_intraday_ma5_exit() -> None:
+    trade = _two_day_ma_exit_trade(
+        previous_closes=[11.0, 11.0, 11.0, 11.0],
+        previous_ma5=9.0,
+    )
+
+    assert trade["exit_reason"] == "ma5_breakdown"
+    assert trade["exit_datetime"].endswith("09:31:00")
+
+
+def test_engine_skips_intraday_ma5_exit_without_four_previous_closes() -> None:
+    trade = _two_day_ma_exit_trade(
+        previous_closes=[11.0, 11.0, 11.0],
+        previous_ma5=11.0,
+    )
+
+    assert trade["exit_reason"] == "end_of_backtest"
 
 
 def test_engine_closes_positions_at_the_end_of_the_backtest() -> None:

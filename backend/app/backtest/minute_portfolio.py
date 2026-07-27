@@ -369,6 +369,7 @@ def _load_rows_and_context(
                     "previous_close": previous_close,
                     "previous_high": previous["high"],
                     "previous_change_pct": change,
+                    "previous_closes": [float(row["close"]) for row in prior[-4:]],
                     f"previous_ma{ma_exit_period}": previous.get(ma_column),
                 }
 
@@ -527,13 +528,22 @@ class MinutePortfolioEngine:
                     continue
                 context = daily_context.get((symbol, timestamp.date()))
                 close = float(bars.get(symbol, {}).get("close", 0) or 0)
-                ma_key = f"previous_ma{self.config.strategy_params.ma_exit_period}"
-                ma_value = float(context.get(ma_key) or 0) if context else 0
+                ma_exit_period = self.config.strategy_params.ma_exit_period
+                if ma_exit_period == 5:
+                    previous_closes = list(context.get("previous_closes") or []) if context else []
+                    ma_value = (
+                        (sum(previous_closes[-4:]) + close) / 5
+                        if len(previous_closes) >= 4 and close > 0
+                        else 0.0
+                    )
+                else:
+                    ma_key = f"previous_ma{ma_exit_period}"
+                    ma_value = float(context.get(ma_key) or 0) if context else 0.0
                 if close > 0 and close <= position["entry_price"] * (1 - self.config.strategy_params.stop_loss_pct):
                     position["exit_reason"] = "stop_loss"
                     pending_sells.add(symbol)
                 elif close > 0 and ma_value > 0 and close < ma_value:
-                    position["exit_reason"] = f"ma{self.config.strategy_params.ma_exit_period}_breakdown"
+                    position["exit_reason"] = f"ma{ma_exit_period}_breakdown"
                     pending_sells.add(symbol)
 
             candidates: list[Candidate] = []
