@@ -345,6 +345,76 @@ def test_engine_fills_top_eight_candidates_at_the_next_minute_open() -> None:
     assert all(trade["shares"] % 100 == 0 for trade in result["trades"])
 
 
+def _single_entry_trade(*, execution_volume: float, **config_values):
+    symbol = "600000.SH"
+    day = date(2026, 1, 5)
+    rows = [
+        {
+            "symbol": symbol, "datetime": datetime(2026, 1, 5, 9, 30),
+            "open": 10.0, "high": 10.6, "low": 10.0, "close": 10.2,
+            "volume": 150.0, "previous_cumulative_volume": 100.0,
+        },
+        {
+            "symbol": symbol, "datetime": datetime(2026, 1, 5, 9, 31),
+            "open": 10.0, "high": 10.0, "low": 10.0, "close": 10.0,
+            "volume": execution_volume, "previous_cumulative_volume": 200.0,
+        },
+    ]
+    contexts = {
+        (symbol, day): {
+            "previous_open": 11.0,
+            "previous_close": 10.0,
+            "previous_high": 10.5,
+            "previous_change_pct": -0.02,
+            "previous_ma5": 9.0,
+        },
+    }
+    config = MinutePortfolioConfig(
+        symbols=[symbol],
+        initial_capital=100_000.0,
+        max_positions=1,
+        commission_pct=0.0,
+        stamp_tax_pct=0.0,
+        slippage_bps=0.0,
+        **config_values,
+    )
+    return MinutePortfolioEngine(config).run(rows, contexts)["trades"][0]
+
+
+def test_engine_default_buy_sizing_remains_unconstrained() -> None:
+    trade = _single_entry_trade(execution_volume=20_000.0)
+
+    assert trade["shares"] == 10_000
+
+
+def test_engine_reserves_three_percent_cash_on_each_buy() -> None:
+    trade = _single_entry_trade(
+        execution_volume=20_000.0,
+        cash_reserve_ratio=0.03,
+    )
+
+    assert trade["shares"] == 9_700
+
+
+def test_engine_caps_buy_shares_at_execution_minute_volume() -> None:
+    trade = _single_entry_trade(
+        execution_volume=550.0,
+        max_buy_volume_ratio=1.0,
+    )
+
+    assert trade["shares"] == 500
+
+
+def test_engine_uses_stricter_cash_or_volume_buy_limit() -> None:
+    trade = _single_entry_trade(
+        execution_volume=550.0,
+        cash_reserve_ratio=0.03,
+        max_buy_volume_ratio=1.0,
+    )
+
+    assert trade["shares"] == 500
+
+
 def test_engine_closes_positions_at_the_end_of_the_backtest() -> None:
     day = date(2026, 1, 5)
     rows = [

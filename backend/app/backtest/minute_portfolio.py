@@ -257,6 +257,8 @@ class MinutePortfolioConfig:
     commission_pct: float = 0.0002
     stamp_tax_pct: float = 0.001
     slippage_bps: float = 5.0
+    cash_reserve_ratio: float = 0.0
+    max_buy_volume_ratio: float | None = None
     strategy_params: OpeningVolumeStrategyParams = field(default_factory=OpeningVolumeStrategyParams)
     minute_data_dir: str | None = None
 
@@ -477,7 +479,16 @@ class MinutePortfolioEngine:
                     continue
                 price = float(bar["open"]) * (1 + self.config.slippage_bps / 10_000)
                 target = self.config.initial_capital / self.config.max_positions
-                shares = floor(min(target, cash) / (price * (1 + self.config.commission_pct)))
+                spendable_cash = cash * (1 - self.config.cash_reserve_ratio)
+                shares = floor(
+                    min(target, spendable_cash)
+                    / (price * (1 + self.config.commission_pct))
+                )
+                if self.config.max_buy_volume_ratio is not None:
+                    shares = min(
+                        shares,
+                        floor(float(bar["volume"]) * self.config.max_buy_volume_ratio),
+                    )
                 shares = shares // self.config.lot_size * self.config.lot_size
                 pending_buys.remove(order)
                 if shares < self.config.lot_size or len(positions) >= self.config.max_positions:
