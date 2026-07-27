@@ -2,7 +2,8 @@
 
 - 任务/目标：以本地 CSV 驱动的股票池组合分钟回测替换旧单标的 vn.py 与旧 `minute_portfolio` 回测入口。
 - 分支：`feature/20260727-vnpy-stock-pool-migration`
-- 提交：待验证与提交后补充。
+- 提交：`1aff041 feat(data): 导入本地分钟 CSV 到标准分区库`；`ec1712b refactor(backtest): 替换旧 vn.py 单标的分钟引擎`；`b5680f9 feat(backtest): 接入股票池分钟回测页面`。
+- 推送前上游核对：已执行 `git fetch origin --prune`；`origin/main` 未出现新提交，功能分支相对其为 `3 0`，无需额外合并。
 - 改动：新增本地 GBK CSV 导入、标准分钟 Parquet 仓储读取、组合撮合引擎、开盘突破股票池策略及条件 1 变体；更新 SSE 回测 API、前端策略配置和结果展示。
 - 保留的旧行为：日频/矩阵回测保持不变；`minute_trigger.py`、其日频引擎调用和开盘放量选股扫描保持可用。后者已迁移到 `app.strategy.opening_volume_scan`，不再依赖旧组合回测模块。
 - 删除/替换：删除仅支持单标的双均线的 vn.py 模块，以及旧 `minute_portfolio` 回测服务和专属 API/测试。任务负责人于 2026-07-27 明确确认删除；双轨保留会造成两个分钟撮合与结果口径并存，无法安全共存。
