@@ -7,8 +7,6 @@ import { ToastContainer } from '@/components/Toast'
 import { AlertToastContainer } from '@/components/AlertToast'
 import { AiAnalysisHost } from '@/components/financials/AiAnalysisHost'
 import { AiReportBubble } from '@/components/financials/AiReportBubble'
-import { StockAnalysisHost } from '@/components/stock-analysis/StockAnalysisHost'
-import { StockAnalysisBubble } from '@/components/stock-analysis/StockAnalysisBubble'
 import {
   useCapabilities,
   useSettings,
@@ -71,7 +69,7 @@ const nav = [
   { to: '/watchlist',  label: '自选',   icon: Star },
   { to: '/screener',   label: '策略',   icon: ScanSearch },
   { to: '/backtest',   label: '回测',   icon: History },
-  { to: '/stock-analysis',    label: '个股分析', icon: TrendingUp },
+  { to: '/stock-analysis',    label: '深度研报', icon: TrendingUp },
   { to: '/limit-ladder', label: '连板梯队', icon: Flame },
   { to: '/concept-analysis', label: '概念分析', icon: Layers3 },
   { to: '/industry-analysis', label: '行业分析', icon: Landmark },
@@ -683,8 +681,6 @@ export function Layout() {
       <AlertToastContainer />
       <AiAnalysisHost />
       <AiReportBubble />
-      <StockAnalysisHost />
-      <StockAnalysisBubble />
     </div>
   )
 }
