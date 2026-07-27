@@ -346,6 +346,119 @@ def test_engine_fills_top_eight_candidates_at_the_next_minute_open() -> None:
     assert all(trade["shares"] % 100 == 0 for trade in result["trades"])
 
 
+def _ten_equal_portfolio_entries() -> list[dict]:
+    symbols = [f"{index:06d}.SZ" for index in range(1, 11)]
+    day = date(2026, 1, 5)
+    rows = []
+    contexts = {}
+    for symbol in symbols:
+        rows.extend([
+            {
+                "symbol": symbol, "datetime": datetime(2026, 1, 5, 9, 30),
+                "open": 1.0, "high": 1.06, "low": 1.0, "close": 1.02,
+                "volume": 150.0, "previous_cumulative_volume": 100.0,
+            },
+            {
+                "symbol": symbol, "datetime": datetime(2026, 1, 5, 9, 31),
+                "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0,
+                "volume": 100_000.0, "previous_cumulative_volume": 200.0,
+            },
+        ])
+        contexts[(symbol, day)] = {
+            "previous_open": 1.1,
+            "previous_close": 1.0,
+            "previous_high": 1.05,
+            "previous_change_pct": -0.02,
+            "previous_ma5": 0.9,
+        }
+
+    config = MinutePortfolioConfig(
+        symbols=symbols,
+        initial_capital=100_000.0,
+        max_positions=10,
+        cash_reserve_ratio=0.03,
+        commission_pct=0.0,
+        stamp_tax_pct=0.0,
+        slippage_bps=0.0,
+    )
+    return MinutePortfolioEngine(config).run(rows, contexts)["trades"]
+
+
+def test_engine_limits_total_position_targets_to_97_percent_of_equity() -> None:
+    trades = _ten_equal_portfolio_entries()
+
+    assert len(trades) == 10
+    assert all(trade["shares"] == 9_700 for trade in trades)
+    assert sum(trade["entry_cost"] for trade in trades) == 97_000.0
+
+
+def _two_day_entries_with_marked_gain() -> list[dict]:
+    first_symbol = "000001.SZ"
+    second_symbol = "000002.SZ"
+    rows = [
+        {
+            "symbol": first_symbol, "datetime": datetime(2026, 1, 5, 9, 30),
+            "open": 10.0, "high": 10.6, "low": 10.0, "close": 10.2,
+            "volume": 150.0, "previous_cumulative_volume": 100.0,
+        },
+        {
+            "symbol": first_symbol, "datetime": datetime(2026, 1, 5, 9, 31),
+            "open": 10.0, "high": 10.0, "low": 10.0, "close": 10.0,
+            "volume": 1_000.0, "previous_cumulative_volume": 200.0,
+        },
+        {
+            "symbol": first_symbol, "datetime": datetime(2026, 1, 6, 9, 30),
+            "open": 20.0, "high": 20.0, "low": 20.0, "close": 20.0,
+            "volume": 1_000.0, "previous_cumulative_volume": 100.0,
+        },
+        {
+            "symbol": second_symbol, "datetime": datetime(2026, 1, 6, 9, 30),
+            "open": 10.0, "high": 10.6, "low": 10.0, "close": 10.2,
+            "volume": 150.0, "previous_cumulative_volume": 100.0,
+        },
+        {
+            "symbol": second_symbol, "datetime": datetime(2026, 1, 6, 9, 31),
+            "open": 10.0, "high": 10.0, "low": 10.0, "close": 10.0,
+            "volume": 10_000.0, "previous_cumulative_volume": 200.0,
+        },
+    ]
+    contexts = {
+        (first_symbol, date(2026, 1, 5)): {
+            "previous_open": 11.0,
+            "previous_close": 10.0,
+            "previous_high": 10.5,
+            "previous_change_pct": -0.02,
+            "previous_ma5": 9.0,
+        },
+        (second_symbol, date(2026, 1, 6)): {
+            "previous_open": 11.0,
+            "previous_close": 10.0,
+            "previous_high": 10.5,
+            "previous_change_pct": -0.02,
+            "previous_ma5": 9.0,
+        },
+    }
+    config = MinutePortfolioConfig(
+        symbols=[first_symbol, second_symbol],
+        initial_capital=100_000.0,
+        max_positions=2,
+        cash_reserve_ratio=0.03,
+        max_buy_volume_ratio=1.0,
+        commission_pct=0.0,
+        stamp_tax_pct=0.0,
+        slippage_bps=0.0,
+    )
+    return MinutePortfolioEngine(config).run(rows, contexts)["trades"]
+
+
+def test_engine_position_target_follows_current_marked_equity() -> None:
+    trades = _two_day_entries_with_marked_gain()
+
+    second_trade = next(trade for trade in trades if trade["symbol"] == "000002.SZ")
+    assert second_trade["shares"] == 5_300
+    assert second_trade["entry_cost"] == 53_000.0
+
+
 def _single_entry_trade(*, execution_volume: float, **config_values):
     symbol = "600000.SH"
     day = date(2026, 1, 5)
