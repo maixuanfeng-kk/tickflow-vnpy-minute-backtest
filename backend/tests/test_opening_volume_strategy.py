@@ -25,10 +25,18 @@ def test_opening_volume_strategy_is_registered_with_editable_defaults():
     assert {item["id"]: item["default"] for item in strategy.meta["params"]} == {
         "scan_start_time": "09:30",
         "scan_end_time": "09:59",
-        "volume_multiple": 1.5,
         "enable_branch_a": True,
+        "branch_a_volume_multiple": 1.5,
+        "branch_a_previous_candle": "阴线",
         "enable_branch_b": True,
+        "branch_b_volume_multiple": 1.5,
+        "branch_b_today_return_min": 0.03,
+        "branch_b_today_return_max": 0.05,
+        "branch_b_previous_return_max": 0.05,
         "enable_branch_c": True,
+        "branch_c_volume_multiple": 1.5,
+        "branch_c_previous_candle": "阳线",
+        "branch_c_previous_return_max": 0.05,
         "stop_loss_pct": 0.02,
         "ma_exit_period": 5,
     }
@@ -81,6 +89,7 @@ def test_opening_volume_scan_service_reads_tickflow_watchlist_only(monkeypatch):
     assert repo.minute_symbols == ["600000.SH", "510300.SH"]
     assert result["total"] == 1
     assert result["rows"][0]["symbol"] == "600000.SH"
+    assert result["rows"][0]["time"] == "09:31"
 
 
 def test_native_strategy_run_uses_saved_params(monkeypatch, tmp_path):
@@ -96,7 +105,10 @@ def test_native_strategy_run_uses_saved_params(monkeypatch, tmp_path):
 
     monkeypatch.setattr(strategy_api, "OpeningVolumeScanService", ScanService)
     strategy_config.save_override(tmp_path, "opening_volume_portfolio", {
-        "params": {"volume_multiple": 2.0},
+        "params": {
+            "branch_a_volume_multiple": 2.1,
+            "branch_b_today_return_min": 0.015,
+        },
     })
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
         repo=SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)),
@@ -109,7 +121,8 @@ def test_native_strategy_run_uses_saved_params(monkeypatch, tmp_path):
     ), request)
 
     assert result["total"] == 0
-    assert captured["config"].strategy_params.volume_multiple == 2.0
+    assert captured["config"].strategy_params.branch_a_volume_multiple == 2.1
+    assert captured["config"].strategy_params.branch_b_today_return_min == 0.015
 
 
 def test_native_strategy_run_reports_missing_minute_data_as_bad_request(monkeypatch, tmp_path):

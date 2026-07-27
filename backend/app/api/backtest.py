@@ -694,9 +694,9 @@ async def minute_portfolio_stream(
     if is_new:
         def _run() -> None:
             try:
-                job.progress.append({"day": 0, "total": 1, "date": "加载自选股分钟K", "equity": config.initial_capital})
-                result = MinutePortfolioService(repo).run(config)
-                job.progress.append({"day": 1, "total": 1, "date": "完成", "equity": result["stats"]["end_balance"]})
+                result = MinutePortfolioService(repo).run(
+                    config, progress_callback=job.progress.append,
+                )
                 _finish_job(job, result=result)
             except Exception as exc:  # noqa: BLE001
                 logger.exception("minute portfolio backtest failed")

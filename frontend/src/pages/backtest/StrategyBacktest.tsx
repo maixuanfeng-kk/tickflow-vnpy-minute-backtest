@@ -25,6 +25,7 @@ import { StrategyNavChart } from './charts/StrategyNavChart'
 import { ReturnDistributionChart } from './charts/ReturnDistributionChart'
 import { TradeKlineModal } from './components/TradeKlineModal'
 import { SignalTriggerActions } from '@/components/signals/SignalTriggerActions'
+import { OpeningVolumeParamsEditor } from '@/components/strategy/OpeningVolumeParamsEditor'
 
 const formatDate = (date: Date) => date.toISOString().slice(0, 10)
 const monthsAgo = (months: number) => {
@@ -894,7 +895,9 @@ export function StrategyBacktest() {
   const [simMode, setSimMode] = useState<'position' | 'full'>(saved?.mode ?? 'position')
   const [holdingDays, setHoldingDays] = useState(saved?.holdingDays ?? '5')
   const [highGranularity, setHighGranularity] = useState(saved?.minuteFill ?? false)
-  const [minuteDataDir, setMinuteDataDir] = useState('E:\\minute_1min_pytdx')
+  const [minuteDataDir, setMinuteDataDir] = useState(
+    saved?.minuteDataDir ?? 'F:\\quant\\data\\minute_1min_pytdx',
+  )
   const [settingsOpen, setSettingsOpen] = useState(false)
   // 分钟K成交价细化: 不改变信号日或成交日, 需 Pro+ 分钟K能力
   const { data: caps } = useCapabilities()
@@ -1010,6 +1013,7 @@ export function StrategyBacktest() {
         mode: simMode,
         holdingDays,
         minuteFill: highGranularity,
+        minuteDataDir,
         params: strategyParams,
         overrides,
         result: backtestTask.result,
@@ -1199,6 +1203,7 @@ export function StrategyBacktest() {
 
   const detail = strategyDetail.data
   const minuteNative = detail?.execution_backend === 'minute_native'
+  const openingVolumeStrategy = detail?.id === 'opening_volume_portfolio'
   const matrixStrategy = detail?.execution_backend === 'matrix_native'
   const visibleAdvancedTabs = useMemo(
     () => minuteNative
@@ -1767,7 +1772,7 @@ export function StrategyBacktest() {
                   {backtestTask?.reconnecting
                     ? '连接中断，重试中…'
                     : backtestTask?.progress
-                      ? `回测中 · 第 ${backtestTask.progress.day}/${backtestTask.progress.total} 天 (${backtestTask.progress.date})`
+                      ? `回测中 · ${backtestTask.progress.date}`
                       : '正在重新计算回测…'}
                 </div>
                 <div className="mt-0.5 text-[11px] text-secondary">
@@ -2199,8 +2204,18 @@ export function StrategyBacktest() {
                         <th className="px-4 py-2.5 font-medium text-right">选股次数</th>
                         <th className="px-4 py-2.5 font-medium text-right">总收益</th>
                         <th className="px-4 py-2.5 font-medium text-right">胜率</th>
-                        <th className="px-4 py-2.5 font-medium text-right">最佳</th>
-                        <th className="px-4 py-2.5 font-medium text-right">最差</th>
+                        <th
+                          className="px-4 py-2.5 font-medium text-right"
+                          title={result.config.engine === 'minute_portfolio' ? '单笔持仓期间达到的最高浮动收益率' : undefined}
+                        >
+                          {result.config.engine === 'minute_portfolio' ? '最高浮盈' : '最佳'}
+                        </th>
+                        <th
+                          className="px-4 py-2.5 font-medium text-right"
+                          title={result.config.engine === 'minute_portfolio' ? '单笔持仓期间达到的最大浮动亏损率' : undefined}
+                        >
+                          {result.config.engine === 'minute_portfolio' ? '最大浮亏' : '最差'}
+                        </th>
                       </tr>
                     </thead>
                     <tbody>
@@ -2208,7 +2223,7 @@ export function StrategyBacktest() {
                         <tr key={r.symbol} className="border-t border-border hover:bg-elevated/50 transition-colors group">
                           <td className="px-4 py-2">
                             <div className="font-medium text-foreground group-hover:text-accent transition-colors">
-                              {symbolNames[r.symbol] || r.symbol}
+                              {r.name || symbolNames[r.symbol] || r.symbol}
                             </div>
                             <div className="mt-0.5 font-mono text-[11px] text-muted">{r.symbol}</div>
                           </td>
@@ -2217,8 +2232,8 @@ export function StrategyBacktest() {
                             {fmtPct(r.total_return)}
                           </td>
                           <td className="px-4 py-2 text-right num">{fmtPct(r.win_rate)}</td>
-                          <td className="px-4 py-2 text-right num text-bull">{fmtPct(r.best)}</td>
-                          <td className="px-4 py-2 text-right num text-bear">{fmtPct(r.worst)}</td>
+                          <td className={`px-4 py-2 text-right num ${priceColorClass(r.best)}`}>{fmtPct(r.best)}</td>
+                          <td className={`px-4 py-2 text-right num ${priceColorClass(r.worst)}`}>{fmtPct(r.worst)}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -2322,22 +2337,30 @@ export function StrategyBacktest() {
               )}
 
               {settingsTab === 'params' && (
-                <ConfigSection title="策略参数" hint="自动限制 min/max">
-                  {detail.params.length > 0 ? (
-                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                      {detail.params.map(param => (
-                        <StrategyParamInput
-                          key={param.id}
-                          param={param}
-                          value={strategyParams[param.id]}
-                          onChange={value => setStrategyParams(prev => ({ ...prev, [param.id]: value }))}
-                        />
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="text-xs text-muted">当前策略没有可调参数。</div>
-                  )}
-                </ConfigSection>
+                openingVolumeStrategy ? (
+                  <OpeningVolumeParamsEditor
+                    definitions={detail.params}
+                    values={strategyParams}
+                    onChange={(id, value) => setStrategyParams(current => ({ ...current, [id]: value }))}
+                  />
+                ) : (
+                  <ConfigSection title="策略参数" hint="自动限制 min/max">
+                    {detail.params.length > 0 ? (
+                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                        {detail.params.map(param => (
+                          <StrategyParamInput
+                            key={param.id}
+                            param={param}
+                            value={strategyParams[param.id]}
+                            onChange={value => setStrategyParams(prev => ({ ...prev, [param.id]: value }))}
+                          />
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="text-xs text-muted">当前策略没有可调参数。</div>
+                    )}
+                  </ConfigSection>
+                )
               )}
 
               {settingsTab === 'filter' && (

@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   AlertTriangle,
   Ban,
+  Bell,
   CheckSquare,
   Clock3,
   Download,
@@ -16,6 +17,7 @@ import {
 
 import { EmptyState } from '@/components/EmptyState'
 import { LastStockChip } from '@/components/LastStockChip'
+import { PriceAlertDialog } from '@/components/stock-analysis/PriceAlertDialog'
 import { PageHeader } from '@/components/PageHeader'
 import { StockFinancialSearch } from '@/components/financials/StockFinancialSearch'
 import { MarkdownRenderer } from '@/components/financials/MarkdownRenderer'
@@ -71,6 +73,7 @@ export function StockAnalysis() {
   const { last: lastStock, remember: rememberStock } = useLastStock('stock-analysis')
   const [symbol, setSymbol] = useState(lastStock?.symbol ?? '')
   const [name, setName] = useState(lastStock?.name ?? '')
+  const [showPriceAlerts, setShowPriceAlerts] = useState(false)
   const [collectTaskIds, setCollectTaskIds] = useState<string[]>([])
   const [analysisTaskIds, setAnalysisTaskIds] = useState<string[]>([])
   const [seededTasks, setSeededTasks] = useState(false)
@@ -192,6 +195,7 @@ export function StockAnalysis() {
   const onSelect = (nextSymbol: string, nextName: string) => {
     setSymbol(nextSymbol)
     setName(nextName)
+    setShowPriceAlerts(false)
     rememberStock(nextSymbol, nextName)
   }
 
@@ -363,6 +367,16 @@ export function StockAnalysis() {
                     <RefreshCw className="h-3.5 w-3.5" />
                     恢复默认模板
                   </button>
+                  {symbol && (
+                    <button
+                      onClick={() => setShowPriceAlerts(true)}
+                      className="inline-flex items-center gap-1.5 rounded-btn border border-sky-400/30 bg-sky-400/10 px-4 py-2 text-xs text-sky-200 transition-colors hover:bg-sky-400/20"
+                      title="设置价格点位提醒"
+                    >
+                      <Bell className="h-3.5 w-3.5" />
+                      点位提醒
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -560,6 +574,14 @@ export function StockAnalysis() {
           </div>
         </div>
       </div>
+      {showPriceAlerts && symbol && (
+        <PriceAlertDialog
+          key={symbol}
+          symbol={symbol}
+          name={name}
+          onClose={() => setShowPriceAlerts(false)}
+        />
+      )}
     </>
   )
 }
