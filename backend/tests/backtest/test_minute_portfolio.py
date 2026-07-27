@@ -392,7 +392,7 @@ def test_engine_limits_total_position_targets_to_97_percent_of_equity() -> None:
     assert sum(trade["entry_cost"] for trade in trades) == 97_000.0
 
 
-def _two_day_entries_with_marked_gain() -> list[dict]:
+def _two_day_entries_with_marked_gain(*, cash_reserve_ratio: float = 0.03) -> list[dict]:
     first_symbol = "000001.SZ"
     second_symbol = "000002.SZ"
     rows = [
@@ -442,7 +442,7 @@ def _two_day_entries_with_marked_gain() -> list[dict]:
         symbols=[first_symbol, second_symbol],
         initial_capital=100_000.0,
         max_positions=2,
-        cash_reserve_ratio=0.03,
+        cash_reserve_ratio=cash_reserve_ratio,
         max_buy_volume_ratio=1.0,
         commission_pct=0.0,
         stamp_tax_pct=0.0,
@@ -457,6 +457,14 @@ def test_engine_position_target_follows_current_marked_equity() -> None:
     second_trade = next(trade for trade in trades if trade["symbol"] == "000002.SZ")
     assert second_trade["shares"] == 5_300
     assert second_trade["entry_cost"] == 53_000.0
+
+
+def test_engine_zero_reserve_keeps_fixed_initial_capital_target() -> None:
+    trades = _two_day_entries_with_marked_gain(cash_reserve_ratio=0.0)
+
+    second_trade = next(trade for trade in trades if trade["symbol"] == "000002.SZ")
+    assert second_trade["shares"] == 5_000
+    assert second_trade["entry_cost"] == 50_000.0
 
 
 def _single_entry_trade(*, execution_volume: float, **config_values):
