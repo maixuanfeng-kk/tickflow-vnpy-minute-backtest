@@ -418,7 +418,6 @@ class MinutePortfolioEngine:
         pending_buys: list[dict] = []
         pending_sells: set[str] = set()
         entered_today: set[tuple[str, date]] = set()
-        intraday_high: dict[tuple[str, date], float] = {}
         trades: list[dict] = []
         equity_curve: list[dict] = []
         drawdown_curve: list[dict] = []
@@ -576,8 +575,6 @@ class MinutePortfolioEngine:
             for symbol, bar in bars.items():
                 current_date = timestamp.date()
                 key = (symbol, current_date)
-                prior_high = intraday_high.get(key, float("-inf"))
-                intraday_high[key] = max(prior_high, float(bar["high"]))
                 context = daily_context.get(key)
                 if context is None or symbol in positions or key in entered_today:
                     continue
@@ -597,8 +594,7 @@ class MinutePortfolioEngine:
                     today_return=today_return,
                     volume_ratio=volume_ratio,
                     crossed_previous_high=(
-                        prior_high < float(context["previous_high"])
-                        and float(bar["high"]) >= float(context["previous_high"])
+                        float(bar["high"]) > float(context["previous_high"])
                     ),
                     params=self.config.strategy_params,
                 )
@@ -686,7 +682,6 @@ class OpeningVolumeScanService:
         for row in raw_rows:
             grouped.setdefault(row["datetime"], []).append(row)
 
-        intraday_high: dict[tuple[str, date], float] = {}
         matched: set[str] = set()
         candidates: list[dict] = []
         for timestamp in sorted(grouped):
@@ -695,8 +690,6 @@ class OpeningVolumeScanService:
             for bar in grouped[timestamp]:
                 symbol = bar["symbol"]
                 key = (symbol, timestamp.date())
-                prior_high = intraday_high.get(key, float("-inf"))
-                intraday_high[key] = max(prior_high, float(bar["high"]))
                 context = contexts.get(key)
                 if context is None or symbol in matched:
                     continue
@@ -715,8 +708,7 @@ class OpeningVolumeScanService:
                     today_return=today_return,
                     volume_ratio=volume_ratio,
                     crossed_previous_high=(
-                        prior_high < float(context["previous_high"])
-                        and float(bar["high"]) >= float(context["previous_high"])
+                        float(bar["high"]) > float(context["previous_high"])
                     ),
                     params=config.strategy_params,
                 )
@@ -726,7 +718,7 @@ class OpeningVolumeScanService:
                 candidates.append({
                     "symbol": symbol,
                     "date": str(timestamp.date()),
-                    "time": timestamp.strftime("%H:%M"),
+                    "time": (timestamp + timedelta(minutes=1)).strftime("%H:%M"),
                     "close": float(bar["close"]),
                     "volume_ratio": volume_ratio,
                     "today_return": today_return,

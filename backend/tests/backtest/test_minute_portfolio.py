@@ -374,6 +374,54 @@ def test_engine_fills_top_eight_candidates_at_the_next_minute_open() -> None:
     assert all(trade["shares"] % 100 == 0 for trade in result["trades"])
 
 
+def _breakout_result(highs: tuple[float, float]):
+    symbol = "600000.SH"
+    day = date(2026, 1, 5)
+    rows = [
+        {
+            "symbol": symbol, "datetime": datetime(2026, 1, 5, 9, 30),
+            "open": 10.0, "high": highs[0], "low": 10.0, "close": 10.2,
+            "volume": 100.0, "cumulative_volume": 100.0,
+            "previous_cumulative_volume": 100.0,
+        },
+        {
+            "symbol": symbol, "datetime": datetime(2026, 1, 5, 9, 31),
+            "open": 10.2, "high": highs[1], "low": 10.1, "close": 10.3,
+            "volume": 200.0, "cumulative_volume": 300.0,
+            "previous_cumulative_volume": 200.0,
+        },
+        {
+            "symbol": symbol, "datetime": datetime(2026, 1, 5, 9, 32),
+            "open": 10.3, "high": 10.4, "low": 10.2, "close": 10.3,
+            "volume": 10_000.0, "cumulative_volume": 10_300.0,
+            "previous_cumulative_volume": 300.0,
+        },
+    ]
+    contexts = {(symbol, day): {
+        "previous_open": 11.0, "previous_close": 10.0,
+        "previous_high": 10.5, "previous_change_pct": -0.02,
+        "previous_ma5": 9.0,
+    }}
+    return MinutePortfolioEngine(MinutePortfolioConfig(
+        symbols=[symbol], max_positions=1,
+        strategy_params=OpeningVolumeStrategyParams(
+            enable_branch_b=False,
+            enable_branch_c=False,
+        ),
+    )).run(rows, contexts)
+
+
+def test_engine_breakout_does_not_require_first_cross_from_below() -> None:
+    result = _breakout_result((10.6, 10.7))
+
+    assert len(result["trades"]) == 1
+    assert result["trades"][0]["entry_datetime"].endswith("09:32:00")
+
+
+def test_engine_breakout_requires_strictly_greater_high() -> None:
+    assert _breakout_result((10.4, 10.5))["trades"] == []
+
+
 def _ten_equal_portfolio_entries() -> list[dict]:
     symbols = [f"{index:06d}.SZ" for index in range(1, 11)]
     day = date(2026, 1, 5)

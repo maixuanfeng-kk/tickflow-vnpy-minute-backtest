@@ -89,6 +89,7 @@ def test_opening_volume_scan_service_reads_tickflow_watchlist_only(monkeypatch):
     assert repo.minute_symbols == ["600000.SH", "510300.SH"]
     assert result["total"] == 1
     assert result["rows"][0]["symbol"] == "600000.SH"
+    assert result["rows"][0]["time"] == "09:31"
 
 
 def test_native_strategy_run_uses_saved_params(monkeypatch, tmp_path):
