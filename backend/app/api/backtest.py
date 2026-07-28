@@ -618,7 +618,7 @@ async def minute_portfolio_stream(
     candidate_sort: str = "volume_ratio",
     entry_fill: str = "next_minute_open",
     exit_fill: str = "next_minute_open",
-    force_close_at_end: bool = True,
+    force_close_at_end: bool | None = None,
 ):
     """Run the fixed early-session portfolio strategy over a watchlist snapshot."""
     from app.backtest.minute_portfolio import (

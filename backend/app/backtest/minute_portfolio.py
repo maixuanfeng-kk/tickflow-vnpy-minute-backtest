@@ -386,7 +386,7 @@ class MinutePortfolioConfig:
     candidate_sort: str = "volume_ratio"
     entry_fill: str = "next_minute_open"
     exit_fill: str = "next_minute_open"
-    force_close_at_end: bool = True
+    force_close_at_end: bool | None = None
     scoring: dict[str, float] = field(default_factory=dict)
     score_min: float | None = None
     score_max: float | None = None
@@ -745,25 +745,29 @@ class MinutePortfolioEngine:
             assert bar is not None
             base_price = _entry_base_price(bar, fill)
             price = base_price * (1 + self.config.slippage_bps / 10_000)
-            current_equity = cash
-            for held_symbol, position in positions.items():
-                held_bar = bars.get(held_symbol)
-                mark_price = (
-                    float(held_bar.get("open") or held_bar.get("close") or 0)
-                    if held_bar else 0.0
-                )
-                if mark_price <= 0:
-                    mark_price = float(
-                        latest_closes.get(held_symbol) or position["entry_price"]
+            if self.config.cash_reserve_ratio > 0:
+                current_equity = cash
+                for held_symbol, position in positions.items():
+                    held_bar = bars.get(held_symbol)
+                    mark_price = (
+                        float(held_bar.get("open") or held_bar.get("close") or 0)
+                        if held_bar else 0.0
                     )
-                current_equity += position["shares"] * mark_price
-            reserve_cash = current_equity * self.config.cash_reserve_ratio
-            target = (
-                current_equity
-                * (1 - self.config.cash_reserve_ratio)
-                / self.config.max_positions
-            )
-            spendable_cash = max(cash - reserve_cash, 0.0)
+                    if mark_price <= 0:
+                        mark_price = float(
+                            latest_closes.get(held_symbol) or position["entry_price"]
+                        )
+                    current_equity += position["shares"] * mark_price
+                reserve_cash = current_equity * self.config.cash_reserve_ratio
+                target = (
+                    current_equity
+                    * (1 - self.config.cash_reserve_ratio)
+                    / self.config.max_positions
+                )
+                spendable_cash = max(cash - reserve_cash, 0.0)
+            else:
+                target = self.config.initial_capital / self.config.max_positions
+                spendable_cash = cash
             shares = floor(
                 min(target, spendable_cash)
                 / (price * (1 + self.config.commission_pct))
@@ -913,7 +917,7 @@ class MinutePortfolioEngine:
             candidates: list[Candidate] = []
             for symbol, bar in bars.items():
                 if (
-                    self.config.force_close_at_end
+                    self.config.force_close_at_end is True
                     and self.config.end is not None
                     and timestamp.date() == trade_dates[-1]
                 ):
@@ -994,7 +998,7 @@ class MinutePortfolioEngine:
 
         final_date = trade_dates[-1]
         terminal_timestamp = max(grouped)
-        if self.config.force_close_at_end:
+        if self.config.force_close_at_end is not False:
             for symbol, position in list(positions.items()):
                 latest = latest_bars.get(symbol)
                 mark_timestamp, latest_bar = latest if latest else (

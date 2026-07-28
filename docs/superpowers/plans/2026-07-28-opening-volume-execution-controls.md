@@ -1034,7 +1034,7 @@ Confirm every task commit contains only the explicitly listed files. Do not stag
 
 In the delivery summary, state:
 
-- Old requests default to volume-ratio ordering, next-minute-open entry/exit, and forced liquidation enabled.
+- Old requests default to volume-ratio ordering and next-minute-open entry/exit. Requests without the new forced-liquidation field retain last-day entries and the legacy final-minute liquidation behavior; the new UI explicitly sends its forced-liquidation choice.
 - The new engine behavior blocks final-day entries when forced liquidation is enabled.
 - Open positions affect final equity but not completed-trade statistics.
 - Rollback is performed with new `git revert` commits in reverse task order; do not rebase, amend shared commits, force-push, or hard-reset.

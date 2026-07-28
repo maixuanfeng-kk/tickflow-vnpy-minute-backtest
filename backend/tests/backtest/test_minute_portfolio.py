@@ -779,12 +779,12 @@ def test_engine_position_target_follows_current_marked_equity() -> None:
     assert second_trade["entry_cost"] == 53_000.0
 
 
-def test_engine_zero_reserve_still_uses_current_marked_equity() -> None:
+def test_engine_zero_reserve_keeps_fixed_initial_capital_target() -> None:
     trades = _two_day_entries_with_marked_gain(cash_reserve_ratio=0.0)
 
     second_trade = next(trade for trade in trades if trade["symbol"] == "000002.SZ")
-    assert second_trade["shares"] == 5_500
-    assert second_trade["entry_cost"] == 55_000.0
+    assert second_trade["shares"] == 5_000
+    assert second_trade["entry_cost"] == 50_000.0
 
 
 def _single_entry_trade(*, execution_volume: float, **config_values):
@@ -1332,7 +1332,7 @@ def test_engine_closes_positions_at_the_end_of_the_backtest() -> None:
     assert result["trades"][-1]["exit_datetime"].endswith("09:31:00")
 
 
-def _last_day_signal_result(*, force_close_at_end: bool) -> dict:
+def _last_day_signal_result(*, force_close_at_end: bool | None = None) -> dict:
     symbol = "600000.SH"
     day = date(2026, 1, 5)
     rows = [
@@ -1413,7 +1413,14 @@ def _overnight_position_result(
     return MinutePortfolioEngine(config).run(rows, contexts), config
 
 
-def test_force_close_skips_new_entries_on_last_trading_day() -> None:
+def test_legacy_force_close_keeps_last_day_entry_behavior() -> None:
+    result = _last_day_signal_result()
+
+    assert result["trades"][0]["entry_datetime"].endswith("09:31:00")
+    assert result["open_positions"] == []
+
+
+def test_explicit_force_close_skips_new_entries_on_last_trading_day() -> None:
     result = _last_day_signal_result(force_close_at_end=True)
 
     assert result["trades"] == []

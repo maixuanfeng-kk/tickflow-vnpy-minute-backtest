@@ -62,7 +62,7 @@ async def test_minute_portfolio_stream_passes_user_capital_and_positions(monkeyp
     assert captured["config"].candidate_sort == "volume_ratio"
     assert captured["config"].entry_fill == "next_minute_open"
     assert captured["config"].exit_fill == "next_minute_open"
-    assert captured["config"].force_close_at_end is True
+    assert captured["config"].force_close_at_end is None
     assert "读取分钟数据 1/2" in body
     assert "撮合交易日 1/2" in body
     assert body.index("读取分钟数据 1/2") < body.index("event: done")
