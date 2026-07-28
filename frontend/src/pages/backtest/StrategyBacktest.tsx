@@ -172,6 +172,7 @@ Object.assign(FIELD_LABEL, {
   macd_dif: 'MACD-DIF', macd_dea: 'MACD-DEA', macd_hist: 'MACD柱',
   boll_upper: '布林上轨', boll_lower: '布林下轨',
   ma20_bias: 'MA20乖离率',
+  volume_ratio: '同期量比', today_return: '当日涨幅',
 })
 const BOARD_OPTIONS = ['沪主板', '深主板', '创业板', '科创板', '北交所']
 const BASIC_FILTER_FIELDS = [
@@ -181,6 +182,12 @@ const BASIC_FILTER_FIELDS = [
   { key: 'market_cap_min', label: '最低总市值', unit: '亿', scale: 1e8 },
   { key: 'turnover_min', label: '最低换手率', unit: '%' },
   { key: 'turnover_max', label: '最高换手率', unit: '%' },
+]
+const OPENING_VOLUME_FILTER_FIELDS = [
+  { key: 'price_min', label: '最低价', unit: '元' },
+  { key: 'price_max', label: '最高价', unit: '元' },
+  { key: 'amount_min', label: '最低累计成交额', unit: '亿', scale: 1e8 },
+  { key: 'amount_max', label: '最高累计成交额', unit: '亿', scale: 1e8 },
 ]
 type AdvancedSettingsTab = 'params' | 'filter' | 'entry' | 'exit' | 'scoring' | 'risk' | 'range'
 type StrategyGroup = 'all' | 'custom' | 'ai' | 'builtin'
@@ -199,6 +206,13 @@ const ADVANCED_TABS: { id: AdvancedSettingsTab; label: string }[] = [
   { id: 'risk', label: '风控' },
   { id: 'range', label: '回测范围' },
 ]
+const OPENING_VOLUME_ADVANCED_TABS = ADVANCED_TABS.filter(tab => (
+  tab.id === 'params'
+  || tab.id === 'filter'
+  || tab.id === 'scoring'
+  || tab.id === 'risk'
+  || tab.id === 'range'
+))
 const toSignalId = (sig: string) => (sig.startsWith('signal_') || sig.startsWith('csg_')) ? sig : `signal_${sig}`
 const numOrNull = (v: string) => v === '' || Number.isNaN(Number(v)) ? null : Number(v)
 const clamp = (v: number, min?: number, max?: number) => {
@@ -727,7 +741,19 @@ function StrategyParamInput({ param, value, onChange }: {
   )
 }
 
-function StockPoolPicker({ value, onChange, assetType = 'stock' }: { value: string; onChange: (value: string) => void; assetType?: 'stock' | 'etf' }) {
+function StockPoolPicker({
+  value,
+  onChange,
+  assetType = 'stock',
+  emptyLabel = '全市场',
+  emptyDescription = '默认全市场回测，由基础过滤和策略条件筛选。',
+}: {
+  value: string
+  onChange: (value: string) => void
+  assetType?: 'stock' | 'etf'
+  emptyLabel?: string
+  emptyDescription?: string
+}) {
   const symbols = useMemo(() => value.split(',').map(s => s.trim()).filter(Boolean), [value])
   const [query, setQuery] = useState('')
   const [open, setOpen] = useState(false)
@@ -826,7 +852,7 @@ function StockPoolPicker({ value, onChange, assetType = 'stock' }: { value: stri
         <div className="flex shrink-0 items-center gap-1.5">
           {/* 当前范围 — 有范围显示个数, 无范围显示全市场 */}
           <span className={`whitespace-nowrap text-[11px] font-medium ${symbols.length === 0 ? 'text-amber-400' : 'text-accent'}`}>
-            {symbols.length === 0 ? '全市场' : `共 ${symbols.length} 只`}
+            {symbols.length === 0 ? emptyLabel : `共 ${symbols.length} 只`}
           </span>
           <button
             type="button"
@@ -852,7 +878,7 @@ function StockPoolPicker({ value, onChange, assetType = 'stock' }: { value: stri
       </div>
       <div className="flex flex-wrap gap-1.5">
         {symbols.length === 0 ? (
-          <span className="text-[11px] text-muted">默认全市场回测，由基础过滤和策略条件筛选。</span>
+          <span className="text-[11px] text-muted">{emptyDescription}</span>
         ) : symbols.map(symbol => {
           const name = symbolNames[symbol]
           return (
@@ -885,6 +911,10 @@ export function StrategyBacktest() {
   const [exitFill, setExitFill] = useState<'close_t' | 'open_t+1' | 'signal_next_minute'>(
     saved ? (saved.exitFill ?? saved.matching ?? 'close_t') : 'open_t+1',
   )
+  const [candidateSort, setCandidateSort] = useState<'score' | 'volume_ratio' | 'watchlist_order'>(
+    saved?.candidateSort ?? 'volume_ratio',
+  )
+  const [forceCloseAtEnd, setForceCloseAtEnd] = useState(saved?.forceCloseAtEnd ?? true)
   const [fees, setFees] = useState(saved?.fees ?? '2')
   const [stampTax, setStampTax] = useState(saved?.stampTax ?? '1')
   const [slippage, setSlippage] = useState(saved?.slippage ?? '5')
@@ -1003,6 +1033,8 @@ export function StrategyBacktest() {
         matching,
         entryFill,
         exitFill,
+        candidateSort,
+        forceCloseAtEnd,
         fees,
         stampTax,
         slippage,
@@ -1030,19 +1062,25 @@ export function StrategyBacktest() {
     startBacktest({
       strategy_id: minuteNative ? selectedStrategy : highGranularity ? 'minute_double_ma_volume' : selectedStrategy,
       asset_type: minuteNative ? 'stock' : assetType,
-      symbols: minuteNative ? null : symbols ? symbols.split(',').map(s => s.trim()).filter(Boolean) : null,
+      symbols: symbols ? symbols.split(',').map(s => s.trim()).filter(Boolean) : null,
       start: start || null,
       end: end || undefined,
       matching,
-      entry_fill: entryFill,
-      exit_fill: exitFill,
+      entry_fill: minuteNative
+        ? entryFill === 'close_t' ? 'signal_minute_close' : 'next_minute_open'
+        : entryFill,
+      exit_fill: minuteNative
+        ? exitFill === 'close_t' ? 'signal_minute_close' : 'next_minute_open'
+        : exitFill,
+      candidate_sort: minuteNative ? candidateSort : undefined,
+      force_close_at_end: minuteNative ? forceCloseAtEnd : undefined,
       commission_pct: Number(fees) / 10000,
       stamp_tax_pct: Number(stampTax) / 1000,
       slippage_bps: Number(slippage),
       max_positions: Number(maxPositions),
       max_exposure_pct: Number(maxExposure) / 100,
       initial_capital: Number(initialCapital),
-      position_sizing: positionSizing,
+      position_sizing: minuteNative ? 'equal' : positionSizing,
       params: strategyParams,
       overrides: requestOverrides,
       mode: simMode,
@@ -1206,12 +1244,14 @@ export function StrategyBacktest() {
   const openingVolumeStrategy = detail?.id === 'opening_volume_portfolio'
   const matrixStrategy = detail?.execution_backend === 'matrix_native'
   const visibleAdvancedTabs = useMemo(
-    () => minuteNative
+    () => openingVolumeStrategy
+      ? OPENING_VOLUME_ADVANCED_TABS
+      : minuteNative
       ? ADVANCED_TABS.filter(tab => tab.id === 'params')
       : matrixStrategy
       ? ADVANCED_TABS.filter(tab => tab.id !== 'entry' && tab.id !== 'exit')
       : ADVANCED_TABS,
-    [matrixStrategy, minuteNative],
+    [matrixStrategy, minuteNative, openingVolumeStrategy],
   )
   const basicFilter = (overrides.basic_filter ?? {}) as Record<string, any>
   const entrySignals = (overrides.entry_signals ?? []) as string[]
@@ -1229,7 +1269,9 @@ export function StrategyBacktest() {
   const scoring = useMemo(() => (overrides.scoring ?? {}) as Record<string, number>, [overrides.scoring])
   const scoreMinValue = overrides.score_min == null ? '' : String(overrides.score_min)
   const scoreMaxValue = overrides.score_max == null ? '' : String(overrides.score_max)
-  const stopLossPct = overrides.stop_loss == null ? '' : String(Math.abs(Number(overrides.stop_loss)) * 100)
+  const stopLossPct = openingVolumeStrategy
+    ? Number(strategyParams.stop_loss_pct ?? 0) * 100
+    : overrides.stop_loss == null ? '' : String(Math.abs(Number(overrides.stop_loss)) * 100)
   const takeProfitPct = overrides.take_profit == null ? '' : String(Math.abs(Number(overrides.take_profit)) * 100)
   const trailingStopPct = overrides.trailing_stop == null ? '' : String(Math.abs(Number(overrides.trailing_stop)) * 100)
   const trailingTakeProfitActivatePct = overrides.trailing_take_profit_activate == null ? '' : String(Math.abs(Number(overrides.trailing_take_profit_activate)) * 100)
@@ -1242,10 +1284,10 @@ export function StrategyBacktest() {
   }, [scoring, editingScoring])
 
   useEffect(() => {
-    if (minuteNative || (matrixStrategy && (settingsTab === 'entry' || settingsTab === 'exit'))) {
+    if (!visibleAdvancedTabs.some(tab => tab.id === settingsTab)) {
       setSettingsTab('params')
     }
-  }, [matrixStrategy, minuteNative, settingsTab])
+  }, [settingsTab, visibleAdvancedTabs])
 
   const updateOverride = (key: string, value: any) => {
     setOverrides(prev => ({ ...prev, [key]: value }))
@@ -1290,7 +1332,7 @@ export function StrategyBacktest() {
   const selectedStrategySource = detail?.source ?? strategyList.find(st => st.id === selectedStrategy)?.source
   const stockPoolCount = symbols.split(',').map(s => s.trim()).filter(Boolean).length
   const stockPoolSummary = minuteNative
-    ? '股票池 TickFlow 自选股'
+    ? stockPoolCount > 0 ? `股票池 自选股子集 ${stockPoolCount} 只` : '股票池 TickFlow 自选股'
     : stockPoolCount > 0 ? `股票池 已限定 ${stockPoolCount} 只` : '股票池 全市场'
   const resultStartDate = result?.config?.start ?? result?.equity_curve?.[0]?.date ?? start
   const resultEndDate = result?.config?.end ?? result?.equity_curve?.[result.equity_curve.length - 1]?.date ?? end
@@ -1309,7 +1351,7 @@ export function StrategyBacktest() {
         { key: 'trades', label: '完成交易', value: Number(result?.stats?.n_trades ?? result?.trades.length ?? 0) },
       ]
     : []
-  const executionStats = (result?.stats?.execution ?? {}) as Record<string, number>
+  const executionStats = (result?.execution ?? result?.stats?.execution ?? {}) as Record<string, number>
   const executionSummary = [
     ['buy_no_slot', '满仓未买'],
     ['buy_exposure', '仓位上限'],
@@ -1556,8 +1598,17 @@ export function StrategyBacktest() {
               <FillRuleHint />
             </div>
             <select value={entryFill} onChange={e => setEntryFill(e.target.value as 'close_t' | 'open_t+1')} className={INPUT_CLS}>
-              <option value="open_t+1">次日开盘（推荐）</option>
-              <option value="close_t">信号日收盘</option>
+              {minuteNative ? (
+                <>
+                  <option value="open_t+1">下一分钟开盘（推荐）</option>
+                  <option value="close_t">信号分钟收盘</option>
+                </>
+              ) : (
+                <>
+                  <option value="open_t+1">次日开盘（推荐）</option>
+                  <option value="close_t">信号日收盘</option>
+                </>
+              )}
             </select>
           </div>
           <div>
@@ -1567,8 +1618,17 @@ export function StrategyBacktest() {
               onChange={e => setExitFill(e.target.value as 'close_t' | 'open_t+1' | 'signal_next_minute')}
               className={INPUT_CLS}
             >
-              <option value="close_t">信号日收盘（推荐）</option>
-              <option value="open_t+1">次日开盘</option>
+              {minuteNative ? (
+                <>
+                  <option value="open_t+1">下一分钟开盘（推荐）</option>
+                  <option value="close_t">信号分钟收盘</option>
+                </>
+              ) : (
+                <>
+                  <option value="close_t">信号日收盘（推荐）</option>
+                  <option value="open_t+1">次日开盘</option>
+                </>
+              )}
               {highGranularity && minuteExitTriggerSupported && (
                 <option value="signal_next_minute">信号触发卖出 BETA</option>
               )}
@@ -1577,7 +1637,7 @@ export function StrategyBacktest() {
           {(entryFill === 'close_t' || exitFill === 'close_t') && (
             <div className="col-span-2 flex items-start gap-1 text-[10px] leading-4 text-warning">
               <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
-              <span>信号日收盘仅适合收盘前已确认的信号</span>
+              <span>{minuteNative ? '信号分钟收盘按产生信号的当前分钟收盘价撮合' : '信号日收盘仅适合收盘前已确认的信号'}</span>
             </div>
           )}
           {exitFill === 'signal_next_minute' && (
@@ -1616,10 +1676,14 @@ export function StrategyBacktest() {
           </div>
           <div>
             <label className="text-xs font-medium text-secondary block mb-1.5">买入权重</label>
-            <select value={positionSizing} onChange={e => setPositionSizing(e.target.value as any)} className={INPUT_CLS}>
-              <option value="equal">等权买入</option>
-              <option value="score_weight">评分加权</option>
-            </select>
+            {minuteNative ? (
+              <div className="rounded-input border border-border bg-elevated px-2.5 py-1.5 text-xs text-secondary">固定等权</div>
+            ) : (
+              <select value={positionSizing} onChange={e => setPositionSizing(e.target.value as any)} className={INPUT_CLS}>
+                <option value="equal">等权买入</option>
+                <option value="score_weight">评分加权</option>
+              </select>
+            )}
           </div>
           <div>
             <label className="text-xs font-medium text-secondary block mb-1.5">最大持仓数</label>
@@ -1636,22 +1700,24 @@ export function StrategyBacktest() {
         {simMode === 'position' && (
         <div className="grid grid-cols-3 gap-2">
           <div>
-            <label className="text-[10px] font-medium text-secondary block mb-1">佣金 ‱</label>
+            <label className="text-[10px] font-medium text-secondary block mb-1">佣金（万分之）</label>
             <input type="number" min={0} value={fees} onChange={e => setFees(e.target.value)} className={INPUT_CLS} />
           </div>
           <div>
-            <label className="text-[10px] font-medium text-secondary block mb-1">印花税 ‰</label>
+            <label className="text-[10px] font-medium text-secondary block mb-1">印花税（千分之）</label>
             <input type="number" min={0} value={stampTax} onChange={e => setStampTax(e.target.value)} className={INPUT_CLS} />
           </div>
           <div>
-            <label className="text-[10px] font-medium text-secondary block mb-1">滑点 ‱</label>
+            <label className="text-[10px] font-medium text-secondary block mb-1">滑点（万分之）</label>
             <input type="number" min={0} value={slippage} onChange={e => setSlippage(e.target.value)} className={INPUT_CLS} />
           </div>
         </div>
         )}
         {simMode === 'position' && (
         <div className="text-[10px] leading-4 text-muted">
-          单票目标约 {Number.isFinite(targetPositionPct) ? targetPositionPct.toFixed(1) : '—'}%。最大总仓位控制资金投入；剩余现金不是新增持仓名额，只有实际卖出成功才释放持仓数。
+          {minuteNative
+            ? <>单只目标金额 = 当前总资产 × 最大总仓位 ÷ 最大持仓数；当前约 {Number.isFinite(targetPositionPct) ? targetPositionPct.toFixed(1) : '—'}%。剩余现金不是新增持仓名额，只有实际卖出成功才释放持仓数。</>
+            : <>单票目标约 {Number.isFinite(targetPositionPct) ? targetPositionPct.toFixed(1) : '—'}%。最大总仓位控制资金投入；剩余现金不是新增持仓名额，只有实际卖出成功才释放持仓数。</>}
         </div>
         )}
         {simMode === 'full' && (
@@ -1991,6 +2057,55 @@ export function StrategyBacktest() {
               </div>
             )}
 
+            {Array.isArray(result.open_positions) && result.open_positions.length > 0 && (
+              <div className="overflow-hidden rounded-card border border-amber-400/30 bg-amber-400/5">
+                <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
+                  <span className="text-xs font-medium text-amber-300">期末未平仓</span>
+                  <span className="text-[10px] text-muted">计入最终权益，不计入已完成交易数和胜率</span>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[980px] text-sm text-foreground">
+                    <thead className="bg-elevated/70 text-left text-secondary">
+                      <tr>
+                        <th className="px-4 py-2 font-medium">标的</th>
+                        <th className="px-4 py-2 font-medium">持股数</th>
+                        <th className="px-4 py-2 font-medium">买入价 / 时间</th>
+                        <th className="px-4 py-2 font-medium">期末价 / 时间</th>
+                        <th className="px-4 py-2 text-right font-medium">市值</th>
+                        <th className="px-4 py-2 text-right font-medium">浮动盈亏</th>
+                        <th className="px-4 py-2 font-medium">未平仓原因</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {result.open_positions.map(position => (
+                        <tr key={`${position.symbol}-${position.entry_datetime}`} className="border-t border-border">
+                          <td className="px-4 py-2.5">
+                            <div className="font-medium">{position.name || position.symbol}</div>
+                            <div className="font-mono text-[11px] text-muted">{position.symbol}</div>
+                          </td>
+                          <td className="px-4 py-2.5 font-mono">{fmtShares(position.shares)} 股</td>
+                          <td className="px-4 py-2.5">
+                            <div className="font-mono">{fmtPrice(position.entry_price)}</div>
+                            <div className="text-[11px] text-muted">{position.entry_datetime}</div>
+                          </td>
+                          <td className="px-4 py-2.5">
+                            <div className="font-mono">{fmtPrice(position.mark_price)}</div>
+                            <div className="text-[11px] text-muted">{position.mark_datetime}</div>
+                          </td>
+                          <td className="px-4 py-2.5 text-right font-mono">{fmtPrice(position.market_value)}</td>
+                          <td className={`px-4 py-2.5 text-right font-mono ${priceColorClass(position.unrealized_pnl_amount)}`}>
+                            <div>{fmtSignedMoney(position.unrealized_pnl_amount)}</div>
+                            <div className="text-[11px]">{fmtPct(position.unrealized_pnl_pct)}</div>
+                          </td>
+                          <td className="px-4 py-2.5 text-[11px] text-amber-300">{position.exit_block_reason || '未启用期末强平'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
             {/* Tab: 按日期 / 交易明细 / 选股分析 */}
             {(result.trades.length > 0 || result.per_symbol_stats.length > 0) && (
               <div className="rounded-card border border-border overflow-hidden">
@@ -2314,25 +2429,44 @@ export function StrategyBacktest() {
 
               {settingsTab === 'range' && (
                 <ConfigSection title="回测范围">
-                  <div className="flex items-center gap-2">
-                    <span className="text-[11px] text-muted">资产类型</span>
-                    <div className="inline-flex h-8 rounded-btn border border-border overflow-hidden">
-                      {(['stock', 'etf'] as const).map(t => (
-                        <button
-                          key={t}
-                          type="button"
-                          onClick={() => { setAssetType(t); setSelectedStrategy(null); setSymbols('') }}
-                          className={`h-full px-3 text-xs font-medium transition-colors cursor-pointer
-                            ${assetType === t ? 'bg-accent/10 text-accent' : 'text-muted hover:text-foreground'}`}
-                        >
-                          {t === 'stock' ? '股票' : 'ETF'}
-                        </button>
-                      ))}
-                    </div>
-                    <span className="text-[11px] text-muted/70">ETF 仅技术类策略,读 ETF enriched</span>
-                  </div>
-                  <StockPoolPicker value={symbols} onChange={setSymbols} assetType={assetType} />
-                  <div className="text-[11px] leading-5 text-muted">默认全市场回测，由基础过滤、策略条件和买卖触发器筛选；需要单票调试或自选池回测时再限定股票池。</div>
+                  {openingVolumeStrategy ? (
+                    <>
+                      <div className="flex items-center gap-2 text-xs text-secondary">
+                        <span className="text-[11px] text-muted">资产类型</span>
+                        <span className="rounded-btn border border-accent/40 bg-accent/10 px-3 py-1.5 text-accent">股票</span>
+                      </div>
+                      <StockPoolPicker
+                        value={symbols}
+                        onChange={setSymbols}
+                        assetType="stock"
+                        emptyLabel="全部自选股"
+                        emptyDescription="默认使用全部 TickFlow 自选股。"
+                      />
+                      <div className="text-[11px] leading-5 text-muted">留空使用全部 TickFlow 自选股；指定股票时按自选股子集回测。</div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="flex items-center gap-2">
+                        <span className="text-[11px] text-muted">资产类型</span>
+                        <div className="inline-flex h-8 rounded-btn border border-border overflow-hidden">
+                          {(['stock', 'etf'] as const).map(t => (
+                            <button
+                              key={t}
+                              type="button"
+                              onClick={() => { setAssetType(t); setSelectedStrategy(null); setSymbols('') }}
+                              className={`h-full px-3 text-xs font-medium transition-colors cursor-pointer
+                                ${assetType === t ? 'bg-accent/10 text-accent' : 'text-muted hover:text-foreground'}`}
+                            >
+                              {t === 'stock' ? '股票' : 'ETF'}
+                            </button>
+                          ))}
+                        </div>
+                        <span className="text-[11px] text-muted/70">ETF 仅技术类策略,读 ETF enriched</span>
+                      </div>
+                      <StockPoolPicker value={symbols} onChange={setSymbols} assetType={assetType} />
+                      <div className="text-[11px] leading-5 text-muted">默认全市场回测，由基础过滤、策略条件和买卖触发器筛选；需要单票调试或自选池回测时再限定股票池。</div>
+                    </>
+                  )}
                 </ConfigSection>
               )}
 
@@ -2341,6 +2475,7 @@ export function StrategyBacktest() {
                   <OpeningVolumeParamsEditor
                     definitions={detail.params}
                     values={strategyParams}
+                    hideRiskFields
                     onChange={(id, value) => setStrategyParams(current => ({ ...current, [id]: value }))}
                   />
                 ) : (
@@ -2374,7 +2509,7 @@ export function StrategyBacktest() {
                     启用基础过滤
                   </label>
                   <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                    {BASIC_FILTER_FIELDS.map(field => {
+                    {(openingVolumeStrategy ? OPENING_VOLUME_FILTER_FIELDS : BASIC_FILTER_FIELDS).map(field => {
                       const scale = field.scale ?? 1
                       const value = basicFilter[field.key] == null ? '' : Number(basicFilter[field.key]) / scale
                       return (
@@ -2452,6 +2587,28 @@ export function StrategyBacktest() {
 
               {settingsTab === 'scoring' && (
                 <ConfigSection title="评分权重" hint="临时拖动滑块，保存时统一归权">
+                  {openingVolumeStrategy && (
+                    <label className="block">
+                      <span className="mb-1 block text-[11px] font-medium text-secondary">候选排序方式</span>
+                      <select
+                        value={candidateSort}
+                        onChange={e => {
+                          setCandidateSort(e.target.value as 'score' | 'volume_ratio' | 'watchlist_order')
+                          setEditingScoring(false)
+                        }}
+                        className={INPUT_CLS}
+                      >
+                        <option value="score">综合评分</option>
+                        <option value="volume_ratio">同期量比优先</option>
+                        <option value="watchlist_order">股票池顺序</option>
+                      </select>
+                      <span className="mt-1 block text-[10px] leading-4 text-muted">逐分钟即时排序；只有同一分钟候选超过剩余名额时才决定优先买入顺序。</span>
+                    </label>
+                  )}
+                  <fieldset
+                    disabled={openingVolumeStrategy && candidateSort !== 'score'}
+                    className={`space-y-3 ${openingVolumeStrategy && candidateSort !== 'score' ? 'opacity-50' : ''}`}
+                  >
                   {Object.entries(scoring).length > 0 ? (() => {
                     const visibleWeights = editingScoring ? scoringDraft : scoringToPct(scoring)
                     const total = Object.values(visibleWeights).reduce((a, b) => a + b, 0)
@@ -2501,7 +2658,11 @@ export function StrategyBacktest() {
                   <div className="border-t border-border/40 pt-3">
                     <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                       <span className="text-[11px] font-medium text-secondary">评分过滤</span>
-                      <span className="text-[10px] text-muted">留空 = 不过滤；命中范围后按评分从高到低买入</span>
+                      <span className="text-[10px] text-muted">
+                        {openingVolumeStrategy
+                          ? '仅在同一分钟候选超过剩余名额时进行评分和区间筛选'
+                          : '留空 = 不过滤；命中范围后按评分从高到低买入'}
+                      </span>
                     </div>
                     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                       <label className="block">
@@ -2537,8 +2698,13 @@ export function StrategyBacktest() {
                         />
                       </label>
                     </div>
-                    <div className="mt-2 text-[10px] leading-4 text-muted">例如最小值 71 表示只把评分 ≥ 71 的股票放入下一交易日买入预选池。</div>
+                    <div className="mt-2 text-[10px] leading-4 text-muted">
+                      {openingVolumeStrategy
+                        ? '候选未超过剩余名额时，保持策略原有排序，不因评分区间排除股票。'
+                        : '例如最小值 71 表示只把评分 ≥ 71 的股票放入下一交易日买入预选池。'}
+                    </div>
                   </div>
+                  </fieldset>
                 </ConfigSection>
               )}
 
@@ -2555,7 +2721,14 @@ export function StrategyBacktest() {
                         step={0.5}
                         onChange={e => {
                           const n = numOrNull(e.target.value)
-                          updateOverride('stop_loss', n == null ? null : -Math.abs(n) / 100)
+                          if (openingVolumeStrategy) {
+                            setStrategyParams(prev => ({
+                              ...prev,
+                              stop_loss_pct: n == null ? 0 : clamp(Math.abs(n), 0, 99) / 100,
+                            }))
+                          } else {
+                            updateOverride('stop_loss', n == null ? null : -Math.abs(n) / 100)
+                          }
                         }}
                         className={INPUT_CLS}
                       />
@@ -2642,6 +2815,22 @@ export function StrategyBacktest() {
                       />
                     </label>
                   </div>
+                  {openingVolumeStrategy && (
+                    <label className="flex items-start gap-2 rounded-btn border border-border bg-base/40 px-3 py-2.5">
+                      <input
+                        type="checkbox"
+                        checked={forceCloseAtEnd}
+                        onChange={e => setForceCloseAtEnd(e.target.checked)}
+                        className="mt-0.5 h-4 w-4 accent-accent"
+                      />
+                      <span>
+                        <span className="block text-[11px] font-medium text-secondary">回测末期强制平仓</span>
+                        <span className="mt-0.5 block text-[10px] leading-4 text-muted">
+                          开启后最后交易日不再新开仓；持仓按末根分钟收盘价尝试卖出。受 T+1、停牌和一字跌停限制，无法成交的股票保留为期末未平仓。
+                        </span>
+                      </span>
+                    </label>
+                  )}
                 </ConfigSection>
               )}
             </div>

@@ -89,6 +89,9 @@ def _strategy_detail(s: StrategyDef, overrides: dict | None = None) -> dict:
     name = overrides.get("name", s.meta.get("name", "")) if overrides else s.meta.get("name", "")
     description = overrides.get("description", s.meta.get("description", "")) if overrides else s.meta.get("description", "")
 
+    def saved_value(key: str, default):
+        return overrides.get(key, default) if overrides else default
+
     return {
         "id": s.meta["id"],
         "name": name or s.meta.get("name", ""),
@@ -107,10 +110,14 @@ def _strategy_detail(s: StrategyDef, overrides: dict | None = None) -> dict:
         "exit_signals": overrides.get("exit_signals", s.exit_signals) if overrides else s.exit_signals,
         "minute_exit_trigger_supported_signals": sorted(MINUTE_EXIT_TRIGGER_SIGNALS),
         "stop_loss": overrides.get("stop_loss", s.stop_loss) if overrides else s.stop_loss,
-        "take_profit": getattr(s, "take_profit", None),
-        "trailing_stop": getattr(s, "trailing_stop", None),
-        "trailing_take_profit_activate": getattr(s, "trailing_take_profit_activate", None),
-        "trailing_take_profit_drawdown": getattr(s, "trailing_take_profit_drawdown", None),
+        "take_profit": saved_value("take_profit", getattr(s, "take_profit", None)),
+        "trailing_stop": saved_value("trailing_stop", getattr(s, "trailing_stop", None)),
+        "trailing_take_profit_activate": saved_value(
+            "trailing_take_profit_activate", getattr(s, "trailing_take_profit_activate", None),
+        ),
+        "trailing_take_profit_drawdown": saved_value(
+            "trailing_take_profit_drawdown", getattr(s, "trailing_take_profit_drawdown", None),
+        ),
         "max_hold_days": overrides.get("max_hold_days", s.max_hold_days) if overrides else s.max_hold_days,
         "alerts": s.alerts,
         "order_by": s.meta.get("order_by", "score"),

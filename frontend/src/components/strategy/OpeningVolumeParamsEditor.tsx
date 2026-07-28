@@ -5,6 +5,7 @@ import type { StrategyParamDef } from '@/lib/api'
 interface OpeningVolumeParamsEditorProps {
   definitions: StrategyParamDef[]
   values: Record<string, any>
+  hideRiskFields?: boolean
   onChange: (id: string, value: any) => void
 }
 
@@ -186,10 +187,12 @@ function BranchToggle({
 export function OpeningVolumeParamsEditor({
   definitions,
   values,
+  hideRiskFields = false,
   onChange,
 }: OpeningVolumeParamsEditorProps) {
   const definitionsById = new Map(definitions.map(definition => [definition.id, definition]))
   const commonDefinitions = COMMON_FIELD_IDS
+    .filter(id => !hideRiskFields || id !== 'stop_loss_pct')
     .map(id => definitionsById.get(id))
     .filter((definition): definition is StrategyParamDef => definition != null)
 

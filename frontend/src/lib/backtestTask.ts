@@ -167,6 +167,8 @@ export function startBacktest(params: {
   matching?: string
   entry_fill?: string
   exit_fill?: string
+  candidate_sort?: 'score' | 'volume_ratio' | 'watchlist_order'
+  force_close_at_end?: boolean
   fees_pct?: number
   commission_pct?: number
   stamp_tax_pct?: number
@@ -205,13 +207,15 @@ export function startBacktest(params: {
 
   const qs = buildQuery({
     strategy_id: params.strategy_id,
-    symbols: (isVnpy || isMinutePortfolio) ? undefined : symbols.join(','),
+    symbols: isVnpy ? undefined : symbols.join(','),
     symbol: isVnpy ? symbols[0] : undefined,
     start: params.start ?? undefined,
     end: params.end ?? undefined,
     matching: params.matching,
     entry_fill: params.entry_fill,
     exit_fill: params.exit_fill,
+    candidate_sort: params.candidate_sort,
+    force_close_at_end: params.force_close_at_end,
     fees_pct: params.fees_pct,
     commission_pct: params.commission_pct,
     stamp_tax_pct: params.stamp_tax_pct,
