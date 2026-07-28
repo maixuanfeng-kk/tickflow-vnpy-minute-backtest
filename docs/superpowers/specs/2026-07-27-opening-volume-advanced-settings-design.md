@@ -14,7 +14,7 @@
 
 ## 数据流
 
-前端把策略参数放入 `params`，把基础过滤、评分和风险配置放入 `overrides`，把限定股票放入 `symbols`。`/api/backtest/minute-portfolio/stream` 合并已保存配置和本次请求，构造 `MinutePortfolioConfig`。分钟引擎在每个时间戳按“基础过滤 -> ABC 入场 -> 评分/阈值 -> 名额截取”选择买入候选，并在持仓可卖后按“风险退出 -> 均线退出 -> 回测结束”处理卖出。
+前端把策略参数放入 `params`，把基础过滤、评分和风险配置放入 `overrides`，把限定股票放入 `symbols`。`/api/backtest/minute-portfolio/stream` 合并已保存配置和本次请求，构造 `MinutePortfolioConfig`。分钟引擎在每个时间戳按“基础过滤 -> ABC 入场 -> 名额判断 -> 候选超过名额时评分/阈值和截取”选择买入候选，并在持仓可卖后按“风险退出 -> 均线退出 -> 回测结束”处理卖出。
 
 ## 兼容性
 

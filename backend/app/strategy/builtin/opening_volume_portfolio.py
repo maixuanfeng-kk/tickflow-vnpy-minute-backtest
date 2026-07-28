@@ -8,6 +8,7 @@ META = {
     "asset_types": ["stock"],
     "timeframes": ["1m"],
     "scanner_backend": "opening_volume",
+    "scoring": {"volume_ratio": 1.0, "today_return": 0.0},
     "params": [
         {"id": "scan_start_time", "label": "扫描开始时间", "type": "time", "default": "09:30"},
         {"id": "scan_end_time", "label": "扫描结束时间", "type": "time", "default": "09:59"},
@@ -28,6 +29,7 @@ META = {
     ],
 }
 
+BASIC_FILTER = {"enabled": False}
 EXECUTION_BACKEND = "minute_native"
 ENTRY_SIGNALS = []
 EXIT_SIGNALS = []

@@ -1,9 +1,10 @@
 """Pure rules for the opening-volume minute portfolio strategy."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta
-from math import floor
+from decimal import Decimal, ROUND_HALF_UP
+from math import floor, isfinite
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Callable, Mapping, TypedDict
@@ -17,6 +18,7 @@ from app.services import watchlist
 
 VOLUME_RATIO_MIN = 1.5
 CANDLE_DIRECTIONS = {"bearish", "bullish", "any"}
+CANDIDATE_SORT_MODES = {"score", "volume_ratio", "watchlist_order"}
 MA_EXIT_PERIODS = (5, 10, 20, 30, 60)
 INITIAL_CAPITAL = 10_000_000.0
 MAX_POSITIONS = 8
@@ -24,10 +26,14 @@ LOT_SIZE = 100
 TARGET_POSITION_VALUE = INITIAL_CAPITAL / MAX_POSITIONS
 
 
-class Candidate(TypedDict):
+class Candidate(TypedDict, total=False):
     symbol: str
     volume_ratio: float
     today_return: float
+    previous_return: float
+    cumulative_amount: float
+    reason: str
+    score: float
 
 
 @dataclass(frozen=True)
@@ -238,11 +244,127 @@ def entry_reason(
     return None
 
 
-def rank_candidates(rows: list[Candidate]) -> list[Candidate]:
-    """Use the agreed deterministic cross-symbol candidate ordering."""
+def rank_candidates(
+    rows: list[Candidate],
+    *,
+    mode: str = "volume_ratio",
+    weights: Mapping[str, float] | None = None,
+    score_min: float | None = None,
+    score_max: float | None = None,
+    watchlist_order: list[str] | None = None,
+) -> list[Candidate]:
+    """Use the selected deterministic cross-symbol candidate ordering."""
+    if mode == "score":
+        return _score_candidates(rows, weights or {}, score_min, score_max)
+    if mode == "volume_ratio":
+        return sorted(
+            rows,
+            key=lambda row: (-row["volume_ratio"], -row["today_return"], row["symbol"]),
+        )
+    if mode == "watchlist_order":
+        order = {
+            symbol: index
+            for index, symbol in reversed(list(enumerate(watchlist_order or [])))
+        }
+        fallback_rank = max(order.values(), default=-1) + 1
+        return sorted(rows, key=lambda row: (order.get(row["symbol"], fallback_rank), row["symbol"]))
+    raise ValueError(f"candidate_sort must be one of {sorted(CANDIDATE_SORT_MODES)}")
+
+
+def _symbol_board(symbol: str) -> str | None:
+    code = symbol.split(".", 1)[0]
+    if code.startswith("688"):
+        return "科创板"
+    if code.startswith(("300", "301")):
+        return "创业板"
+    if code.startswith(("4", "8", "92")):
+        return "北交所"
+    if code.startswith("6"):
+        return "沪主板"
+    if code.startswith(("0", "1")):
+        return "深主板"
+    return None
+
+
+def _passes_basic_filter(
+    symbol: str,
+    bar: Mapping[str, Any],
+    basic_filter: Mapping[str, Any],
+    symbol_names: Mapping[str, str],
+) -> bool:
+    if not basic_filter or basic_filter.get("enabled", True) is False:
+        return True
+    close = float(bar.get("close") or 0)
+    cumulative_amount = float(bar.get("cumulative_amount", bar.get("amount") or 0))
+    for key, value, actual, lower in (
+        ("price_min", basic_filter.get("price_min"), close, True),
+        ("price_max", basic_filter.get("price_max"), close, False),
+        ("amount_min", basic_filter.get("amount_min"), cumulative_amount, True),
+        ("amount_max", basic_filter.get("amount_max"), cumulative_amount, False),
+    ):
+        if value is None:
+            continue
+        threshold = float(value)
+        if (lower and actual < threshold) or (not lower and actual > threshold):
+            return False
+    boards = basic_filter.get("boards")
+    if boards and _symbol_board(symbol) not in boards:
+        return False
+    if basic_filter.get("exclude_st"):
+        name = str(symbol_names.get(symbol, "")).upper()
+        if name.startswith(("ST", "*ST")) or "退" in name:
+            return False
+    return True
+
+
+def _score_candidates(
+    rows: list[Candidate],
+    weights: Mapping[str, float],
+    score_min: float | None,
+    score_max: float | None,
+) -> list[Candidate]:
+    if not rows:
+        return []
+    active_weights = {
+        key: float(weight)
+        for key, weight in weights.items()
+        if key in {"volume_ratio", "today_return", "previous_return"}
+        and isfinite(float(weight)) and float(weight) > 0
+    }
+    if not active_weights:
+        return rank_candidates(rows)
+    total_weight = sum(active_weights.values())
+    ranges = {
+        key: (
+            min(float(row.get(key, 0.0)) for row in rows),
+            max(float(row.get(key, 0.0)) for row in rows),
+        )
+        for key in active_weights
+    }
+    scored: list[Candidate] = []
+    for row in rows:
+        score = 0.0
+        for key, weight in active_weights.items():
+            low, high = ranges[key]
+            normalized = (
+                (float(row.get(key, 0.0)) - low) / (high - low) * 100
+                if high > low else 0.0
+            )
+            score += normalized * weight / total_weight
+        candidate = Candidate(**row, score=score)
+        if score_min is not None and score < score_min:
+            continue
+        if score_max is not None and score > score_max:
+            continue
+        scored.append(candidate)
     return sorted(
-        rows,
-        key=lambda row: (-row["volume_ratio"], -row["today_return"], row["symbol"]),
+        scored,
+        key=lambda row: (
+            -row.get("score", 0.0),
+            -row["volume_ratio"],
+            -row["today_return"],
+            row["symbol"],
+        ),
     )
 
 
@@ -260,7 +382,100 @@ class MinutePortfolioConfig:
     cash_reserve_ratio: float = 0.0
     max_buy_volume_ratio: float | None = None
     strategy_params: OpeningVolumeStrategyParams = field(default_factory=OpeningVolumeStrategyParams)
+    basic_filter: dict[str, Any] = field(default_factory=dict)
+    candidate_sort: str = "volume_ratio"
+    entry_fill: str = "next_minute_open"
+    exit_fill: str = "next_minute_open"
+    force_close_at_end: bool = True
+    scoring: dict[str, float] = field(default_factory=dict)
+    score_min: float | None = None
+    score_max: float | None = None
+    take_profit_pct: float | None = None
+    trailing_stop_pct: float | None = None
+    trailing_take_profit_activate_pct: float | None = None
+    trailing_take_profit_drawdown_pct: float | None = None
+    max_hold_days: int | None = None
+    symbol_names: dict[str, str] = field(default_factory=dict)
     minute_data_dir: str | None = None
+
+
+def _entry_base_price(bar: Mapping[str, Any], fill: str) -> float:
+    key = "close" if fill == "signal_minute_close" else "open"
+    return float(bar.get(key) or 0)
+
+
+def _exit_base_price(bar: Mapping[str, Any], fill: str) -> float:
+    key = "close" if fill == "signal_minute_close" else "open"
+    return float(bar.get(key) or 0)
+
+
+def _price_limit_ratio(symbol: str, name: str) -> float:
+    if str(name or "").upper().startswith(("ST", "*ST")):
+        return 0.05
+    board = _symbol_board(symbol)
+    if board in {"科创板", "创业板"}:
+        return 0.20
+    if board == "北交所":
+        return 0.30
+    return 0.10
+
+
+def _is_one_price_limit(
+    symbol: str,
+    bar: Mapping[str, Any],
+    previous_close: float,
+    name: str,
+    direction: str,
+) -> bool:
+    prices = [float(bar.get(key) or 0) for key in ("open", "high", "low", "close")]
+    if previous_close <= 0 or any(price <= 0 for price in prices):
+        return False
+    tolerance = max(abs(prices[-1]) * 1e-4, 0.01)
+    if max(prices) - min(prices) > tolerance:
+        return False
+    ratio = _price_limit_ratio(symbol, name)
+    multiplier = Decimal(str(1 + ratio if direction == "up" else 1 - ratio))
+    limit_price = float(
+        (Decimal(str(previous_close)) * multiplier).quantize(
+            Decimal("0.01"),
+            rounding=ROUND_HALF_UP,
+        )
+    )
+    return abs(prices[-1] - limit_price) <= 0.01
+
+
+def _buy_block_reason(
+    *,
+    symbol: str,
+    bar: Mapping[str, Any] | None,
+    previous_close: float,
+    symbol_name: str,
+    fill: str,
+) -> str | None:
+    if bar is None or float(bar.get("volume") or 0) <= 0:
+        return "buy_suspended"
+    if _entry_base_price(bar, fill) <= 0:
+        return "buy_invalid_price"
+    if _is_one_price_limit(symbol, bar, previous_close, symbol_name, "up"):
+        return "buy_limit_up"
+    return None
+
+
+def _sell_block_reason(
+    *,
+    symbol: str,
+    bar: Mapping[str, Any] | None,
+    previous_close: float,
+    symbol_name: str,
+    fill: str,
+) -> str | None:
+    if bar is None or float(bar.get("volume") or 0) <= 0:
+        return "sell_suspended"
+    if _exit_base_price(bar, fill) <= 0:
+        return "sell_invalid_price"
+    if _is_one_price_limit(symbol, bar, previous_close, symbol_name, "down"):
+        return "sell_limit_down"
+    return None
 
 
 class LocalMinuteParquetRepository:
@@ -381,10 +596,13 @@ def _load_rows_and_context(
     raw_rows = minutes.sort(["symbol", "datetime"]).to_dicts()
     cumulative: dict[tuple[str, date, time], float] = {}
     running: dict[tuple[str, date], float] = {}
+    running_amount: dict[tuple[str, date], float] = {}
     for row in raw_rows:
         key = (row["symbol"], row["datetime"].date())
         running[key] = running.get(key, 0.0) + float(row["volume"] or 0)
+        running_amount[key] = running_amount.get(key, 0.0) + float(row.get("amount") or 0)
         row["cumulative_volume"] = running[key]
+        row["cumulative_amount"] = running_amount[key]
         cumulative[(row["symbol"], key[1], row["datetime"].time())] = running[key]
     trade_dates = sorted({row["datetime"].date() for row in raw_rows})
     previous_date = {trade_dates[index]: trade_dates[index - 1] for index in range(1, len(trade_dates))}
@@ -416,15 +634,26 @@ class MinutePortfolioEngine:
         cash = self.config.initial_capital
         positions: dict[str, dict] = {}
         pending_buys: list[dict] = []
-        pending_sells: set[str] = set()
+        pending_sells: dict[str, str] = {}
         entered_today: set[tuple[str, date]] = set()
         trades: list[dict] = []
         equity_curve: list[dict] = []
         drawdown_curve: list[dict] = []
+        execution = {
+            "buy_suspended": 0,
+            "buy_invalid_price": 0,
+            "buy_limit_up": 0,
+            "sell_suspended": 0,
+            "sell_invalid_price": 0,
+            "sell_limit_down": 0,
+        }
         latest_closes: dict[str, float] = {}
+        latest_bars: dict[str, tuple[datetime, dict]] = {}
+        last_sell_attempt: dict[str, datetime] = {}
         current_date: date | None = None
         peak_equity = self.config.initial_capital
         trade_dates = sorted({timestamp.date() for timestamp in grouped})
+        trade_day_index = {trading_day: index for index, trading_day in enumerate(trade_dates)}
 
         def snapshot(day: date) -> None:
             nonlocal peak_equity
@@ -442,95 +671,156 @@ class MinutePortfolioEngine:
             if progress_callback:
                 progress_callback(len(equity_curve), len(trade_dates), equity, day)
 
+        def close_position(
+            symbol: str,
+            position: dict,
+            bar: Mapping[str, Any] | None,
+            fill: str,
+            execution_time: datetime,
+        ) -> bool:
+            nonlocal cash
+            last_sell_attempt[symbol] = execution_time
+            context = daily_context.get((symbol, execution_time.date())) or {}
+            block_reason = _sell_block_reason(
+                symbol=symbol,
+                bar=bar,
+                previous_close=float(context.get("previous_close") or 0),
+                symbol_name=self.config.symbol_names.get(symbol, ""),
+                fill=fill,
+            )
+            if block_reason is not None:
+                execution[block_reason] += 1
+                position["exit_block_reason"] = block_reason
+                return False
+            assert bar is not None
+            base_price = _exit_base_price(bar, fill)
+            price = base_price * (1 - self.config.slippage_bps / 10_000)
+            value = position["shares"] * price
+            net_proceeds = value * (
+                1 - self.config.commission_pct - self.config.stamp_tax_pct
+            )
+            cash += net_proceeds
+            pnl_amount = net_proceeds - position["entry_cost"]
+            pnl_pct = pnl_amount / position["entry_cost"] if position["entry_cost"] else 0.0
+            trades.append({
+                "symbol": symbol,
+                "entry_datetime": position["entry_datetime"].isoformat(sep=" "),
+                "entry_date": str(position["entry_date"]),
+                "entry_price": round(position["entry_price"], 4),
+                "exit_datetime": execution_time.isoformat(sep=" "),
+                "exit_date": str(execution_time.date()),
+                "exit_price": round(price, 4),
+                "shares": position["shares"],
+                "entry_cost": round(position["entry_cost"], 2),
+                "pnl_amount": round(pnl_amount, 2),
+                "pnl_pct": round(pnl_pct, 6),
+                "max_floating_gain_pct": round(position["max_floating_gain_pct"], 6),
+                "max_floating_loss_pct": round(position["max_floating_loss_pct"], 6),
+                "duration": (execution_time.date() - position["entry_date"]).days,
+                "entry_reason": position["entry_reason"],
+                "exit_reason": position["exit_reason"],
+            })
+            positions.pop(symbol)
+            return True
+
+        def open_position(
+            order: Mapping[str, Any],
+            bar: Mapping[str, Any] | None,
+            fill: str,
+            execution_time: datetime,
+            bars: Mapping[str, Mapping[str, Any]],
+        ) -> bool:
+            nonlocal cash
+            context = daily_context.get((order["symbol"], execution_time.date())) or {}
+            block_reason = _buy_block_reason(
+                symbol=order["symbol"],
+                bar=bar,
+                previous_close=float(context.get("previous_close") or 0),
+                symbol_name=self.config.symbol_names.get(order["symbol"], ""),
+                fill=fill,
+            )
+            if block_reason is not None:
+                execution[block_reason] += 1
+                return False
+            assert bar is not None
+            base_price = _entry_base_price(bar, fill)
+            price = base_price * (1 + self.config.slippage_bps / 10_000)
+            current_equity = cash
+            for held_symbol, position in positions.items():
+                held_bar = bars.get(held_symbol)
+                mark_price = (
+                    float(held_bar.get("open") or held_bar.get("close") or 0)
+                    if held_bar else 0.0
+                )
+                if mark_price <= 0:
+                    mark_price = float(
+                        latest_closes.get(held_symbol) or position["entry_price"]
+                    )
+                current_equity += position["shares"] * mark_price
+            reserve_cash = current_equity * self.config.cash_reserve_ratio
+            target = (
+                current_equity
+                * (1 - self.config.cash_reserve_ratio)
+                / self.config.max_positions
+            )
+            spendable_cash = max(cash - reserve_cash, 0.0)
+            shares = floor(
+                min(target, spendable_cash)
+                / (price * (1 + self.config.commission_pct))
+            )
+            if self.config.max_buy_volume_ratio is not None:
+                shares = min(
+                    shares,
+                    floor(float(bar["volume"]) * self.config.max_buy_volume_ratio),
+                )
+            shares = shares // self.config.lot_size * self.config.lot_size
+            if shares < self.config.lot_size or len(positions) >= self.config.max_positions:
+                return False
+            cost = shares * price * (1 + self.config.commission_pct)
+            cash -= cost
+            positions[order["symbol"]] = {
+                "shares": shares,
+                "entry_price": price,
+                "entry_datetime": execution_time,
+                "entry_date": execution_time.date(),
+                "entry_reason": order["reason"],
+                "entry_cost": cost,
+                "peak_price": price,
+                "max_floating_gain_pct": 0.0,
+                "max_floating_loss_pct": 0.0,
+            }
+            return True
+
         for timestamp in sorted(grouped):
             if current_date is not None and timestamp.date() != current_date:
                 snapshot(current_date)
             current_date = timestamp.date()
             bars = {row["symbol"]: row for row in grouped[timestamp]}
+            for symbol, bar in bars.items():
+                latest_bars[symbol] = (timestamp, bar)
             for symbol in list(pending_sells):
                 bar = bars.get(symbol)
                 position = positions.get(symbol)
-                if bar is None or position is None or float(bar["open"]) <= 0:
+                if position is None:
                     continue
-                price = float(bar["open"]) * (1 - self.config.slippage_bps / 10_000)
-                value = position["shares"] * price
-                net_proceeds = value * (1 - self.config.commission_pct - self.config.stamp_tax_pct)
-                cash += net_proceeds
-                pnl_amount = net_proceeds - position["entry_cost"]
-                pnl_pct = pnl_amount / position["entry_cost"] if position["entry_cost"] else 0.0
-                trades.append({
-                    "symbol": symbol,
-                    "entry_datetime": position["entry_datetime"].isoformat(sep=" "),
-                    "entry_date": str(position["entry_date"]),
-                    "entry_price": round(position["entry_price"], 4),
-                    "exit_datetime": timestamp.isoformat(sep=" "),
-                    "exit_date": str(timestamp.date()),
-                    "exit_price": round(price, 4),
-                    "shares": position["shares"],
-                    "entry_cost": round(position["entry_cost"], 2),
-                    "pnl_amount": round(pnl_amount, 2),
-                    "pnl_pct": round(pnl_pct, 6),
-                    "max_floating_gain_pct": round(position["max_floating_gain_pct"], 6),
-                    "max_floating_loss_pct": round(position["max_floating_loss_pct"], 6),
-                    "duration": (timestamp.date() - position["entry_date"]).days,
-                    "entry_reason": position["entry_reason"],
-                    "exit_reason": position["exit_reason"],
-                })
-                pending_sells.remove(symbol)
-                positions.pop(symbol)
+                pending_fill = pending_sells[symbol]
+                if close_position(
+                    symbol, position, bar, pending_fill, timestamp,
+                ):
+                    pending_sells.pop(symbol, None)
             for order in pending_buys[:]:
-                bar = bars.get(order["symbol"])
-                if bar is None or float(bar["open"]) <= 0 or float(bar["volume"]) <= 0:
+                execution_timestamp = order["execution_timestamp"]
+                if execution_timestamp > timestamp:
                     continue
-                price = float(bar["open"]) * (1 + self.config.slippage_bps / 10_000)
-                if self.config.cash_reserve_ratio > 0:
-                    current_equity = cash
-                    for held_symbol, position in positions.items():
-                        held_bar = bars.get(held_symbol)
-                        mark_price = (
-                            float(held_bar.get("open") or held_bar.get("close") or 0)
-                            if held_bar else 0.0
-                        )
-                        if mark_price <= 0:
-                            mark_price = float(
-                                latest_closes.get(held_symbol) or position["entry_price"]
-                            )
-                        current_equity += position["shares"] * mark_price
-                    reserve_cash = current_equity * self.config.cash_reserve_ratio
-                    target = (
-                        current_equity
-                        * (1 - self.config.cash_reserve_ratio)
-                        / self.config.max_positions
-                    )
-                    spendable_cash = max(cash - reserve_cash, 0.0)
-                else:
-                    target = self.config.initial_capital / self.config.max_positions
-                    spendable_cash = cash
-                shares = floor(
-                    min(target, spendable_cash)
-                    / (price * (1 + self.config.commission_pct))
-                )
-                if self.config.max_buy_volume_ratio is not None:
-                    shares = min(
-                        shares,
-                        floor(float(bar["volume"]) * self.config.max_buy_volume_ratio),
-                    )
-                shares = shares // self.config.lot_size * self.config.lot_size
                 pending_buys.remove(order)
-                if shares < self.config.lot_size or len(positions) >= self.config.max_positions:
+                if execution_timestamp != timestamp:
+                    execution["buy_suspended"] += 1
                     continue
-                cost = shares * price * (1 + self.config.commission_pct)
-                cash -= cost
-                positions[order["symbol"]] = {
-                    "shares": shares,
-                    "entry_price": price,
-                    "entry_datetime": timestamp,
-                    "entry_date": timestamp.date(),
-                    "entry_reason": order["reason"],
-                    "entry_cost": cost,
-                    "max_floating_gain_pct": 0.0,
-                    "max_floating_loss_pct": 0.0,
-                }
+                bar = bars.get(order["symbol"])
+                if open_position(
+                    order, bar, "next_minute_open", timestamp, bars,
+                ):
+                    entered_today.add((order["symbol"], timestamp.date()))
 
             for symbol, position in positions.items():
                 bar = bars.get(symbol)
@@ -540,6 +830,7 @@ class MinutePortfolioEngine:
                 low = float(bar.get("low") or 0)
                 unit_cost = position["entry_cost"] / position["shares"]
                 if high > 0:
+                    position["peak_price"] = max(position["peak_price"], high)
                     position["max_floating_gain_pct"] = max(
                         position["max_floating_gain_pct"], high / unit_cost - 1.0,
                     )
@@ -548,7 +839,7 @@ class MinutePortfolioEngine:
                         position["max_floating_loss_pct"], low / unit_cost - 1.0,
                     )
 
-            for symbol, position in positions.items():
+            for symbol, position in list(positions.items()):
                 if position["entry_date"] >= timestamp.date() or symbol in pending_sells:
                     continue
                 context = daily_context.get((symbol, timestamp.date()))
@@ -564,15 +855,69 @@ class MinutePortfolioEngine:
                 else:
                     ma_key = f"previous_ma{ma_exit_period}"
                     ma_value = float(context.get(ma_key) or 0) if context else 0.0
-                if close > 0 and close <= position["entry_price"] * (1 - self.config.strategy_params.stop_loss_pct):
-                    position["exit_reason"] = "stop_loss"
-                    pending_sells.add(symbol)
+                entry_price = float(position["entry_price"])
+                peak_price = float(position["peak_price"])
+                held_trade_days = (
+                    trade_day_index[timestamp.date()]
+                    - trade_day_index[position["entry_date"]]
+                )
+                exit_reason: str | None = None
+                if (
+                    close > 0
+                    and self.config.strategy_params.stop_loss_pct > 0
+                    and close <= position["entry_price"] * (1 - self.config.strategy_params.stop_loss_pct)
+                ):
+                    exit_reason = "stop_loss"
+                elif (
+                    close > 0
+                    and self.config.take_profit_pct is not None
+                    and close >= entry_price * (1 + self.config.take_profit_pct)
+                ):
+                    exit_reason = "take_profit"
+                elif (
+                    close > 0
+                    and self.config.trailing_stop_pct is not None
+                    and close <= peak_price * (1 - self.config.trailing_stop_pct)
+                ):
+                    exit_reason = "trailing_stop"
+                elif (
+                    close > 0
+                    and self.config.trailing_take_profit_activate_pct is not None
+                    and self.config.trailing_take_profit_drawdown_pct is not None
+                    and peak_price >= entry_price * (1 + self.config.trailing_take_profit_activate_pct)
+                    and close <= peak_price * (1 - self.config.trailing_take_profit_drawdown_pct)
+                ):
+                    exit_reason = "trailing_take_profit"
+                elif (
+                    self.config.max_hold_days is not None
+                    and held_trade_days >= self.config.max_hold_days
+                ):
+                    exit_reason = "max_hold_days"
                 elif close > 0 and ma_value > 0 and close < ma_value:
-                    position["exit_reason"] = f"ma{ma_exit_period}_breakdown"
-                    pending_sells.add(symbol)
+                    exit_reason = f"ma{ma_exit_period}_breakdown"
+                if exit_reason is not None:
+                    position["exit_reason"] = exit_reason
+                    if self.config.exit_fill == "signal_minute_close":
+                        bar = bars.get(symbol)
+                        if not close_position(
+                            symbol,
+                            position,
+                            bar,
+                            "signal_minute_close",
+                            timestamp,
+                        ):
+                            pending_sells[symbol] = "signal_minute_close"
+                    else:
+                        pending_sells[symbol] = "next_minute_open"
 
             candidates: list[Candidate] = []
             for symbol, bar in bars.items():
+                if (
+                    self.config.force_close_at_end
+                    and self.config.end is not None
+                    and timestamp.date() == trade_dates[-1]
+                ):
+                    continue
                 current_date = timestamp.date()
                 key = (symbol, current_date)
                 context = daily_context.get(key)
@@ -580,6 +925,10 @@ class MinutePortfolioEngine:
                     continue
                 current_time = timestamp.time()
                 if not is_in_scan_window(current_time, self.config.strategy_params):
+                    continue
+                if not _passes_basic_filter(
+                    symbol, bar, self.config.basic_filter, self.config.symbol_names,
+                ):
                     continue
                 previous_volume = float(bar.get("previous_cumulative_volume") or 0)
                 if previous_volume <= 0:
@@ -603,53 +952,123 @@ class MinutePortfolioEngine:
                         "symbol": symbol,
                         "volume_ratio": volume_ratio,
                         "today_return": today_return,
+                        "previous_return": float(context["previous_change_pct"]),
+                        "cumulative_amount": float(bar.get("cumulative_amount", bar.get("amount") or 0)),
                         "reason": reason,
                     })
 
             slots = self.config.max_positions - len(positions) - len(pending_buys)
-            for candidate in rank_candidates(candidates)[:max(slots, 0)]:
-                entered_today.add((candidate["symbol"], timestamp.date()))
-                pending_buys.append(candidate)
+            ranked_candidates = (
+                rank_candidates(
+                    candidates,
+                    mode=self.config.candidate_sort,
+                    weights=self.config.scoring,
+                    score_min=self.config.score_min,
+                    score_max=self.config.score_max,
+                    watchlist_order=self.config.symbols,
+                )
+                if len(candidates) > max(slots, 0)
+                else rank_candidates(candidates)
+            )
+            for candidate in ranked_candidates[:max(slots, 0)]:
+                if self.config.entry_fill == "signal_minute_close":
+                    bar = bars.get(candidate["symbol"])
+                    if open_position(
+                        candidate,
+                        bar,
+                        "signal_minute_close",
+                        timestamp,
+                        bars,
+                    ):
+                        entered_today.add((candidate["symbol"], timestamp.date()))
+                else:
+                    pending_buys.append({
+                        **candidate,
+                        "execution_timestamp": timestamp + timedelta(minutes=1),
+                    })
 
             for symbol, bar in bars.items():
                 close = float(bar.get("close") or 0)
                 if close > 0:
                     latest_closes[symbol] = close
 
-        last_timestamp = max(grouped)
-        last_bars = {row["symbol"]: row for row in grouped[last_timestamp]}
+        final_date = trade_dates[-1]
+        terminal_timestamp = max(grouped)
+        if self.config.force_close_at_end:
+            for symbol, position in list(positions.items()):
+                latest = latest_bars.get(symbol)
+                mark_timestamp, latest_bar = latest if latest else (
+                    position["entry_datetime"], None,
+                )
+                final_bar = (
+                    latest_bar
+                    if mark_timestamp.date() == final_date
+                    else None
+                )
+                if (
+                    last_sell_attempt.get(symbol) == terminal_timestamp
+                    and position.get("exit_block_reason")
+                ):
+                    continue
+                context = daily_context.get((symbol, final_date)) or {}
+                block_reason = _sell_block_reason(
+                    symbol=symbol,
+                    bar=final_bar,
+                    previous_close=float(context.get("previous_close") or 0),
+                    symbol_name=self.config.symbol_names.get(symbol, ""),
+                    fill="signal_minute_close",
+                )
+                if block_reason is not None:
+                    execution[block_reason] += 1
+                    position["exit_block_reason"] = block_reason
+                    continue
+                position["exit_reason"] = "end_of_backtest"
+                close_position(
+                    symbol,
+                    position,
+                    final_bar,
+                    "signal_minute_close",
+                    mark_timestamp,
+                )
+
+        open_positions: list[dict] = []
         for symbol, position in positions.items():
-            bar = last_bars.get(symbol, {})
-            close = float(bar.get("close") or position["entry_price"])
-            price = close * (1 - self.config.slippage_bps / 10_000)
-            value = position["shares"] * price
-            net_proceeds = value * (1 - self.config.commission_pct - self.config.stamp_tax_pct)
-            cash += net_proceeds
-            pnl_amount = net_proceeds - position["entry_cost"]
-            pnl_pct = pnl_amount / position["entry_cost"] if position["entry_cost"] else 0.0
-            trades.append({
+            latest = latest_bars.get(symbol)
+            mark_timestamp, mark_bar = latest if latest else (
+                position["entry_datetime"], {},
+            )
+            mark_price = float(mark_bar.get("close") or position["entry_price"])
+            market_value = position["shares"] * mark_price
+            open_positions.append({
                 "symbol": symbol,
                 "entry_datetime": position["entry_datetime"].isoformat(sep=" "),
                 "entry_date": str(position["entry_date"]),
-                "entry_price": round(position["entry_price"], 4),
-                "exit_datetime": last_timestamp.isoformat(sep=" "),
-                "exit_date": str(last_timestamp.date()),
-                "exit_price": round(price, 4),
-                "shares": position["shares"],
-                "entry_cost": round(position["entry_cost"], 2),
-                "pnl_amount": round(pnl_amount, 2),
-                "pnl_pct": round(pnl_pct, 6),
-                "max_floating_gain_pct": round(position["max_floating_gain_pct"], 6),
-                "max_floating_loss_pct": round(position["max_floating_loss_pct"], 6),
-                "duration": (last_timestamp.date() - position["entry_date"]).days,
-                "entry_reason": position["entry_reason"],
-                "exit_reason": "end_of_backtest",
+                "entry_price": round(float(position["entry_price"]), 4),
+                "shares": int(position["shares"]),
+                "mark_datetime": mark_timestamp.isoformat(sep=" "),
+                "mark_date": str(mark_timestamp.date()),
+                "mark_price": round(mark_price, 4),
+                "market_value": round(market_value, 2),
+                "unrealized_pnl_amount": round(
+                    market_value - position["entry_cost"], 2,
+                ),
+                "unrealized_pnl_pct": round(
+                    market_value / position["entry_cost"] - 1.0,
+                    6,
+                ) if position["entry_cost"] else 0.0,
+                "exit_block_reason": position.get("exit_block_reason"),
             })
-        positions.clear()
+        final_equity = cash + sum(
+            float(position["market_value"]) for position in open_positions
+        )
         if current_date is not None:
             snapshot(current_date)
         return {
-            "cash": cash, "trades": trades,
+            "cash": cash,
+            "final_equity": final_equity,
+            "trades": trades,
+            "open_positions": open_positions,
+            "execution": execution,
             "equity_curve": equity_curve, "drawdown_curve": drawdown_curve,
         }
 
@@ -758,7 +1177,7 @@ class MinutePortfolioService:
 
     @classmethod
     def _stats(cls, executed: dict, config: MinutePortfolioConfig) -> dict:
-        final_equity = float(executed["cash"])
+        final_equity = float(executed.get("final_equity", executed["cash"]))
         total_return = final_equity / config.initial_capital - 1.0
         days = max((config.end - config.start).days, 1)
         annual_return = (
@@ -892,9 +1311,6 @@ class MinutePortfolioService:
             progress = 650 + round(done / max(total, 1) * 300)
             emit(progress, f"撮合交易日 {done}/{total} ({trading_day})", equity)
 
-        executed = MinutePortfolioEngine(config).run(
-            raw_rows, contexts, progress_callback=on_trade,
-        )
         name_map: dict[str, str] = {}
         get_name_map = getattr(self.repo, "get_name_map", None)
         if callable(get_name_map):
@@ -906,14 +1322,27 @@ class MinutePortfolioService:
                 name_map = get_name_map(name_symbols) or {}
             except Exception:
                 name_map = {}
+        engine_config = replace(config, symbol_names={
+            LocalMinuteParquetRepository._symbol(str(symbol)): str(name)
+            for symbol, name in name_map.items()
+        })
+        executed = MinutePortfolioEngine(engine_config).run(
+            raw_rows, contexts, progress_callback=on_trade,
+        )
         for trade in executed["trades"]:
             name = name_map.get(str(trade["symbol"]))
             if name:
                 trade["name"] = str(name)
-        emit(950, "计算统计与基准", executed["cash"])
+        for position in executed.get("open_positions", []):
+            name = name_map.get(str(position["symbol"]))
+            if name:
+                position["name"] = str(name)
+        final_equity = float(executed.get("final_equity", executed["cash"]))
+        emit(950, "计算统计与基准", final_equity)
         equity_curve = executed.get("equity_curve") or [{
-            "date": str(config.end), "value": round(float(executed["cash"]), 2),
-            "cash": round(float(executed["cash"]), 2), "positions": 0,
+            "date": str(config.end), "value": round(final_equity, 2),
+            "cash": round(float(executed["cash"]), 2),
+            "positions": len(executed.get("open_positions", [])),
         }]
         drawdown_curve = executed.get("drawdown_curve") or [{"date": str(config.end), "value": 0.0}]
         executed["equity_curve"] = equity_curve
@@ -923,14 +1352,20 @@ class MinutePortfolioService:
             "config": {"engine": "minute_portfolio", "frequency": "1m", "symbols": config.symbols,
                        "initial_capital": config.initial_capital, "max_positions": config.max_positions,
                        "cash_reserve_ratio": config.cash_reserve_ratio,
-                       "max_buy_volume_ratio": config.max_buy_volume_ratio},
+                       "max_buy_volume_ratio": config.max_buy_volume_ratio,
+                       "candidate_sort": config.candidate_sort,
+                       "entry_fill": config.entry_fill,
+                       "exit_fill": config.exit_fill,
+                       "force_close_at_end": config.force_close_at_end},
             "stats": self._stats(executed, config),
             "equity_curve": equity_curve,
             "drawdown_curve": drawdown_curve,
             "benchmark_curve": self._benchmark(config.start, config.end),
             "trades": executed["trades"],
+            "open_positions": executed.get("open_positions", []),
+            "execution": executed.get("execution", {}),
             "per_symbol_stats": self._per_symbol(executed["trades"]),
             "strategy_info": {"id": "opening_volume_portfolio", "name": "早盘放量组合", "source": "native"},
         }
-        emit(1000, "完成", executed["cash"])
+        emit(1000, "完成", final_equity)
         return result

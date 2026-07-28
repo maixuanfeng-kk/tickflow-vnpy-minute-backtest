@@ -82,3 +82,18 @@ def test_partial_override_keeps_other_default():
     detail = _strategy_detail(s, overrides={"entry_signals": ["signal_x"]})
     assert detail["entry_signals"] == ["signal_x"]
     assert detail["exit_signals"] == ["signal_ma20_breakdown"]
+
+
+def test_saved_risk_overrides_are_reflected_in_strategy_detail():
+    s = _make_strategy(entry_signals=[], exit_signals=[])
+    overrides = {
+        "take_profit": 0.10,
+        "trailing_stop": -0.03,
+        "trailing_take_profit_activate": 0.08,
+        "trailing_take_profit_drawdown": 0.02,
+    }
+
+    detail = _strategy_detail(s, overrides=overrides)
+
+    for key, value in overrides.items():
+        assert detail[key] == value

@@ -22,6 +22,8 @@ def test_opening_volume_strategy_is_registered_with_editable_defaults():
 
     assert strategy.meta["timeframes"] == ["1m"]
     assert strategy.meta["scanner_backend"] == "opening_volume"
+    assert strategy.basic_filter["enabled"] is False
+    assert strategy.meta["scoring"] == {"volume_ratio": 1.0, "today_return": 0.0}
     assert {item["id"]: item["default"] for item in strategy.meta["params"]} == {
         "scan_start_time": "09:30",
         "scan_end_time": "09:59",

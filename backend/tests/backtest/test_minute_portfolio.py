@@ -8,7 +8,10 @@ from app.backtest.minute_portfolio import (
     MinutePortfolioConfig,
     MinutePortfolioEngine,
     MinutePortfolioService,
+    OpeningVolumeScanConfig,
+    OpeningVolumeScanService,
     OpeningVolumeStrategyParams,
+    _buy_block_reason,
     _load_rows_and_context,
     entry_reason,
     is_in_scan_window,
@@ -334,6 +337,85 @@ def test_rank_candidates_orders_volume_then_return_then_symbol() -> None:
     ]
 
 
+def test_rank_candidates_scores_with_weights_and_applies_score_bounds() -> None:
+    rows = rank_candidates(
+        [
+            {"symbol": "600000.SH", "volume_ratio": 3.0, "today_return": 0.01},
+            {"symbol": "600001.SH", "volume_ratio": 2.0, "today_return": 0.04},
+            {"symbol": "600002.SH", "volume_ratio": 1.5, "today_return": 0.02},
+        ],
+        mode="score",
+        weights={"volume_ratio": 0.0, "today_return": 1.0},
+        score_min=60.0,
+    )
+
+    assert [row["symbol"] for row in rows] == ["600001.SH"]
+
+
+def test_rank_candidates_follows_watchlist_order_then_symbol() -> None:
+    rows = rank_candidates(
+        [
+            {"symbol": "600002.SH", "volume_ratio": 3.0, "today_return": 0.04},
+            {"symbol": "600003.SH", "volume_ratio": 2.0, "today_return": 0.03},
+            {"symbol": "600001.SH", "volume_ratio": 1.5, "today_return": 0.02},
+        ],
+        mode="watchlist_order",
+        watchlist_order=["600001.SH", "600002.SH"],
+    )
+
+    assert [row["symbol"] for row in rows] == [
+        "600001.SH",
+        "600002.SH",
+        "600003.SH",
+    ]
+
+
+def test_rank_candidates_keeps_duplicate_watchlist_symbols_ahead_of_unlisted_symbols() -> None:
+    rows = rank_candidates(
+        [
+            {"symbol": "000001.SZ", "volume_ratio": 3.0, "today_return": 0.04},
+            {"symbol": "600003.SH", "volume_ratio": 2.0, "today_return": 0.03},
+            {"symbol": "600002.SH", "volume_ratio": 1.5, "today_return": 0.02},
+            {"symbol": "600001.SH", "volume_ratio": 1.0, "today_return": 0.01},
+        ],
+        mode="watchlist_order",
+        watchlist_order=["600001.SH", "600001.SH", "600003.SH"],
+    )
+
+    assert [row["symbol"] for row in rows] == [
+        "600001.SH",
+        "600003.SH",
+        "000001.SZ",
+        "600002.SH",
+    ]
+
+
+def test_rank_candidates_scores_mixed_weights_with_max_bound_and_full_tie_break() -> None:
+    rows = rank_candidates(
+        [
+            {"symbol": "600006.SH", "volume_ratio": 3.0, "today_return": 0.03, "previous_return": 0.03},
+            {"symbol": "600005.SH", "volume_ratio": 3.0, "today_return": 0.01, "previous_return": 0.01},
+            {"symbol": "600004.SH", "volume_ratio": 2.0, "today_return": 0.03, "previous_return": 0.01},
+            {"symbol": "600003.SH", "volume_ratio": 2.0, "today_return": 0.01, "previous_return": 0.03},
+            {"symbol": "600002.SH", "volume_ratio": 2.0, "today_return": 0.01, "previous_return": 0.03},
+            {"symbol": "600001.SH", "volume_ratio": 1.0, "today_return": 0.03, "previous_return": 0.03},
+            {"symbol": "600000.SH", "volume_ratio": 1.5, "today_return": 0.01, "previous_return": 0.01},
+        ],
+        mode="score",
+        weights={"volume_ratio": 0.5, "today_return": 0.25, "previous_return": 0.25},
+        score_max=50.0,
+    )
+
+    assert [row["symbol"] for row in rows] == [
+        "600005.SH",
+        "600004.SH",
+        "600002.SH",
+        "600003.SH",
+        "600001.SH",
+        "600000.SH",
+    ]
+
+
 def test_engine_fills_top_eight_candidates_at_the_next_minute_open() -> None:
     symbols = [f"00000{i}.SZ" for i in range(1, 10)]
     day = date(2026, 1, 5)
@@ -372,6 +454,168 @@ def test_engine_fills_top_eight_candidates_at_the_next_minute_open() -> None:
     assert len(result["trades"]) == 8
     assert all(trade["entry_datetime"].endswith("09:31:00") for trade in result["trades"])
     assert all(trade["shares"] % 100 == 0 for trade in result["trades"])
+
+
+def _opening_candidates(specs: list[tuple[str, float, float, float]]) -> tuple[list[dict], dict]:
+    day = date(2026, 1, 5)
+    rows: list[dict] = []
+    contexts = {}
+    for symbol, volume_ratio, today_return, cumulative_amount in specs:
+        close = 10.0 * (1 + today_return)
+        rows.extend([
+            {
+                "symbol": symbol, "datetime": datetime(2026, 1, 5, 9, 30),
+                "open": close, "high": 10.6, "low": close, "close": close,
+                "volume": volume_ratio * 100, "cumulative_volume": volume_ratio * 100,
+                "previous_cumulative_volume": 100.0,
+                "amount": cumulative_amount, "cumulative_amount": cumulative_amount,
+            },
+            {
+                "symbol": symbol, "datetime": datetime(2026, 1, 5, 9, 31),
+                "open": close, "high": close, "low": close, "close": close,
+                "volume": 10_000.0, "previous_cumulative_volume": 200.0,
+                "amount": 100_000.0,
+            },
+        ])
+        contexts[(symbol, day)] = {
+            "previous_open": 11.0,
+            "previous_close": 10.0,
+            "previous_high": 10.5,
+            "previous_change_pct": -0.02,
+            "previous_ma5": 9.0,
+        }
+    return rows, contexts
+
+
+def test_engine_defaults_to_volume_ratio_candidate_sort() -> None:
+    specs = [
+        ("600000.SH", 3.0, 0.01, 100_000_000.0),
+        ("600001.SH", 2.0, 0.04, 100_000_000.0),
+    ]
+    rows, contexts = _opening_candidates(specs)
+
+    result = MinutePortfolioEngine(MinutePortfolioConfig(
+        symbols=[symbol for symbol, *_ in specs],
+        max_positions=1,
+    )).run(rows, contexts)
+
+    assert [trade["symbol"] for trade in result["trades"]] == ["600000.SH"]
+
+
+def test_opening_volume_scan_defaults_to_volume_ratio_candidate_sort(monkeypatch) -> None:
+    day = date(2026, 1, 5)
+    monkeypatch.setattr(
+        "app.backtest.minute_portfolio.watchlist.list_symbols",
+        lambda: [{"symbol": "600000.SH"}, {"symbol": "600001.SH"}],
+    )
+    rows = [
+        {
+            "symbol": "600000.SH", "datetime": datetime(2026, 1, 5, 9, 30),
+            "open": 10.2, "high": 10.6, "low": 10.0, "close": 10.2,
+            "volume": 200.0, "cumulative_volume": 200.0,
+            "previous_cumulative_volume": 100.0,
+        },
+        {
+            "symbol": "600001.SH", "datetime": datetime(2026, 1, 5, 9, 30),
+            "open": 10.2, "high": 10.6, "low": 10.0, "close": 10.2,
+            "volume": 300.0, "cumulative_volume": 300.0,
+            "previous_cumulative_volume": 100.0,
+        },
+    ]
+    contexts = {
+        (symbol, day): {
+            "previous_open": 11.0,
+            "previous_close": 10.0,
+            "previous_high": 10.5,
+            "previous_change_pct": -0.02,
+        }
+        for symbol in ["600000.SH", "600001.SH"]
+    }
+    monkeypatch.setattr(
+        "app.backtest.minute_portfolio._load_rows_and_context",
+        lambda *args: (rows, contexts),
+    )
+
+    result = OpeningVolumeScanService(object()).run(OpeningVolumeScanConfig(
+        as_of=day,
+        strategy_params=OpeningVolumeStrategyParams(),
+    ))
+
+    assert [row["symbol"] for row in result["rows"]] == ["600001.SH", "600000.SH"]
+
+
+def test_engine_applies_supported_basic_filters_before_entry() -> None:
+    specs = [
+        ("600000.SH", 2.0, 0.02, 200_000_000.0),
+        ("600001.SH", 2.0, 0.02, 200_000_000.0),
+        ("000001.SZ", 2.0, 0.02, 200_000_000.0),
+        ("600002.SH", 2.0, -0.60, 200_000_000.0),
+        ("600003.SH", 2.0, 0.02, 50_000_000.0),
+    ]
+    rows, contexts = _opening_candidates(specs)
+    result = MinutePortfolioEngine(MinutePortfolioConfig(
+        symbols=[symbol for symbol, *_ in specs],
+        max_positions=5,
+        basic_filter={
+            "enabled": True,
+            "price_min": 5.0,
+            "amount_min": 100_000_000.0,
+            "boards": ["沪主板"],
+            "exclude_st": True,
+        },
+        symbol_names={"600001.SH": "*ST 示例"},
+    )).run(rows, contexts)
+
+    assert [trade["symbol"] for trade in result["trades"]] == ["600000.SH"]
+
+
+def test_engine_scores_same_minute_candidates_and_applies_score_bounds() -> None:
+    specs = [
+        ("600000.SH", 3.0, 0.01, 100_000_000.0),
+        ("600001.SH", 2.0, 0.04, 100_000_000.0),
+        ("600002.SH", 1.5, 0.02, 100_000_000.0),
+    ]
+    rows, contexts = _opening_candidates(specs)
+    result = MinutePortfolioEngine(MinutePortfolioConfig(
+        symbols=[symbol for symbol, *_ in specs],
+        max_positions=1,
+        candidate_sort="score",
+        scoring={"volume_ratio": 0.0, "today_return": 1.0},
+        score_min=60.0,
+    )).run(rows, contexts)
+
+    assert [trade["symbol"] for trade in result["trades"]] == ["600001.SH"]
+
+
+def test_engine_uses_candidate_sort_watchlist_order_for_same_minute_candidates() -> None:
+    specs = [
+        ("600000.SH", 3.0, 0.01, 100_000_000.0),
+        ("600001.SH", 2.0, 0.04, 100_000_000.0),
+    ]
+    rows, contexts = _opening_candidates(specs)
+
+    result = MinutePortfolioEngine(MinutePortfolioConfig(
+        symbols=["600001.SH", "600000.SH"],
+        max_positions=1,
+        candidate_sort="watchlist_order",
+    )).run(rows, contexts)
+
+    assert [trade["symbol"] for trade in result["trades"]] == ["600001.SH"]
+
+
+def test_engine_does_not_score_or_filter_when_candidates_fit_available_slots() -> None:
+    specs = [("600000.SH", 2.0, 0.02, 100_000_000.0)]
+    rows, contexts = _opening_candidates(specs)
+
+    result = MinutePortfolioEngine(MinutePortfolioConfig(
+        symbols=["600000.SH"],
+        max_positions=1,
+        candidate_sort="score",
+        scoring={"volume_ratio": 1.0},
+        score_min=60.0,
+    )).run(rows, contexts)
+
+    assert [trade["symbol"] for trade in result["trades"]] == ["600000.SH"]
 
 
 def _breakout_result(highs: tuple[float, float]):
@@ -535,12 +779,12 @@ def test_engine_position_target_follows_current_marked_equity() -> None:
     assert second_trade["entry_cost"] == 53_000.0
 
 
-def test_engine_zero_reserve_keeps_fixed_initial_capital_target() -> None:
+def test_engine_zero_reserve_still_uses_current_marked_equity() -> None:
     trades = _two_day_entries_with_marked_gain(cash_reserve_ratio=0.0)
 
     second_trade = next(trade for trade in trades if trade["symbol"] == "000002.SZ")
-    assert second_trade["shares"] == 5_000
-    assert second_trade["entry_cost"] == 50_000.0
+    assert second_trade["shares"] == 5_500
+    assert second_trade["entry_cost"] == 55_000.0
 
 
 def _single_entry_trade(*, execution_volume: float, **config_values):
@@ -712,6 +956,350 @@ def test_engine_skips_intraday_ma5_exit_without_four_previous_closes() -> None:
     assert trade["exit_reason"] == "end_of_backtest"
 
 
+def _risk_control_trade(
+    *,
+    day_one_high: float = 10.2,
+    day_two_close: float = 10.0,
+    stop_loss_pct: float = 0.5,
+    **config_overrides,
+) -> dict:
+    symbol = "600000.SH"
+    rows = [
+        {
+            "symbol": symbol, "datetime": datetime(2026, 1, 5, 9, 30),
+            "open": 10.0, "high": 10.6, "low": 10.0, "close": 10.2,
+            "volume": 150.0, "previous_cumulative_volume": 100.0,
+        },
+        {
+            "symbol": symbol, "datetime": datetime(2026, 1, 5, 9, 31),
+            "open": 10.0, "high": day_one_high, "low": 10.0, "close": 10.1,
+            "volume": 10_000.0, "previous_cumulative_volume": 200.0,
+        },
+        {
+            "symbol": symbol, "datetime": datetime(2026, 1, 6, 9, 30),
+            "open": day_two_close, "high": day_two_close, "low": day_two_close,
+            "close": day_two_close, "volume": 1_000.0,
+            "previous_cumulative_volume": 100.0,
+        },
+        {
+            "symbol": symbol, "datetime": datetime(2026, 1, 6, 9, 31),
+            "open": day_two_close, "high": day_two_close, "low": day_two_close,
+            "close": day_two_close, "volume": 1_000.0,
+            "previous_cumulative_volume": 200.0,
+        },
+    ]
+    contexts = {
+        (symbol, date(2026, 1, 5)): {
+            "previous_open": 11.0, "previous_close": 10.0,
+            "previous_high": 10.5, "previous_change_pct": -0.02,
+            "previous_closes": [9.0, 9.0, 9.0, 9.0], "previous_ma5": 9.0,
+        },
+        (symbol, date(2026, 1, 6)): {
+            "previous_open": 10.0, "previous_close": 10.1,
+            "previous_high": day_one_high, "previous_change_pct": 0.01,
+            "previous_closes": [9.0, 9.0, 9.0, 9.0], "previous_ma5": 9.0,
+        },
+    }
+    config = MinutePortfolioConfig(
+        symbols=[symbol],
+        initial_capital=100_000.0,
+        max_positions=1,
+        commission_pct=0.0,
+        stamp_tax_pct=0.0,
+        slippage_bps=0.0,
+        strategy_params=OpeningVolumeStrategyParams(stop_loss_pct=stop_loss_pct),
+        **config_overrides,
+    )
+    return MinutePortfolioEngine(config).run(rows, contexts)["trades"][0]
+
+
+@pytest.mark.parametrize(
+    ("entry_fill", "expected_time", "expected_price"),
+    [
+        ("signal_minute_close", "09:30:00", 10.2),
+        ("next_minute_open", "09:31:00", 10.3),
+    ],
+)
+def test_engine_uses_configured_minute_entry_fill(
+    entry_fill: str,
+    expected_time: str,
+    expected_price: float,
+) -> None:
+    symbol = "600000.SH"
+    day = date(2026, 1, 5)
+    rows = [
+        {
+            "symbol": symbol, "datetime": datetime(2026, 1, 5, 9, 30),
+            "open": 10.0, "high": 10.6, "low": 10.0, "close": 10.2,
+            "volume": 150.0, "previous_cumulative_volume": 100.0,
+        },
+        {
+            "symbol": symbol, "datetime": datetime(2026, 1, 5, 9, 31),
+            "open": 10.3, "high": 10.4, "low": 10.2, "close": 10.3,
+            "volume": 20_000.0, "previous_cumulative_volume": 200.0,
+        },
+    ]
+    contexts = {(symbol, day): {
+        "previous_open": 11.0, "previous_close": 10.0,
+        "previous_high": 10.5, "previous_change_pct": -0.02,
+        "previous_closes": [9.0, 9.0, 9.0, 9.0],
+    }}
+    trade = MinutePortfolioEngine(MinutePortfolioConfig(
+        symbols=[symbol], max_positions=1, entry_fill=entry_fill,
+        commission_pct=0.0, stamp_tax_pct=0.0, slippage_bps=0.0,
+    )).run(rows, contexts)["trades"][0]
+
+    assert trade["entry_datetime"].endswith(expected_time)
+    assert trade["entry_price"] == expected_price
+
+
+def test_failed_next_minute_buy_expires_and_a_later_signal_can_retry() -> None:
+    symbol = "600000.SH"
+    day = date(2026, 1, 5)
+    rows = [
+        {
+            "symbol": symbol, "datetime": datetime(2026, 1, 5, 9, 30),
+            "open": 10.0, "high": 10.6, "low": 10.0, "close": 10.2,
+            "volume": 150.0, "cumulative_volume": 150.0,
+            "previous_cumulative_volume": 100.0,
+        },
+        {
+            "symbol": symbol, "datetime": datetime(2026, 1, 5, 9, 31),
+            "open": 10.3, "high": 10.4, "low": 10.2, "close": 10.3,
+            "volume": 0.0, "cumulative_volume": 150.0,
+            "previous_cumulative_volume": 200.0,
+        },
+        {
+            "symbol": symbol, "datetime": datetime(2026, 1, 5, 9, 32),
+            "open": 10.3, "high": 10.7, "low": 10.2, "close": 10.4,
+            "volume": 300.0, "cumulative_volume": 450.0,
+            "previous_cumulative_volume": 250.0,
+        },
+        {
+            "symbol": symbol, "datetime": datetime(2026, 1, 5, 9, 33),
+            "open": 10.5, "high": 10.6, "low": 10.4, "close": 10.5,
+            "volume": 10_000.0, "cumulative_volume": 10_450.0,
+            "previous_cumulative_volume": 300.0,
+        },
+    ]
+    contexts = {(symbol, day): {
+        "previous_open": 11.0, "previous_close": 10.0,
+        "previous_high": 10.5, "previous_change_pct": -0.02,
+        "previous_closes": [9.0, 9.0, 9.0, 9.0],
+    }}
+    result = MinutePortfolioEngine(MinutePortfolioConfig(
+        symbols=[symbol], max_positions=1,
+        commission_pct=0.0, stamp_tax_pct=0.0, slippage_bps=0.0,
+        strategy_params=OpeningVolumeStrategyParams(
+            enable_branch_b=False,
+            enable_branch_c=False,
+        ),
+    )).run(rows, contexts)
+
+    assert result["trades"][0]["entry_datetime"].endswith("09:33:00")
+
+
+def _market_constraint_result(*, execution_bar: dict, previous_close: float) -> dict:
+    symbol = "600000.SH"
+    day = date(2026, 1, 5)
+    rows = [
+        {
+            "symbol": symbol, "datetime": datetime(2026, 1, 5, 9, 30),
+            "open": 10.0, "high": 10.6, "low": 10.0, "close": 10.2,
+            "volume": 150.0, "previous_cumulative_volume": 100.0,
+        },
+        {
+            "symbol": symbol, "datetime": datetime(2026, 1, 5, 9, 31),
+            "volume": 100.0, "previous_cumulative_volume": 10_000.0,
+            **execution_bar,
+        },
+    ]
+    contexts = {(symbol, day): {
+        "previous_open": 11.0, "previous_close": previous_close,
+        "previous_high": 10.5, "previous_change_pct": -0.02,
+        "previous_closes": [9.0, 9.0, 9.0, 9.0],
+    }}
+    return MinutePortfolioEngine(MinutePortfolioConfig(
+        symbols=[symbol], max_positions=1,
+        commission_pct=0.0, stamp_tax_pct=0.0, slippage_bps=0.0,
+        strategy_params=OpeningVolumeStrategyParams(
+            enable_branch_b=False,
+            enable_branch_c=False,
+        ),
+    )).run(rows, contexts)
+
+
+def test_engine_rejects_one_price_limit_up_buy() -> None:
+    result = _market_constraint_result(
+        execution_bar={"open": 11.0, "high": 11.0, "low": 11.0, "close": 11.0},
+        previous_close=10.0,
+    )
+
+    assert result["trades"] == []
+    assert result["execution"]["buy_limit_up"] == 1
+
+
+def test_missing_execution_bar_is_a_suspended_buy() -> None:
+    assert _buy_block_reason(
+        symbol="600000.SH",
+        bar=None,
+        previous_close=10.0,
+        symbol_name="",
+        fill="next_minute_open",
+    ) == "buy_suspended"
+
+
+@pytest.mark.parametrize(
+    ("symbol", "name", "limit_price"),
+    [
+        ("600000.SH", "", 11.0),
+        ("600000.SH", "*ST示例", 10.5),
+        ("688001.SH", "", 12.0),
+        ("300001.SZ", "", 12.0),
+        ("830001.BJ", "", 13.0),
+    ],
+)
+def test_buy_limit_check_uses_board_and_st_price_bands(
+    symbol: str,
+    name: str,
+    limit_price: float,
+) -> None:
+    bar = {
+        "open": limit_price,
+        "high": limit_price,
+        "low": limit_price,
+        "close": limit_price,
+        "volume": 1_000.0,
+    }
+
+    assert _buy_block_reason(
+        symbol=symbol,
+        bar=bar,
+        previous_close=10.0,
+        symbol_name=name,
+        fill="next_minute_open",
+    ) == "buy_limit_up"
+
+
+def test_engine_keeps_limit_down_exit_pending_until_a_tradable_bar() -> None:
+    symbol = "600000.SH"
+    rows = [
+        {
+            "symbol": symbol, "datetime": datetime(2026, 1, 5, 9, 30),
+            "open": 10.0, "high": 10.6, "low": 10.0, "close": 10.2,
+            "volume": 150.0, "previous_cumulative_volume": 100.0,
+        },
+        {
+            "symbol": symbol, "datetime": datetime(2026, 1, 5, 9, 31),
+            "open": 10.0, "high": 10.1, "low": 10.0, "close": 10.0,
+            "volume": 10_000.0, "previous_cumulative_volume": 10_000.0,
+        },
+        {
+            "symbol": symbol, "datetime": datetime(2026, 1, 6, 9, 30),
+            "open": 9.0, "high": 9.0, "low": 9.0, "close": 9.0,
+            "volume": 1_000.0, "previous_cumulative_volume": 100.0,
+        },
+        {
+            "symbol": symbol, "datetime": datetime(2026, 1, 6, 9, 31),
+            "open": 9.0, "high": 9.0, "low": 9.0, "close": 9.0,
+            "volume": 1_000.0, "previous_cumulative_volume": 200.0,
+        },
+        {
+            "symbol": symbol, "datetime": datetime(2026, 1, 7, 9, 30),
+            "open": 9.5, "high": 9.6, "low": 9.4, "close": 9.5,
+            "volume": 1_000.0, "previous_cumulative_volume": 100.0,
+        },
+    ]
+    contexts = {
+        (symbol, date(2026, 1, 5)): {
+            "previous_open": 11.0, "previous_close": 10.0,
+            "previous_high": 10.5, "previous_change_pct": -0.02,
+            "previous_closes": [9.0, 9.0, 9.0, 9.0],
+        },
+        (symbol, date(2026, 1, 6)): {
+            "previous_open": 10.0, "previous_close": 10.0,
+            "previous_high": 10.1, "previous_change_pct": 0.0,
+            "previous_closes": [9.0, 9.0, 9.0, 9.0],
+        },
+        (symbol, date(2026, 1, 7)): {
+            "previous_open": 9.0, "previous_close": 9.0,
+            "previous_high": 9.0, "previous_change_pct": -0.10,
+            "previous_closes": [9.0, 9.0, 9.0, 9.0],
+        },
+    }
+    result = MinutePortfolioEngine(MinutePortfolioConfig(
+        symbols=[symbol], max_positions=1,
+        commission_pct=0.0, stamp_tax_pct=0.0, slippage_bps=0.0,
+        strategy_params=OpeningVolumeStrategyParams(stop_loss_pct=0.05),
+    )).run(rows, contexts)
+
+    assert result["trades"][0]["exit_datetime"] == "2026-01-07 09:30:00"
+    assert result["execution"]["sell_limit_down"] == 1
+
+
+@pytest.mark.parametrize(
+    ("config_overrides", "day_one_high", "day_two_close", "expected_reason"),
+    [
+        ({"take_profit_pct": 0.10}, 10.2, 11.1, "take_profit"),
+        ({"trailing_stop_pct": 0.10}, 12.0, 10.7, "trailing_stop"),
+        (
+            {
+                "trailing_take_profit_activate_pct": 0.10,
+                "trailing_take_profit_drawdown_pct": 0.05,
+            },
+            12.0,
+            11.3,
+            "trailing_take_profit",
+        ),
+        ({"max_hold_days": 1}, 10.2, 10.1, "max_hold_days"),
+    ],
+)
+def test_engine_applies_minute_native_risk_controls(
+    config_overrides: dict,
+    day_one_high: float,
+    day_two_close: float,
+    expected_reason: str,
+) -> None:
+    trade = _risk_control_trade(
+        day_one_high=day_one_high,
+        day_two_close=day_two_close,
+        **config_overrides,
+    )
+
+    assert trade["exit_reason"] == expected_reason
+    assert trade["exit_datetime"] == "2026-01-06 09:31:00"
+
+
+def test_zero_stop_loss_disables_the_stop_loss_rule() -> None:
+    trade = _risk_control_trade(day_two_close=9.0, stop_loss_pct=0.0)
+    assert trade["exit_reason"] == "end_of_backtest"
+
+
+def test_risk_exit_has_priority_when_ma_exit_triggers_at_the_same_minute() -> None:
+    trade = _risk_control_trade(day_two_close=8.0, stop_loss_pct=0.10)
+    assert trade["exit_reason"] == "stop_loss"
+
+
+@pytest.mark.parametrize(
+    ("exit_fill", "expected_time"),
+    [
+        ("signal_minute_close", "2026-01-06 09:30:00"),
+        ("next_minute_open", "2026-01-06 09:31:00"),
+    ],
+)
+def test_engine_uses_configured_minute_exit_fill(
+    exit_fill: str,
+    expected_time: str,
+) -> None:
+    trade = _risk_control_trade(
+        day_two_close=8.0,
+        stop_loss_pct=0.10,
+        exit_fill=exit_fill,
+    )
+
+    assert trade["exit_datetime"] == expected_time
+
+
 def test_engine_closes_positions_at_the_end_of_the_backtest() -> None:
     day = date(2026, 1, 5)
     rows = [
@@ -742,6 +1330,133 @@ def test_engine_closes_positions_at_the_end_of_the_backtest() -> None:
 
     assert result["trades"][-1]["exit_reason"] == "end_of_backtest"
     assert result["trades"][-1]["exit_datetime"].endswith("09:31:00")
+
+
+def _last_day_signal_result(*, force_close_at_end: bool) -> dict:
+    symbol = "600000.SH"
+    day = date(2026, 1, 5)
+    rows = [
+        {
+            "symbol": symbol, "datetime": datetime(2026, 1, 5, 9, 30),
+            "open": 10.0, "high": 10.6, "low": 10.0, "close": 10.2,
+            "volume": 150.0, "previous_cumulative_volume": 100.0,
+        },
+        {
+            "symbol": symbol, "datetime": datetime(2026, 1, 5, 9, 31),
+            "open": 10.3, "high": 10.4, "low": 10.2, "close": 10.3,
+            "volume": 10_000.0, "previous_cumulative_volume": 10_000.0,
+        },
+    ]
+    contexts = {(symbol, day): {
+        "previous_open": 11.0, "previous_close": 10.0,
+        "previous_high": 10.5, "previous_change_pct": -0.02,
+        "previous_closes": [9.0, 9.0, 9.0, 9.0],
+    }}
+    return MinutePortfolioEngine(MinutePortfolioConfig(
+        symbols=[symbol], start=day, end=day, max_positions=1,
+        force_close_at_end=force_close_at_end,
+        commission_pct=0.0, stamp_tax_pct=0.0, slippage_bps=0.0,
+    )).run(rows, contexts)
+
+
+def _overnight_position_result(
+    *,
+    force_close_at_end: bool,
+    final_bar: dict | None = None,
+    suspend_on_final_day: bool = False,
+) -> tuple[dict, MinutePortfolioConfig]:
+    symbol = "600000.SH"
+    dummy_symbol = "000001.SZ"
+    start = date(2026, 1, 5)
+    end = date(2026, 1, 6)
+    last = final_bar or {"open": 10.7, "high": 10.9, "low": 10.6, "close": 10.8}
+    rows = [
+        {
+            "symbol": symbol, "datetime": datetime(2026, 1, 5, 9, 30),
+            "open": 10.0, "high": 10.6, "low": 10.0, "close": 10.2,
+            "volume": 150.0, "previous_cumulative_volume": 100.0,
+        },
+        {
+            "symbol": symbol, "datetime": datetime(2026, 1, 5, 9, 31),
+            "open": 10.0, "high": 10.1, "low": 10.0, "close": 10.0,
+            "volume": 10_000.0, "previous_cumulative_volume": 10_000.0,
+        },
+        ({
+            "symbol": dummy_symbol, "datetime": datetime(2026, 1, 6, 15, 0),
+            "open": 10.0, "high": 10.1, "low": 9.9, "close": 10.0,
+            "volume": 10_000.0, "previous_cumulative_volume": 10_000.0,
+        } if suspend_on_final_day else {
+            "symbol": symbol, "datetime": datetime(2026, 1, 6, 15, 0),
+            "volume": 10_000.0, "previous_cumulative_volume": 10_000.0,
+            **last,
+        }),
+    ]
+    contexts = {
+        (symbol, start): {
+            "previous_open": 11.0, "previous_close": 10.0,
+            "previous_high": 10.5, "previous_change_pct": -0.02,
+            "previous_closes": [9.0, 9.0, 9.0, 9.0],
+        },
+        (symbol, end): {
+            "previous_open": 10.0, "previous_close": 10.0,
+            "previous_high": 10.1, "previous_change_pct": 0.0,
+            "previous_closes": [1.0, 1.0, 1.0, 1.0],
+        },
+    }
+    config = MinutePortfolioConfig(
+        symbols=[symbol, dummy_symbol] if suspend_on_final_day else [symbol],
+        start=start, end=end, initial_capital=100_000.0, max_positions=1,
+        force_close_at_end=force_close_at_end,
+        commission_pct=0.0, stamp_tax_pct=0.0, slippage_bps=0.0,
+        strategy_params=OpeningVolumeStrategyParams(stop_loss_pct=0.0),
+    )
+    return MinutePortfolioEngine(config).run(rows, contexts), config
+
+
+def test_force_close_skips_new_entries_on_last_trading_day() -> None:
+    result = _last_day_signal_result(force_close_at_end=True)
+
+    assert result["trades"] == []
+    assert result["open_positions"] == []
+
+
+def test_disabled_force_close_returns_marked_open_position() -> None:
+    result, _ = _overnight_position_result(force_close_at_end=False)
+
+    assert result["trades"] == []
+    assert result["open_positions"][0]["mark_price"] == 10.8
+    assert result["final_equity"] == pytest.approx(
+        result["cash"] + result["open_positions"][0]["market_value"],
+    )
+
+
+def test_force_close_cannot_bypass_final_limit_down() -> None:
+    result, _ = _overnight_position_result(
+        force_close_at_end=True,
+        final_bar={"open": 9.0, "high": 9.0, "low": 9.0, "close": 9.0},
+    )
+
+    assert result["trades"] == []
+    assert result["open_positions"][0]["exit_block_reason"] == "sell_limit_down"
+
+
+def test_force_close_keeps_a_position_suspended_for_the_final_day() -> None:
+    result, _ = _overnight_position_result(
+        force_close_at_end=True,
+        suspend_on_final_day=True,
+    )
+
+    assert result["trades"] == []
+    assert result["open_positions"][0]["exit_block_reason"] == "sell_suspended"
+
+
+def test_open_positions_affect_equity_not_completed_trade_stats() -> None:
+    executed, config = _overnight_position_result(force_close_at_end=False)
+    stats = MinutePortfolioService._stats(executed, config)
+
+    assert stats["final_equity"] == executed["final_equity"]
+    assert stats["n_trades"] == 0
+    assert stats["win_rate"] == 0.0
 
 
 def test_engine_returns_net_trade_pnl_and_daily_equity() -> None:
@@ -857,23 +1572,27 @@ def test_service_reads_daily_and_minute_rows_and_returns_backtest_shape() -> Non
 
         def get_daily_batch(self, symbols, start, end, columns):
             return __import__("polars").DataFrame({
-                "symbol": ["600000.SH", "600000.SH"],
-                "date": [date(2026, 1, 2), date(2026, 1, 5)],
-                "open": [11.0, 10.0], "high": [10.5, 10.4],
-                "close": [10.0, 10.3], "ma5": [9.0, 9.1],
+                "symbol": ["600000.SH"] * 3,
+                "date": [date(2026, 1, 2), date(2026, 1, 5), date(2026, 1, 6)],
+                "open": [11.0, 10.0, 10.4], "high": [10.5, 10.4, 10.5],
+                "close": [10.0, 10.3, 10.4], "ma5": [9.0, 9.1, 9.2],
             })
 
         def get_minute_range(self, symbols, start, end, asset_type):
             self.minute_start = start
             return __import__("polars").DataFrame({
-                "symbol": ["600000.SH"] * 4,
+                "symbol": ["600000.SH"] * 5,
                 "datetime": [
                     datetime(2026, 1, 2, 9, 30), datetime(2026, 1, 2, 9, 31),
                     datetime(2026, 1, 5, 9, 30), datetime(2026, 1, 5, 9, 31),
+                    datetime(2026, 1, 6, 15, 0),
                 ],
-                "open": [10.0, 10.0, 10.0, 10.3], "high": [10.0, 10.0, 10.6, 10.4],
-                "low": [10.0, 10.0, 10.0, 10.2], "close": [10.0, 10.0, 10.2, 10.3],
-                "volume": [100.0, 100.0, 150.0, 100.0], "amount": [1000.0] * 4,
+                "open": [10.0, 10.0, 10.0, 10.3, 10.4],
+                "high": [10.0, 10.0, 10.6, 10.4, 10.5],
+                "low": [10.0, 10.0, 10.0, 10.2, 10.2],
+                "close": [10.0, 10.0, 10.2, 10.3, 10.4],
+                "volume": [100.0, 100.0, 150.0, 100.0, 100.0],
+                "amount": [1000.0] * 5,
             })
 
         def get_index_daily(self, symbol, start, end, columns):
@@ -918,6 +1637,47 @@ def test_service_reads_daily_and_minute_rows_and_returns_backtest_shape() -> Non
     assert result["per_symbol_stats"][0]["best"] == result["trades"][0]["max_floating_gain_pct"]
     assert result["per_symbol_stats"][0]["worst"] == result["trades"][0]["max_floating_loss_pct"]
     assert repo.minute_start <= date(2026, 1, 2)
+
+
+def test_service_applies_stock_names_before_st_filtering() -> None:
+    class Repo:
+        def get_name_map(self, symbols):
+            return {"600000.SH": "*ST 示例"}
+
+        def get_daily_batch(self, symbols, start, end, columns):
+            return pl.DataFrame({
+                "symbol": ["600000.SH", "600000.SH"],
+                "date": [date(2026, 1, 2), date(2026, 1, 5)],
+                "open": [11.0, 10.0], "high": [10.5, 10.4],
+                "close": [10.0, 10.3], "ma5": [9.0, 9.1],
+            })
+
+        def get_minute_range(self, symbols, start, end, asset_type):
+            return pl.DataFrame({
+                "symbol": ["600000.SH"] * 4,
+                "datetime": [
+                    datetime(2026, 1, 2, 9, 30), datetime(2026, 1, 2, 9, 31),
+                    datetime(2026, 1, 5, 9, 30), datetime(2026, 1, 5, 9, 31),
+                ],
+                "open": [10.0, 10.0, 10.0, 10.3],
+                "high": [10.0, 10.0, 10.6, 10.4],
+                "low": [10.0, 10.0, 10.0, 10.2],
+                "close": [10.0, 10.0, 10.2, 10.3],
+                "volume": [100.0, 100.0, 150.0, 100.0],
+                "amount": [1_000.0] * 4,
+            })
+
+        def get_index_daily(self, symbol, start, end, columns):
+            return pl.DataFrame()
+
+    result = MinutePortfolioService(Repo()).run(MinutePortfolioConfig(
+        symbols=["600000.SH"],
+        start=date(2026, 1, 5),
+        end=date(2026, 1, 5),
+        basic_filter={"enabled": True, "exclude_st": True},
+    ))
+
+    assert result["stats"]["total_trade_count"] == 0
 
 
 def test_per_symbol_best_and_worst_use_holding_excursions() -> None:

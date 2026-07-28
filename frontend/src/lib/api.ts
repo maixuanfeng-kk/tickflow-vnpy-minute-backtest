@@ -769,6 +769,22 @@ export interface StrategyBacktestTrade {
   exit_signal_id?: string | null
 }
 
+export interface StrategyBacktestOpenPosition {
+  symbol: string
+  name?: string
+  entry_date: string
+  entry_datetime: string
+  entry_price: number
+  shares: number
+  mark_date: string
+  mark_datetime: string
+  mark_price: number
+  market_value: number
+  unrealized_pnl_amount: number
+  unrealized_pnl_pct: number
+  exit_block_reason?: string | null
+}
+
 export interface StrategyBacktestResult {
   run_id: string
   config: Record<string, any>
@@ -777,6 +793,8 @@ export interface StrategyBacktestResult {
   drawdown_curve: { date: string; value: number }[]
   benchmark_curve?: { date: string; value: number; close?: number; name?: string; symbol?: string }[]
   trades: StrategyBacktestTrade[]
+  open_positions?: StrategyBacktestOpenPosition[]
+  execution?: Record<string, number>
   per_symbol_stats: {
     symbol: string
     name?: string

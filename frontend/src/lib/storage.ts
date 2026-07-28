@@ -100,6 +100,8 @@ export const storage = {
     matching: 'close_t' | 'open_t+1'
     entryFill: 'close_t' | 'open_t+1'
     exitFill: 'close_t' | 'open_t+1' | 'signal_next_minute'
+    candidateSort?: 'score' | 'volume_ratio' | 'watchlist_order'
+    forceCloseAtEnd?: boolean
     fees: string
     stampTax?: string
     slippage: string

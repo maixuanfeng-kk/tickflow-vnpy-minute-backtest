@@ -6,7 +6,7 @@
 
 **Architecture:** Reuse the existing `params` and `overrides` request schema, then adapt those values into `MinutePortfolioConfig`. Apply filtering and scoring at minute-candidate selection time, risk controls at the T+1 exit stage, and explicit symbols as a watchlist subset.
 
-**Tech Stack:** React 18, TypeScript, Vitest, FastAPI, Python dataclasses, Polars, pytest.
+**Tech Stack:** React 18, TypeScript, Node test runner, FastAPI, Python dataclasses, Polars, pytest.
 
 ---
 
@@ -17,11 +17,11 @@
 - Modify: `frontend/src/lib/backtestTask.ts`
 - Create: `frontend/src/pages/backtest/openingVolumeSettings.test.ts`
 
-- [ ] Add a failing Vitest test asserting that a `minute_native` opening-volume strategy exposes `params`, `filter`, `scoring`, `risk`, and `range`, but not `entry` or `exit`.
-- [ ] Add a failing Vitest test asserting that minute-portfolio query construction preserves an explicit symbol list.
-- [ ] Run `pnpm vitest run src/pages/backtest/openingVolumeSettings.test.ts` from `frontend`; expect both new assertions to fail.
+- [ ] Add a failing Node test asserting that a `minute_native` opening-volume strategy exposes `params`, `filter`, `scoring`, `risk`, and `range`, but not `entry` or `exit`.
+- [ ] Add a failing Node test asserting that minute-portfolio query construction preserves an explicit symbol list.
+- [ ] Run `node --test src/pages/backtest/openingVolumeSettings.test.ts` from `frontend`; expect both new assertions to fail.
 - [ ] Extract small pure helpers for visible tabs and query symbol serialization, then use them in the page/task code.
-- [ ] Re-run the focused Vitest file; expect it to pass.
+- [ ] Re-run the focused Node test file; expect it to pass.
 
 ### Task 2: Pass advanced settings through the minute API
 
