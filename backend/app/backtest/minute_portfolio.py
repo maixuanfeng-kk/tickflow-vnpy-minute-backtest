@@ -1,7 +1,7 @@
 """Pure rules for the opening-volume minute portfolio strategy."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from math import floor, isfinite
@@ -14,6 +14,7 @@ import numpy as np
 import polars as pl
 
 from app.services import watchlist
+from app.backtest.opening_volume_shared import evaluate_opening_volume_entry
 
 
 VOLUME_RATIO_MIN = 1.5
@@ -204,44 +205,18 @@ def entry_reason(
 ) -> str | None:
     """Return the first configured entry branch satisfied by a minute bar."""
     params = params or OpeningVolumeStrategyParams()
-    if (
-        params.enable_branch_a
-        and _passes_volume_filter(
-            branch_multiple=params.branch_a_volume_multiple,
-            legacy_multiple=params.volume_multiple,
-            volume_ratio=volume_ratio,
-        )
-        and _matches_candle_direction(
-            params.branch_a_previous_candle, previous_open, previous_close,
-        )
-        and crossed_previous_high
-    ):
-        return "previous_bearish_breakout"
-    if (
-        params.enable_branch_b
-        and _passes_volume_filter(
-            branch_multiple=params.branch_b_volume_multiple,
-            legacy_multiple=params.volume_multiple,
-            volume_ratio=volume_ratio,
-        )
-        and params.branch_b_today_return_min < today_return < params.branch_b_today_return_max
-        and previous_change_pct < params.branch_b_previous_return_max
-    ):
-        return "two_day_moderate_rise"
-    if (
-        params.enable_branch_c
-        and _passes_volume_filter(
-            branch_multiple=params.branch_c_volume_multiple,
-            legacy_multiple=params.volume_multiple,
-            volume_ratio=volume_ratio,
-        )
-        and _matches_candle_direction(
-            params.branch_c_previous_candle, previous_open, previous_close,
-        )
-        and previous_change_pct < params.branch_c_previous_return_max
-    ):
-        return "previous_moderate_rise"
-    return None
+    decision = evaluate_opening_volume_entry(
+        previous_open=previous_open,
+        previous_close=previous_close,
+        previous_high=0.0,
+        previous_change_pct=previous_change_pct,
+        today_close=previous_close * (1 + today_return),
+        minute_high=1.0 if crossed_previous_high else 0.0,
+        today_return=today_return,
+        volume_ratio=volume_ratio,
+        params=asdict(params),
+    )
+    return decision.primary_reason if decision else None
 
 
 def rank_candidates(

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import time
-from typing import Sequence
+from typing import Any, Mapping, Sequence
 
 
 @dataclass(frozen=True)
@@ -12,6 +12,12 @@ class AShareTradingRule:
     lot_size: int
     first_buy_minimum: int
     price_limit_pct: float
+
+
+@dataclass(frozen=True)
+class EntryDecision:
+    primary_reason: str
+    matched_reasons: tuple[str, ...]
 
 
 def rule_for_symbol(
@@ -45,3 +51,65 @@ def rule_for_symbol(
 def next_actual_bar_time(times: Sequence[time], current: time) -> time | None:
     """Return the next later bar in this trading day, if the symbol has one."""
     return next((item for item in times if item > current), None)
+
+
+def evaluate_opening_volume_entry(
+    *,
+    previous_open: float,
+    previous_close: float,
+    previous_high: float,
+    previous_change_pct: float,
+    today_close: float,
+    minute_high: float,
+    today_return: float | None = None,
+    volume_ratio: float,
+    params: Mapping[str, Any],
+) -> EntryDecision | None:
+    """Evaluate the configurable A/B/C opening-volume branches once."""
+    def value(name: str, default: Any) -> Any:
+        return params.get(name, default)
+
+    def passes_volume(branch: str) -> bool:
+        required = value(f"{branch}_volume_multiple", None)
+        if required is None:
+            required = value("volume_multiple", None)
+        return volume_ratio >= float(required if required is not None else 1.5)
+
+    def matches_candle(direction: str) -> bool:
+        if direction == "any":
+            return True
+        if direction == "bearish":
+            return previous_close < previous_open
+        return previous_close > previous_open
+
+    resolved_today_return = (
+        today_return
+        if today_return is not None
+        else (today_close / previous_close - 1 if previous_close > 0 else 0.0)
+    )
+    matched: list[str] = []
+    if (
+        bool(value("enable_branch_a", True))
+        and passes_volume("branch_a")
+        and matches_candle(str(value("branch_a_previous_candle", "bearish")))
+        and minute_high > previous_high
+    ):
+        matched.append("previous_bearish_breakout")
+    if (
+        bool(value("enable_branch_b", True))
+        and passes_volume("branch_b")
+        and float(value("branch_b_today_return_min", 0.03)) < resolved_today_return
+        < float(value("branch_b_today_return_max", 0.05))
+        and previous_change_pct < float(value("branch_b_previous_return_max", 0.05))
+    ):
+        matched.append("two_day_moderate_rise")
+    if (
+        bool(value("enable_branch_c", True))
+        and passes_volume("branch_c")
+        and matches_candle(str(value("branch_c_previous_candle", "bullish")))
+        and previous_change_pct < float(value("branch_c_previous_return_max", 0.05))
+    ):
+        matched.append("previous_moderate_rise")
+    if not matched:
+        return None
+    return EntryDecision(primary_reason=matched[0], matched_reasons=tuple(matched))

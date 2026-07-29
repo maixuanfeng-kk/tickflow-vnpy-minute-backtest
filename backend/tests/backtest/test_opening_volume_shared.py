@@ -27,3 +27,42 @@ def test_shared_next_actual_bar_keeps_lunch_and_expires_at_day_end() -> None:
         time(11, 30),
     ) == time(13, 0)
     assert shared.next_actual_bar_time([time(9, 30)], time(9, 30)) is None
+
+
+def test_shared_entry_uses_native_intraminute_high_breakout() -> None:
+    shared = _shared_module()
+
+    assert shared is not None
+    decision = shared.evaluate_opening_volume_entry(
+        previous_open=11.0,
+        previous_close=10.0,
+        previous_high=11.0,
+        previous_change_pct=-0.01,
+        today_close=10.9,
+        minute_high=11.01,
+        volume_ratio=1.5,
+        params={"enable_branch_b": False, "enable_branch_c": False},
+    )
+
+    assert decision is not None
+    assert decision.primary_reason == "previous_bearish_breakout"
+    assert decision.matched_reasons == ("previous_bearish_breakout",)
+
+
+def test_shared_entry_keeps_strict_three_percent_branch_b_boundary() -> None:
+    shared = _shared_module()
+
+    assert shared is not None
+    decision = shared.evaluate_opening_volume_entry(
+        previous_open=10.0,
+        previous_close=10.0,
+        previous_high=20.0,
+        previous_change_pct=0.04,
+        today_close=10.3,
+        minute_high=10.3,
+        today_return=0.03,
+        volume_ratio=1.5,
+        params={"enable_branch_a": False, "enable_branch_c": False},
+    )
+
+    assert decision is None
