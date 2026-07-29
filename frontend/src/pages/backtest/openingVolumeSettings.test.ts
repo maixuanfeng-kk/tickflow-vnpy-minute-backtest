@@ -38,7 +38,7 @@ test('opening-volume advanced settings expose exactly the five strategy tabs', (
     assert.match(openingTabs, new RegExp(`['"]${tab}['"]`))
   }
   assert.doesNotMatch(openingTabs, /['"]entry['"]|['"]exit['"]/)
-  assert.match(source, /openingVolumeStrategy\s*\?\s*OPENING_VOLUME_ADVANCED_TABS\s*:\s*minuteNative/)
+  assert.match(source, /openingVolumeStrategy\s*\?\s*OPENING_VOLUME_ADVANCED_TABS\s*:\s*matrixStrategy/)
 })
 
 test('vn.py opening-volume requests preserve an explicit stock range', () => {
@@ -91,8 +91,7 @@ test('opening-volume fields keep risk and minute-supported filters unambiguous',
   assert.match(backtestSource, /同期量比优先/)
   assert.match(backtestSource, /股票池顺序/)
   assert.match(backtestSource, /回测末期强制平仓/)
-  assert.match(backtestSource, /下一分钟开盘（推荐）/)
-  assert.match(backtestSource, /信号分钟收盘/)
+  assert.match(backtestSource, /下一根实际存在的分钟 K 开盘成交/)
   assert.match(backtestSource, /单只目标金额 = 当前总资产 × 最大总仓位 ÷ 最大持仓数/)
   assert.match(backtestSource, /期末未平仓/)
   assert.match(backtestSource, /自选股子集/)
@@ -100,6 +99,35 @@ test('opening-volume fields keep risk and minute-supported filters unambiguous',
   assert.match(backtestSource, /emptyDescription="默认使用全部 TickFlow 自选股。"/)
   assert.match(backtestSource, /仅在同一分钟候选超过剩余名额时进行评分和区间筛选/)
   assert.match(editorSource, /hideRiskFields/)
+})
+
+test('opening-volume runs submit the visible strategy settings to vn.py', () => {
+  const source = readFileSync(new URL('./StrategyBacktest.tsx', import.meta.url), 'utf8')
+
+  assert.match(source, /strategyDetail\.data\?\.id === 'opening_volume_portfolio'/)
+  assert.match(source, /engine: 'vnpy'/)
+  assert.match(source, /max_buy_volume_ratio: participationRatio\(maxBuyVolumeRatio\)/)
+  assert.match(source, /max_sell_volume_ratio: participationRatio\(maxSellVolumeRatio\)/)
+  assert.match(source, /basic_filter: requestOverrides\.basic_filter/)
+  assert.match(source, /scoring: requestOverrides\.scoring/)
+  assert.match(source, /max_hold_days: requestOverrides\.max_hold_days/)
+  assert.match(source, /cash_reserve_ratio: 1 - Number\(maxExposure\) \/ 100/)
+})
+
+test('opening-volume removes separate engine controls and shows fixed fill rules', () => {
+  const source = readFileSync(new URL('./StrategyBacktest.tsx', import.meta.url), 'utf8')
+
+  assert.doesNotMatch(source, /\bengineMode\b/)
+  assert.doesNotMatch(source, /\bvnpyStrategyId\b/)
+  assert.doesNotMatch(source, /\bvolumeLimitEnabled\b/)
+  assert.doesNotMatch(source, /\bminuteDataDir\b/)
+  assert.match(source, /买入成交量上限（%）/)
+  assert.match(source, /卖出成交量上限（%）/)
+  assert.match(source, /0 表示不限制/)
+  assert.match(source, /下一根实际存在的分钟 K 开盘成交/)
+  assert.match(source, /!openingVolumeStrategy && \(/)
+  assert.match(source, /maxExposure: '97'/)
+  assert.match(source, /setMaxExposure\(OPENING_VOLUME_DEFAULTS\.maxExposure\)/)
 })
 
 test('position backtest fee fields name their units explicitly', () => {

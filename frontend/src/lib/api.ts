@@ -355,7 +355,7 @@ export interface ScreenerStrategy {
   name: string
   description: string
   source?: string
-  execution_backend?: 'polars_expr' | 'matrix_native' | 'minute_native' | 'python_history_legacy'
+  execution_backend?: 'polars_expr' | 'matrix_native' | 'vnpy_portfolio' | 'python_history_legacy'
   timeframes?: string[]
 }
 
@@ -498,7 +498,7 @@ export interface StrategyDetail {
   description: string
   tags: string[]
   source: 'builtin' | 'custom' | 'ai'
-  execution_backend: 'polars_expr' | 'matrix_native' | 'minute_native' | 'python_history_legacy'
+  execution_backend: 'polars_expr' | 'matrix_native' | 'vnpy_portfolio' | 'python_history_legacy'
   asset_types: string[]
   timeframes: string[]
   version: string

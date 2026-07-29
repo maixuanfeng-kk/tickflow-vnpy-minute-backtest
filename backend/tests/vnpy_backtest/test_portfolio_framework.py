@@ -272,6 +272,73 @@ def test_opening_breakout_uses_native_high_breakout_and_dynamic_ma5() -> None:
     assert [(item.symbol, item.direction) for item in strategy.on_minute({"600000.SH": still_below}, still_below_context)] == [("600000.SH", Direction.SHORT)]
 
 
+def test_opening_breakout_applies_enabled_price_and_cumulative_amount_filters() -> None:
+    moment = datetime(2026, 1, 6, 9, 30)
+    reference = DailyReference(
+        previous_open=11.0,
+        previous_close=10.0,
+        previous_high=11.0,
+        closes=(9.8, 10.0),
+        previous_cumulative_volumes={time(9, 30): 100},
+    )
+    context = PortfolioContext(moment, 100_000, 0, {}, {"600000.SH": reference})
+    bar = _bar("600000.SH", Exchange.SSE, moment, 11.1)
+    bar.high_price = 11.1
+    bar.volume = 150
+    bar.turnover = 20_000_000
+
+    too_expensive = OpeningBreakoutPoolStrategy({
+        "basic_filter": {"enabled": True, "price_max": 11.0},
+    })
+    assert too_expensive.on_minute({"600000.SH": bar}, context) == []
+
+    insufficient_amount = OpeningBreakoutPoolStrategy({
+        "basic_filter": {"enabled": True, "amount_min": 25_000_000},
+    })
+    assert insufficient_amount.on_minute({"600000.SH": bar}, context) == []
+
+
+def test_opening_breakout_uses_position_high_water_mark_for_moving_stop() -> None:
+    moment = datetime(2026, 1, 6, 10, 30)
+    position = PortfolioPositionView("600000.SH", 100, 10.0, date(2026, 1, 5), 12.0)
+    context = PortfolioContext(moment, 100_000, 0, {"600000.SH": position}, {})
+    bar = _bar("600000.SH", Exchange.SSE, moment, 10.7)
+
+    intents = OpeningBreakoutPoolStrategy({
+        "stop_loss_pct": 0,
+        "trailing_stop_pct": 0.10,
+    }).on_minute({"600000.SH": bar}, context)
+
+    assert [item.diagnostic["matched_conditions"] for item in intents] == [["移动止损：从持仓高点回撤达到设定阈值"]]
+
+
+def test_opening_breakout_exits_after_configured_trading_day_hold_limit() -> None:
+    moment = datetime(2026, 1, 7, 10, 30)
+    position = PortfolioPositionView(
+        "600000.SH",
+        100,
+        10.0,
+        date(2026, 1, 5),
+        entry_trading_day_index=3,
+    )
+    context = PortfolioContext(
+        moment,
+        100_000,
+        0,
+        {"600000.SH": position},
+        {},
+        trading_day_index=5,
+    )
+    bar = _bar("600000.SH", Exchange.SSE, moment, 10.0)
+
+    intents = OpeningBreakoutPoolStrategy({"max_hold_days": 2, "stop_loss_pct": 0}).on_minute(
+        {"600000.SH": bar},
+        context,
+    )
+
+    assert [item.diagnostic["matched_conditions"] for item in intents] == [["达到最长持仓交易日"]]
+
+
 def test_opening_breakout_condition_2_requires_same_time_volume_surge() -> None:
     moment = datetime(2026, 1, 6, 9, 30)
     reference = DailyReference(

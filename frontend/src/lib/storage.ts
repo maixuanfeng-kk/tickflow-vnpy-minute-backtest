@@ -109,10 +109,11 @@ export const storage = {
     maxExposure: string
     initialCapital: string
     positionSizing: 'equal' | 'score_weight'
+    maxBuyVolumeRatio?: string
+    maxSellVolumeRatio?: string
     mode: 'position' | 'full'
     holdingDays: string
     minuteFill?: boolean
-    minuteDataDir?: string
     params?: Record<string, any>
     overrides?: Record<string, any>
     result: any

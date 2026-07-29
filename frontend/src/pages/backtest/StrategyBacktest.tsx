@@ -8,7 +8,6 @@ import {
   type StrategyBacktestTrade,
   type StrategyDetail,
   type StrategyParamDef,
-  type VnpyStrategy,
 } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
@@ -18,6 +17,7 @@ import { BUILTIN_COLUMNS } from '@/lib/watchlist-columns'
 import { cnSignal } from '@/lib/signals'
 import { SignalPicker } from '@/components/screener/SignalPicker'
 import { startBacktest, stopBacktest, tryReconnect, useBacktestTask } from '@/lib/backtestTask'
+import { participationRatio } from '@/lib/openingVolumeExecution'
 import { useDataStatus, useCapabilities } from '@/lib/useSharedQueries'
 import { EmptyState } from '@/components/EmptyState'
 import { WarmupBadge } from '@/components/WarmupBadge'
@@ -50,9 +50,10 @@ const DEFAULT_QUICK_RANGES: QuickRangeConfig[] = [
   { id: 'range-3', enabled: true, unit: 'year', value: 1 },
   { id: 'range-4', enabled: true, unit: 'all', value: 0 },
 ]
-const MINUTE_PORTFOLIO_DEFAULTS = {
+const OPENING_VOLUME_DEFAULTS = {
   initialCapital: '10000000',
   maxPositions: '8',
+  maxExposure: '97',
 } as const
 const quickRangeValue = (unit: QuickRangeUnit, value: unknown, fallback: number) => {
   if (unit === 'all') return 0
@@ -901,8 +902,6 @@ export function StrategyBacktest() {
   const signalNames = useSignalNames()
   const [saved] = useState(() => storage.strategyBacktestLast.get(null))
   const [selectedStrategy, setSelectedStrategy] = useState<string | null>(saved?.selectedStrategy ?? null)
-  const [engineMode, setEngineMode] = useState<'native' | 'vnpy'>('native')
-  const [vnpyStrategyId, setVnpyStrategyId] = useState('opening_breakout_pool')
   const [strategyGroup, setStrategyGroup] = useState<StrategyGroup>('all')
   const [symbols, setSymbols] = useState(saved?.symbols ?? '')
   const [assetType, setAssetType] = useState<'stock' | 'etf'>(saved?.assetType ?? 'stock')
@@ -925,13 +924,11 @@ export function StrategyBacktest() {
   const [maxExposure, setMaxExposure] = useState(saved?.maxExposure ?? '100')
   const [initialCapital, setInitialCapital] = useState(saved?.initialCapital ?? '1000000')
   const [positionSizing, setPositionSizing] = useState<'equal' | 'score_weight'>(saved?.positionSizing ?? 'equal')
-  const [volumeLimitEnabled, setVolumeLimitEnabled] = useState(true)
+  const [maxBuyVolumeRatio, setMaxBuyVolumeRatio] = useState(saved?.maxBuyVolumeRatio ?? '0')
+  const [maxSellVolumeRatio, setMaxSellVolumeRatio] = useState(saved?.maxSellVolumeRatio ?? '0')
   const [simMode, setSimMode] = useState<'position' | 'full'>(saved?.mode ?? 'position')
   const [holdingDays, setHoldingDays] = useState(saved?.holdingDays ?? '5')
   const [highGranularity, setHighGranularity] = useState(saved?.minuteFill ?? false)
-  const [minuteDataDir, setMinuteDataDir] = useState(
-    saved?.minuteDataDir ?? 'F:\\quant\\data\\minute_1min_pytdx',
-  )
   const [settingsOpen, setSettingsOpen] = useState(false)
   // 分钟K成交价细化: 不改变信号日或成交日, 需 Pro+ 分钟K能力
   const { data: caps } = useCapabilities()
@@ -965,8 +962,6 @@ export function StrategyBacktest() {
     queryKey: QK.screenerStrategies(assetType, true),
     queryFn: () => api.screenerStrategies(assetType, true),
   })
-  const vnpyStrategies = useQuery({ queryKey: ['vnpy-strategies'], queryFn: api.vnpyStrategies })
-
   const strategyList = useMemo(() => strategies.data?.presets ?? [], [strategies.data])
   const filteredStrategyList = useMemo(() => (
     strategyGroup === 'all' ? strategyList : strategyList.filter(st => st.source === strategyGroup)
@@ -1047,10 +1042,11 @@ export function StrategyBacktest() {
         maxExposure,
         initialCapital,
         positionSizing,
+        maxBuyVolumeRatio,
+        maxSellVolumeRatio,
         mode: simMode,
         holdingDays,
         minuteFill: highGranularity,
-        minuteDataDir,
         params: strategyParams,
         overrides,
         result: backtestTask.result,
@@ -1059,68 +1055,79 @@ export function StrategyBacktest() {
   }, [backtestTask])
 
   const handleRun = () => {
-    if (engineMode === 'vnpy') {
+    const detail = strategyDetail.data
+    if (!selectedStrategy) return
+    const requestOverrides = detail
+      ? normalizeStrategyOverrides(detail, overrides)
+      : overrides
+    if (strategyDetail.data?.id === 'opening_volume_portfolio') {
       startBacktest({
-        strategy_id: vnpyStrategyId,
+        strategy_id: 'opening_volume_portfolio',
         symbols: symbols ? symbols.split(',').map(s => s.trim()).filter(Boolean) : null,
         start: start || null,
         end: end || undefined,
+        entry_fill: 'next_minute_open',
+        exit_fill: 'next_minute_open',
+        candidate_sort: candidateSort,
+        force_close_at_end: forceCloseAtEnd,
         commission_pct: Number(fees) / 10000,
         stamp_tax_pct: Number(stampTax) / 1000,
         slippage_bps: Number(slippage),
         max_positions: Number(maxPositions),
         initial_capital: Number(initialCapital),
-        position_sizing: positionSizing,
-        max_buy_volume_ratio: volumeLimitEnabled ? 0.10 : 0,
-        max_sell_volume_ratio: volumeLimitEnabled ? 0.10 : 0,
-        params: { cash_reserve_ratio: 0.03, min_commission: 5 },
+        position_sizing: 'equal',
+        max_buy_volume_ratio: participationRatio(maxBuyVolumeRatio),
+        max_sell_volume_ratio: participationRatio(maxSellVolumeRatio),
+        params: {
+          ...strategyParams,
+          basic_filter: requestOverrides.basic_filter,
+          scoring: requestOverrides.scoring,
+          score_min: requestOverrides.score_min,
+          score_max: requestOverrides.score_max,
+          max_hold_days: requestOverrides.max_hold_days,
+          take_profit_pct: requestOverrides.take_profit,
+          trailing_stop_pct: requestOverrides.trailing_stop,
+          trailing_take_profit_activate_pct: requestOverrides.trailing_take_profit_activate,
+          trailing_take_profit_drawdown_pct: requestOverrides.trailing_take_profit_drawdown,
+          cash_reserve_ratio: 1 - Number(maxExposure) / 100,
+          min_commission: 5,
+        },
         engine: 'vnpy',
       })
       return
     }
-    if (!selectedStrategy) return
-    const requestOverrides = detail
-      ? normalizeStrategyOverrides(detail, overrides)
-      : overrides
-    const minuteNative = detail?.execution_backend === 'minute_native'
     startBacktest({
-      strategy_id: minuteNative ? selectedStrategy : highGranularity ? 'minute_double_ma_volume' : selectedStrategy,
-      asset_type: minuteNative ? 'stock' : assetType,
+      strategy_id: highGranularity ? 'minute_double_ma_volume' : selectedStrategy,
+      asset_type: assetType,
       symbols: symbols ? symbols.split(',').map(s => s.trim()).filter(Boolean) : null,
       start: start || null,
       end: end || undefined,
       matching,
-      entry_fill: minuteNative
-        ? entryFill === 'close_t' ? 'signal_minute_close' : 'next_minute_open'
-        : entryFill,
-      exit_fill: minuteNative
-        ? exitFill === 'close_t' ? 'signal_minute_close' : 'next_minute_open'
-        : exitFill,
-      candidate_sort: minuteNative ? candidateSort : undefined,
-      force_close_at_end: minuteNative ? forceCloseAtEnd : undefined,
+      entry_fill: entryFill,
+      exit_fill: exitFill,
       commission_pct: Number(fees) / 10000,
       stamp_tax_pct: Number(stampTax) / 1000,
       slippage_bps: Number(slippage),
       max_positions: Number(maxPositions),
       max_exposure_pct: Number(maxExposure) / 100,
       initial_capital: Number(initialCapital),
-      position_sizing: minuteNative ? 'equal' : positionSizing,
+      position_sizing: positionSizing,
       params: strategyParams,
       overrides: requestOverrides,
       mode: simMode,
       holding_days: Number(holdingDays) || 5,
       minute_fill: false,
-      minute_data_dir: minuteNative ? minuteDataDir.trim() || undefined : undefined,
-      engine: minuteNative ? 'minute_portfolio' : highGranularity ? 'vnpy' : 'matrix',
+      engine: highGranularity ? 'vnpy' : 'matrix',
     })
   }
   const selectStrategy = (strategyId: string) => {
     setSelectedStrategy(strategyId)
-    if (strategyList.find(strategy => strategy.id === strategyId)?.execution_backend === 'minute_native') {
+    if (strategyId === 'opening_volume_portfolio') {
       setHighGranularity(false)
       setSimMode('position')
-      setInitialCapital(MINUTE_PORTFOLIO_DEFAULTS.initialCapital)
-      setMaxPositions(MINUTE_PORTFOLIO_DEFAULTS.maxPositions)
+      setInitialCapital(OPENING_VOLUME_DEFAULTS.initialCapital)
+      setMaxPositions(OPENING_VOLUME_DEFAULTS.maxPositions)
+      setMaxExposure(OPENING_VOLUME_DEFAULTS.maxExposure)
     }
   }
 
@@ -1264,18 +1271,15 @@ export function StrategyBacktest() {
   }, [result?.trades])
 
   const detail = strategyDetail.data
-  const minuteNative = detail?.execution_backend === 'minute_native'
   const openingVolumeStrategy = detail?.id === 'opening_volume_portfolio'
   const matrixStrategy = detail?.execution_backend === 'matrix_native'
   const visibleAdvancedTabs = useMemo(
     () => openingVolumeStrategy
       ? OPENING_VOLUME_ADVANCED_TABS
-      : minuteNative
-      ? ADVANCED_TABS.filter(tab => tab.id === 'params')
       : matrixStrategy
       ? ADVANCED_TABS.filter(tab => tab.id !== 'entry' && tab.id !== 'exit')
       : ADVANCED_TABS,
-    [matrixStrategy, minuteNative, openingVolumeStrategy],
+    [matrixStrategy, openingVolumeStrategy],
   )
   const basicFilter = (overrides.basic_filter ?? {}) as Record<string, any>
   const entrySignals = (overrides.entry_signals ?? []) as string[]
@@ -1355,7 +1359,7 @@ export function StrategyBacktest() {
   const selectedStrategyName = detail?.name ?? strategyList.find(st => st.id === selectedStrategy)?.name ?? '未选择策略'
   const selectedStrategySource = detail?.source ?? strategyList.find(st => st.id === selectedStrategy)?.source
   const stockPoolCount = symbols.split(',').map(s => s.trim()).filter(Boolean).length
-  const stockPoolSummary = minuteNative
+  const stockPoolSummary = openingVolumeStrategy
     ? stockPoolCount > 0 ? `股票池 自选股子集 ${stockPoolCount} 只` : '股票池 TickFlow 自选股'
     : stockPoolCount > 0 ? `股票池 已限定 ${stockPoolCount} 只` : '股票池 全市场'
   const resultStartDate = result?.config?.start ?? result?.equity_curve?.[0]?.date ?? start
@@ -1395,26 +1399,10 @@ export function StrategyBacktest() {
       {/* 配置面板 */}
       <section className="space-y-3 border-b xl:border-b-0 xl:border-r border-border bg-base/25 px-3 py-3 xl:overflow-y-auto">
         <div>
-          <div className="mb-3 grid grid-cols-2 gap-1 rounded-input border border-border bg-surface p-1 text-[11px]">
-            <button type="button" onClick={() => setEngineMode('native')} className={`rounded-btn px-2 py-1.5 ${engineMode === 'native' ? 'bg-accent/15 text-accent' : 'text-muted'}`}>原生分钟组合</button>
-            <button type="button" onClick={() => setEngineMode('vnpy')} className={`rounded-btn px-2 py-1.5 ${engineMode === 'vnpy' ? 'bg-accent/15 text-accent' : 'text-muted'}`}>vn.py 开盘突破</button>
-          </div>
-          {engineMode === 'vnpy' ? (
-            <div className="space-y-2 rounded-input border border-border bg-surface p-2">
-              <select value={vnpyStrategyId} onChange={event => setVnpyStrategyId(event.target.value)} className={INPUT_CLS}>
-                {(vnpyStrategies.data?.strategies ?? []).map((strategy: VnpyStrategy) => <option key={strategy.id} value={strategy.id}>{strategy.name}</option>)}
-              </select>
-              <textarea value={symbols} onChange={event => setSymbols(event.target.value)} placeholder="粘贴股票池代码，例如 600000.SH,000001.SZ" className={`${INPUT_CLS} min-h-20 resize-y`} />
-              <label className="flex items-center gap-2 text-[11px] text-secondary">
-                <input type="checkbox" checked={volumeLimitEnabled} onChange={event => setVolumeLimitEnabled(event.target.checked)} />
-                单笔成交量限制为该分钟成交量的 10%
-              </label>
-              <p className="text-[10px] text-muted">从“股票池构建”页面复制代码串后粘贴；支持 1–1000 只股票。</p>
-            </div>
-          ) : <>
           <div className="flex items-center justify-between mb-1.5">
             <label className="text-xs font-medium text-secondary">选择策略</label>
             {/* 分钟K成交 */}
+            {!openingVolumeStrategy && (
             <div className="flex items-center gap-1">
               <Gauge className={`h-3 w-3 ${highGranularity ? 'text-amber-400' : 'text-muted/50'}`} />
               <button
@@ -1439,9 +1427,10 @@ export function StrategyBacktest() {
                 <span className="text-[8px] text-accent/70 font-medium bg-accent/10 px-1 py-px rounded">Pro+</span>
               )}
             </div>
+            )}
           </div>
           {/* 分钟K开启时的提示条 */}
-          {highGranularity && hasMinuteBatch && (
+          {!openingVolumeStrategy && highGranularity && hasMinuteBatch && (
             <div className="mb-2 flex items-start gap-1.5 rounded-btn border border-amber-400/30 bg-amber-400/5 px-2 py-1.5">
               <Zap className="h-3 w-3 text-amber-400 shrink-0 mt-px" />
               <div className="text-[10px] leading-snug text-amber-400/90">
@@ -1493,7 +1482,6 @@ export function StrategyBacktest() {
             ))}
             </div>
           </div>
-          </>}
         </div>
 
         {selectedStrategy && strategyDetail.isLoading && (
@@ -1639,75 +1627,51 @@ export function StrategyBacktest() {
               <label className="text-xs font-medium text-secondary">建仓口径</label>
               <FillRuleHint />
             </div>
-            <select value={entryFill} onChange={e => setEntryFill(e.target.value as 'close_t' | 'open_t+1')} className={INPUT_CLS}>
-              {minuteNative ? (
-                <>
-                  <option value="open_t+1">下一分钟开盘（推荐）</option>
-                  <option value="close_t">信号分钟收盘</option>
-                </>
-              ) : (
-                <>
-                  <option value="open_t+1">次日开盘（推荐）</option>
-                  <option value="close_t">信号日收盘</option>
-                </>
-              )}
-            </select>
+            {openingVolumeStrategy ? (
+              <div className="rounded-input border border-border bg-elevated px-2.5 py-1.5 text-xs text-secondary">下一根实际存在的分钟 K 开盘成交</div>
+            ) : (
+              <select value={entryFill} onChange={e => setEntryFill(e.target.value as 'close_t' | 'open_t+1')} className={INPUT_CLS}>
+                <option value="open_t+1">次日开盘（推荐）</option>
+                <option value="close_t">信号日收盘</option>
+              </select>
+            )}
           </div>
           <div>
             <label className="mb-1.5 block text-xs font-medium text-secondary">清仓口径</label>
-            <select
-              value={exitFill}
-              onChange={e => setExitFill(e.target.value as 'close_t' | 'open_t+1' | 'signal_next_minute')}
-              className={INPUT_CLS}
-            >
-              {minuteNative ? (
-                <>
-                  <option value="open_t+1">下一分钟开盘（推荐）</option>
-                  <option value="close_t">信号分钟收盘</option>
-                </>
-              ) : (
-                <>
-                  <option value="close_t">信号日收盘（推荐）</option>
-                  <option value="open_t+1">次日开盘</option>
-                </>
-              )}
-              {highGranularity && minuteExitTriggerSupported && (
-                <option value="signal_next_minute">信号触发卖出 BETA</option>
-              )}
-            </select>
+            {openingVolumeStrategy ? (
+              <div className="rounded-input border border-border bg-elevated px-2.5 py-1.5 text-xs text-secondary">下一根实际存在的分钟 K 开盘成交</div>
+            ) : (
+              <select
+                value={exitFill}
+                onChange={e => setExitFill(e.target.value as 'close_t' | 'open_t+1' | 'signal_next_minute')}
+                className={INPUT_CLS}
+              >
+                <option value="close_t">信号日收盘（推荐）</option>
+                <option value="open_t+1">次日开盘</option>
+                {highGranularity && minuteExitTriggerSupported && (
+                  <option value="signal_next_minute">信号触发卖出 BETA</option>
+                )}
+              </select>
+            )}
           </div>
-          {(entryFill === 'close_t' || exitFill === 'close_t') && (
+          {!openingVolumeStrategy && (entryFill === 'close_t' || exitFill === 'close_t') && (
             <div className="col-span-2 flex items-start gap-1 text-[10px] leading-4 text-warning">
               <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
-              <span>{minuteNative ? '信号分钟收盘按产生信号的当前分钟收盘价撮合' : '信号日收盘仅适合收盘前已确认的信号'}</span>
+              <span>信号日收盘仅适合收盘前已确认的信号</span>
             </div>
           )}
-          {exitFill === 'signal_next_minute' && (
+          {!openingVolumeStrategy && exitFill === 'signal_next_minute' && (
             <div className="col-span-2 text-[10px] leading-4 text-accent">
               分钟收盘确认卖出信号后，按下一分钟开盘成交；尾盘或分钟数据缺失时顺延到下一交易日开盘
             </div>
           )}
-          {highGranularity && effectiveExitSignals.length > 0 && !minuteExitTriggerSupported && (
+          {!openingVolumeStrategy && highGranularity && effectiveExitSignals.length > 0 && !minuteExitTriggerSupported && (
             <div className="col-span-2 flex items-start gap-1 text-[10px] leading-4 text-muted">
               <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
               <span>当前卖出信号暂不支持分钟触发回放</span>
             </div>
           )}
         </div>
-
-        {minuteNative && (
-          <div>
-            <label className="mb-1.5 block text-xs font-medium text-secondary">本地分钟 Parquet 目录</label>
-            <input
-              type="text"
-              value={minuteDataDir}
-              onChange={e => setMinuteDataDir(e.target.value)}
-              placeholder="E:\\minute_1min_pytdx"
-              className={INPUT_CLS}
-            />
-            <div className="mt-1 text-[10px] leading-4 text-muted">使用当前自选股；支持 `600000_SH.parquet` / `000001_SZ.parquet`。</div>
-          </div>
-        )}
 
         {simMode === 'position' && (
         <div className="grid grid-cols-2 gap-2">
@@ -1718,7 +1682,7 @@ export function StrategyBacktest() {
           </div>
           <div>
             <label className="text-xs font-medium text-secondary block mb-1.5">买入权重</label>
-            {minuteNative ? (
+            {openingVolumeStrategy ? (
               <div className="rounded-input border border-border bg-elevated px-2.5 py-1.5 text-xs text-secondary">固定等权</div>
             ) : (
               <select value={positionSizing} onChange={e => setPositionSizing(e.target.value as any)} className={INPUT_CLS}>
@@ -1739,6 +1703,19 @@ export function StrategyBacktest() {
           </div>
         </div>
         )}
+        {simMode === 'position' && openingVolumeStrategy && (
+        <div className="grid grid-cols-2 gap-2">
+          <div>
+            <label className="text-[10px] font-medium text-secondary block mb-1">买入成交量上限（%）</label>
+            <input type="number" min={0} max={100} value={maxBuyVolumeRatio} onChange={e => setMaxBuyVolumeRatio(e.target.value)} className={INPUT_CLS} />
+          </div>
+          <div>
+            <label className="text-[10px] font-medium text-secondary block mb-1">卖出成交量上限（%）</label>
+            <input type="number" min={0} max={100} value={maxSellVolumeRatio} onChange={e => setMaxSellVolumeRatio(e.target.value)} className={INPUT_CLS} />
+          </div>
+          <div className="col-span-2 text-[10px] leading-4 text-muted">0 表示不限制；大于 0 时，单笔成交量不超过当前分钟成交量的对应比例。</div>
+        </div>
+        )}
         {simMode === 'position' && (
         <div className="grid grid-cols-3 gap-2">
           <div>
@@ -1757,7 +1734,7 @@ export function StrategyBacktest() {
         )}
         {simMode === 'position' && (
         <div className="text-[10px] leading-4 text-muted">
-          {minuteNative
+          {openingVolumeStrategy
             ? <>单只目标金额 = 当前总资产 × 最大总仓位 ÷ 最大持仓数；当前约 {Number.isFinite(targetPositionPct) ? targetPositionPct.toFixed(1) : '—'}%。剩余现金不是新增持仓名额，只有实际卖出成功才释放持仓数。</>
             : <>单票目标约 {Number.isFinite(targetPositionPct) ? targetPositionPct.toFixed(1) : '—'}%。最大总仓位控制资金投入；剩余现金不是新增持仓名额，只有实际卖出成功才释放持仓数。</>}
         </div>
@@ -1800,7 +1777,7 @@ export function StrategyBacktest() {
         {/* 模式切换: 仓位模拟 / 全量模拟 */}
         <div className="flex items-center justify-between gap-2">
           <div className="inline-flex rounded-btn border border-border bg-surface/80 p-0.5 shadow-sm">
-            {([['position', '仓位模拟'], ...(!minuteNative ? [['full', '全量模拟'] as const] : [])]).map(([val, label]) => (
+            {([['position', '仓位模拟'], ...(!openingVolumeStrategy ? [['full', '全量模拟'] as const] : [])]).map(([val, label]) => (
               <button
                 key={val}
                 onClick={() => setSimMode(val as 'position' | 'full')}
@@ -2361,18 +2338,8 @@ export function StrategyBacktest() {
                         <th className="px-4 py-2.5 font-medium text-right">选股次数</th>
                         <th className="px-4 py-2.5 font-medium text-right">总收益</th>
                         <th className="px-4 py-2.5 font-medium text-right">胜率</th>
-                        <th
-                          className="px-4 py-2.5 font-medium text-right"
-                          title={result.config.engine === 'minute_portfolio' ? '单笔持仓期间达到的最高浮动收益率' : undefined}
-                        >
-                          {result.config.engine === 'minute_portfolio' ? '最高浮盈' : '最佳'}
-                        </th>
-                        <th
-                          className="px-4 py-2.5 font-medium text-right"
-                          title={result.config.engine === 'minute_portfolio' ? '单笔持仓期间达到的最大浮动亏损率' : undefined}
-                        >
-                          {result.config.engine === 'minute_portfolio' ? '最大浮亏' : '最差'}
-                        </th>
+                        <th className="px-4 py-2.5 font-medium text-right">最佳</th>
+                        <th className="px-4 py-2.5 font-medium text-right">最差</th>
                       </tr>
                     </thead>
                     <tbody>

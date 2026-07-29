@@ -187,7 +187,7 @@ export function Screener() {
   )
   const visiblePool = useMemo(() => pool.filter(id => availableStrategyIds.has(id)), [pool, availableStrategyIds])
   const dailyVisiblePool = useMemo(
-    () => visiblePool.filter(id => strategyMap.get(id)?.execution_backend !== 'minute_native'),
+    () => visiblePool.filter(id => strategyMap.get(id)?.execution_backend !== 'vnpy_portfolio'),
     [visiblePool, strategyMap],
   )
 
@@ -448,7 +448,7 @@ export function Screener() {
     },
   })
 
-  const nativeRun = useMutation({
+  const portfolioRun = useMutation({
     mutationFn: ({ id, date }: { id: string; date: string }) =>
       api.strategyRun(id, undefined, date || undefined),
     onSuccess: (data, vars) => {
@@ -462,8 +462,8 @@ export function Screener() {
     setActiveStrategy(s.id)
     setShowAll(false)
     if (result?.strategy !== s.id || result.as_of !== asOf) setResult(null)
-    if (s.execution_backend === 'minute_native') {
-      nativeRun.mutate({ id: s.id, date: asOf })
+    if (s.execution_backend === 'vnpy_portfolio') {
+      portfolioRun.mutate({ id: s.id, date: asOf })
       return
     }
     // ETF 模式: 无股票盘后缓存, 始终实时单跑。
@@ -706,13 +706,13 @@ export function Screener() {
                   active={activeStrategy === s.id}
                   count={hitCounts[id]}
                   expiredCount={expiredCounts[id]}
-                  loading={s.execution_backend === 'minute_native' ? nativeRun.isPending : runAll.isPending}
+                  loading={s.execution_backend === 'vnpy_portfolio' ? portfolioRun.isPending : runAll.isPending}
                   cardSize={cardSize}
                   onRun={() => handleRun(s)}
-                  disabled={(s.execution_backend === 'minute_native' ? nativeRun.isPending : run.isPending) && activeStrategy === s.id}
+                  disabled={(s.execution_backend === 'vnpy_portfolio' ? portfolioRun.isPending : run.isPending) && activeStrategy === s.id}
                   onSettings={() => setSettingsStrategyId(s.id)}
-                  monitored={s.execution_backend === 'minute_native' ? false : strategyMonitorMap.has(s.id)}
-                  onToggleMonitor={s.execution_backend === 'minute_native' ? undefined : () => toggleStrategyMonitor(s.id, s.name)}
+                  monitored={s.execution_backend === 'vnpy_portfolio' ? false : strategyMonitorMap.has(s.id)}
+                  onToggleMonitor={s.execution_backend === 'vnpy_portfolio' ? undefined : () => toggleStrategyMonitor(s.id, s.name)}
                 />
               )
             })}

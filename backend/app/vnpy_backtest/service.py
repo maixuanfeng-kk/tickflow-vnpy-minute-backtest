@@ -145,7 +145,7 @@ class VnpyMinuteBacktestService:
                 current_equity = engine.equity_curve[-1]["value"] if engine.equity_curve else config.initial_capital
                 config.on_progress(days_seen, max(total_days, 1), trading_day, current_equity)
         if days_seen == 0:
-            raise ValueError("所选日期范围内没有本地分钟 K 数据")
+            raise ValueError(self._no_minute_data_message())
         if config.force_close_at_end and final_bars_by_symbol is not None:
             engine.force_close_at_end(final_bars_by_symbol, final_references or {})
         result = engine.result()
@@ -186,7 +186,17 @@ class VnpyMinuteBacktestService:
             "positions": positions,
             "signal_diagnostics": [self._portfolio_signal_to_dict(signal, instrument_names) for signal in result.signals],
             "rejections": [item.__dict__ for item in result.rejections],
-            "strategy_info": {"id": spec.id, "name": spec.name, "source": "vnpy"},
+            "strategy_info": {
+                "id": spec.id,
+                "name": spec.name,
+                "source": "vnpy",
+                "stop_loss": config.params.get("stop_loss_pct"),
+                "take_profit": config.params.get("take_profit_pct"),
+                "trailing_stop": config.params.get("trailing_stop_pct"),
+                "trailing_take_profit_activate": config.params.get("trailing_take_profit_activate_pct"),
+                "trailing_take_profit_drawdown": config.params.get("trailing_take_profit_drawdown_pct"),
+                "max_hold_days": config.params.get("max_hold_days"),
+            },
         }
 
     def _bars_by_symbol(self, frame: pl.DataFrame, symbols: tuple[str, ...]) -> dict[str, list]:
@@ -199,6 +209,20 @@ class VnpyMinuteBacktestService:
             if symbol in wanted:
                 result[symbol] = bars_from_minute_frame(symbol, sub)
         return result
+
+    def _no_minute_data_message(self) -> str:
+        earliest = latest = None
+        try:
+            earliest = self.repo.earliest_minute_date()
+            latest = self.repo.latest_minute_date_global()
+        except AttributeError:
+            pass
+        available = f"{earliest} 至 {latest}" if earliest and latest else "未检测到可用分区"
+        return (
+            "所选日期范围内没有本地分钟 K 数据。"
+            "标准数据源：kline_minute/date=YYYY-MM-DD/part.parquet；"
+            f"可用日期范围：{available}。"
+        )
 
     def _instrument_metadata(self, symbols: tuple[str, ...]) -> tuple[dict[str, str], dict[str, float]]:
         """Read optional security metadata without ever falling back to an online source."""

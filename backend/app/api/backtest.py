@@ -8,7 +8,6 @@ import math
 import threading
 from dataclasses import asdict
 from datetime import date, timedelta
-from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
@@ -647,257 +646,6 @@ def vnpy_strategies() -> dict:
     return {"strategies": [item.to_public_dict() for item in list_strategies()]}
 
 
-@router.get("/minute-portfolio/stream")
-async def minute_portfolio_stream(
-    request: Request,
-    start: str,
-    end: str,
-    strategy_id: str = "opening_volume_portfolio",
-    symbols: str | None = None,
-    params: str | None = None,
-    overrides: str | None = None,
-    commission_pct: float = 0.0002,
-    stamp_tax_pct: float = 0.001,
-    slippage_bps: float = 5.0,
-    initial_capital: float | None = None,
-    max_positions: int | None = None,
-    max_exposure_pct: float = 1.0,
-    minute_data_dir: str | None = None,
-    candidate_sort: str = "volume_ratio",
-    entry_fill: str = "next_minute_open",
-    exit_fill: str = "next_minute_open",
-    force_close_at_end: bool | None = None,
-):
-    """Run the fixed early-session portfolio strategy over a watchlist snapshot."""
-    from app.backtest.minute_portfolio import (
-        CANDIDATE_SORT_MODES,
-        MinutePortfolioConfig,
-        MinutePortfolioService,
-        OpeningVolumeStrategyParams,
-    )
-    from app.services import watchlist
-    from app.strategy import config as strategy_config
-
-    try:
-        start_date = date.fromisoformat(start)
-        end_date = date.fromisoformat(end)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail="start and end must be ISO dates") from exc
-    if end_date < start_date:
-        raise HTTPException(status_code=400, detail="end date must not precede start date")
-    if initial_capital is not None and (not math.isfinite(initial_capital) or initial_capital <= 0):
-        raise HTTPException(status_code=400, detail="initial_capital must be positive")
-    if max_positions is not None and max_positions <= 0:
-        raise HTTPException(status_code=400, detail="max_positions must be positive")
-    if not math.isfinite(max_exposure_pct) or not 0 <= max_exposure_pct <= 1:
-        raise HTTPException(status_code=400, detail="max_exposure_pct must be between 0 and 1")
-    if minute_data_dir and not Path(minute_data_dir).is_dir():
-        raise HTTPException(status_code=400, detail="minute_data_dir must be an existing directory")
-    if candidate_sort not in CANDIDATE_SORT_MODES:
-        raise HTTPException(status_code=400, detail="invalid candidate_sort")
-    allowed_fills = {"signal_minute_close", "next_minute_open"}
-    if entry_fill not in allowed_fills:
-        raise HTTPException(status_code=400, detail="invalid entry_fill")
-    if exit_fill not in allowed_fills:
-        raise HTTPException(status_code=400, detail="invalid exit_fill")
-    try:
-        request_params = json.loads(params) if params else {}
-    except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=400, detail="params must be JSON") from exc
-    if not isinstance(request_params, dict):
-        raise HTTPException(status_code=400, detail="params must be a JSON object")
-    try:
-        request_overrides = json.loads(overrides) if overrides else {}
-    except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=400, detail="overrides must be JSON") from exc
-    if not isinstance(request_overrides, dict):
-        raise HTTPException(status_code=400, detail="overrides must be a JSON object")
-
-    strategy_engine = getattr(request.app.state, "strategy_engine", None)
-    strategy = None
-    if strategy_engine is not None:
-        try:
-            strategy = strategy_engine.get(strategy_id)
-        except ValueError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        if strategy.execution_backend != "minute_native":
-            raise HTTPException(status_code=400, detail="strategy is not a minute portfolio strategy")
-
-    repo = request.app.state.repo
-    data_dir = getattr(getattr(repo, "store", None), "data_dir", None)
-    saved_override = {}
-    if data_dir is not None:
-        saved_override = strategy_config.load_override(data_dir, strategy_id)
-    saved_params = dict(saved_override.get("params") or {})
-    saved_params.update(request_params)
-    try:
-        strategy_params = OpeningVolumeStrategyParams.from_mapping(saved_params)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    watchlist_symbols = [row["symbol"] for row in watchlist.list_symbols() if row.get("symbol")]
-    if not watchlist_symbols:
-        raise HTTPException(status_code=400, detail="自选股为空，无法运行分钟组合回测")
-    requested_symbols = {value.strip() for value in symbols.split(",") if value.strip()} if symbols else None
-    selected_symbols = (
-        [symbol for symbol in watchlist_symbols if symbol in requested_symbols]
-        if requested_symbols is not None else watchlist_symbols
-    )
-    if not selected_symbols:
-        raise HTTPException(status_code=400, detail="回测范围与自选股没有交集")
-
-    effective_overrides = dict(saved_override)
-
-    def nested_override(source: dict, key: str, source_name: str) -> dict:
-        value = source.get(key)
-        if value is None:
-            return {}
-        if not isinstance(value, dict):
-            raise HTTPException(
-                status_code=400,
-                detail=f"{source_name}.{key} must be a JSON object",
-            )
-        return value
-
-    for nested_key in ("basic_filter", "scoring"):
-        if nested_key == "basic_filter":
-            nested = dict(getattr(strategy, "basic_filter", {}) or {})
-        else:
-            nested = dict(getattr(strategy, "meta", {}).get("scoring", {}) if strategy else {})
-        nested.update(nested_override(saved_override, nested_key, "saved overrides"))
-        nested.update(nested_override(request_overrides, nested_key, "overrides"))
-        if nested:
-            effective_overrides[nested_key] = nested
-    effective_overrides.update({
-        key: value for key, value in request_overrides.items()
-        if key not in {"basic_filter", "scoring"}
-    })
-
-    def optional_ratio(key: str) -> float | None:
-        value = effective_overrides.get(key)
-        if value is None:
-            return None
-        try:
-            ratio = abs(float(value))
-        except (TypeError, ValueError) as exc:
-            raise HTTPException(status_code=400, detail=f"{key} must be numeric") from exc
-        if not math.isfinite(ratio) or ratio <= 0:
-            raise HTTPException(status_code=400, detail=f"{key} must be positive")
-        return ratio
-
-    def optional_score(key: str) -> float | None:
-        value = effective_overrides.get(key)
-        if value is None:
-            return None
-        try:
-            score = float(value)
-        except (TypeError, ValueError) as exc:
-            raise HTTPException(status_code=400, detail=f"{key} must be numeric") from exc
-        if not math.isfinite(score) or not 0 <= score <= 100:
-            raise HTTPException(status_code=400, detail=f"{key} must be between 0 and 100")
-        return score
-
-    score_min = optional_score("score_min")
-    score_max = optional_score("score_max")
-    if score_min is not None and score_max is not None and score_min > score_max:
-        raise HTTPException(status_code=400, detail="score_min must not exceed score_max")
-    max_hold_days_value = effective_overrides.get("max_hold_days")
-    if max_hold_days_value is not None:
-        if isinstance(max_hold_days_value, bool):
-            raise HTTPException(status_code=400, detail="max_hold_days must be an integer")
-        try:
-            parsed_max_hold_days = float(max_hold_days_value)
-        except (TypeError, ValueError) as exc:
-            raise HTTPException(status_code=400, detail="max_hold_days must be an integer") from exc
-        if not math.isfinite(parsed_max_hold_days) or not parsed_max_hold_days.is_integer():
-            raise HTTPException(status_code=400, detail="max_hold_days must be an integer")
-        if parsed_max_hold_days <= 0:
-            raise HTTPException(status_code=400, detail="max_hold_days must be positive")
-        max_hold_days_value = int(parsed_max_hold_days)
-    scoring_values: dict[str, float] = {}
-    for key, value in dict(effective_overrides.get("scoring") or {}).items():
-        try:
-            weight = float(value)
-        except (TypeError, ValueError) as exc:
-            raise HTTPException(status_code=400, detail=f"scoring.{key} must be numeric") from exc
-        if not math.isfinite(weight) or weight < 0:
-            raise HTTPException(status_code=400, detail=f"scoring.{key} must be non-negative")
-        scoring_values[str(key)] = weight
-
-    config = MinutePortfolioConfig(
-        symbols=selected_symbols,
-        start=start_date,
-        end=end_date,
-        commission_pct=commission_pct,
-        stamp_tax_pct=stamp_tax_pct,
-        slippage_bps=slippage_bps,
-        **({"initial_capital": initial_capital} if initial_capital is not None else {}),
-        **({"max_positions": max_positions} if max_positions is not None else {}),
-        cash_reserve_ratio=1 - max_exposure_pct,
-        strategy_params=strategy_params,
-        basic_filter=dict(effective_overrides.get("basic_filter") or {}),
-        candidate_sort=candidate_sort,
-        entry_fill=entry_fill,
-        exit_fill=exit_fill,
-        force_close_at_end=force_close_at_end,
-        scoring=scoring_values,
-        score_min=score_min,
-        score_max=score_max,
-        take_profit_pct=optional_ratio("take_profit"),
-        trailing_stop_pct=optional_ratio("trailing_stop"),
-        trailing_take_profit_activate_pct=optional_ratio("trailing_take_profit_activate"),
-        trailing_take_profit_drawdown_pct=optional_ratio("trailing_take_profit_drawdown"),
-        max_hold_days=max_hold_days_value,
-        minute_data_dir=minute_data_dir or None,
-    )
-    raw = (
-        f"minute-portfolio|{strategy_id}|{selected_symbols}|{start}|{end}|{commission_pct}|{stamp_tax_pct}|{slippage_bps}|"
-        f"{config.initial_capital}|{config.max_positions}|{max_exposure_pct}|{minute_data_dir}|"
-        f"{candidate_sort}|{entry_fill}|{exit_fill}|{force_close_at_end}|"
-        f"{json.dumps(saved_params, sort_keys=True, ensure_ascii=False)}|"
-        f"{json.dumps(effective_overrides, sort_keys=True, ensure_ascii=False)}"
-    )
-    job_key = f"minute-portfolio:{hashlib.md5(raw.encode()).hexdigest()[:12]}"
-    _cleanup_stale_jobs()
-    with _jobs_lock:
-        job = _running_jobs.get(job_key)
-        if job is None:
-            job = _BacktestJob(job_key)
-            _running_jobs[job_key] = job
-            is_new = True
-        else:
-            is_new = False
-    if is_new:
-        def _run() -> None:
-            try:
-                result = MinutePortfolioService(repo).run(
-                    config, progress_callback=job.progress.append,
-                )
-                _finish_job(job, result=result)
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("minute portfolio backtest failed")
-                _finish_job(job, error=str(exc))
-
-        threading.Thread(target=_run, daemon=True).start()
-
-    async def event_generator():
-        cursor = 0
-        while True:
-            while cursor < len(job.progress):
-                yield f"event: progress\ndata: {json.dumps(job.progress[cursor], ensure_ascii=False)}\n\n"
-                cursor += 1
-            if job.done:
-                if job.error:
-                    yield f"event: error\ndata: {json.dumps({'message': job.error}, ensure_ascii=False)}\n\n"
-                else:
-                    yield f"event: done\ndata: {json.dumps(job.result, ensure_ascii=False, default=str)}\n\n"
-                return
-            if await request.is_disconnected():
-                return
-            await asyncio.sleep(0.05)
-
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
-
-
 @router.post("/strategy/cancel")
 async def strategy_cancel(request: Request):
     """取消正在运行的回测任务 (前端传 query string, 后端算 job_key)。"""
@@ -913,15 +661,19 @@ async def strategy_cancel(request: Request):
         v = _get(key)
         return float(v) if v else None
     if _get("engine") == "vnpy":
-        volume_ratio = _get("max_volume_ratio")
-        normalized_volume_ratio = None if volume_ratio in {"", "0"} else float(volume_ratio)
+        buy_ratio = _get("max_buy_volume_ratio")
+        sell_ratio = _get("max_sell_volume_ratio")
+        normalized_buy_ratio = None if buy_ratio in {"", "0"} else float(buy_ratio)
+        normalized_sell_ratio = None if sell_ratio in {"", "0"} else float(sell_ratio)
+        force_close_at_end = _get("force_close_at_end", "true").lower() == "true"
         raw = (
-            f"vnpy|{_get('strategy_id', 'opening_breakout_pool')}|"
+            f"vnpy|opening_volume_portfolio|"
             f"{tuple(dict.fromkeys(item.strip().upper() for item in _get('symbols').split(',') if item.strip()))}|"
             f"{_get('start')}|{_get('end')}|{float(_get('initial_capital', '1000000'))}|"
             f"{float(_get('commission_pct', '0.0002'))}|{float(_get('stamp_tax_pct', '0.001'))}|"
             f"{float(_get('slippage_bps', '5'))}|{int(_get('max_positions', '10'))}|"
-            f"{_get('position_sizing', 'equal')}|{normalized_volume_ratio}|{_get('params')}"
+            f"{_get('position_sizing', 'equal')}|{normalized_buy_ratio}|{normalized_sell_ratio}|"
+            f"{_get('candidate_sort', 'volume_ratio')}|{force_close_at_end}|{_get('params')}"
         )
         job_key = f"vnpy:{hashlib.md5(raw.encode()).hexdigest()[:12]}"
     else:

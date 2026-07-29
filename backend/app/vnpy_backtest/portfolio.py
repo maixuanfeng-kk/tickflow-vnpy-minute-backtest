@@ -28,6 +28,8 @@ class PortfolioPosition:
     average_cost: float = 0.0
     entry_date: date | None = None
     entry_datetime: datetime | None = None
+    high_water_price: float | None = None
+    entry_trading_day_index: int | None = None
 
 
 @dataclass
@@ -190,6 +192,8 @@ class MultiSymbolNextBarOpenEngine:
         self.equity_curve: list[dict] = []
         self.last_prices: dict[str, float] = {}
         self.signals: list[PortfolioSignal] = []
+        self._trading_day_index = 0
+        self._active_trading_day: date | None = None
 
     def run_day(
         self,
@@ -199,6 +203,10 @@ class MultiSymbolNextBarOpenEngine:
         *,
         allow_entries: bool = True,
     ) -> None:
+        day = next((bar.datetime.date() for bars in bars_by_symbol.values() for bar in bars), None)
+        if day is not None and day != self._active_trading_day:
+            self._active_trading_day = day
+            self._trading_day_index += 1
         by_timestamp: dict[datetime, dict[str, BarData]] = defaultdict(dict)
         next_times: dict[tuple[str, datetime], datetime] = {}
         for symbol, bars in bars_by_symbol.items():
@@ -212,16 +220,26 @@ class MultiSymbolNextBarOpenEngine:
             bars = by_timestamp[timestamp]
             self._fill_due(timestamp, bars, daily_references)
             self.last_prices.update({symbol: float(bar.close_price) for symbol, bar in bars.items() if bar.close_price > 0})
+            self._update_high_water_marks(bars)
             self._refresh_daily_equal_budget(bars)
             context = PortfolioContext(
                 timestamp=timestamp,
                 cash=self.cash,
                 reserved_cash=sum(order.budget for order in self.pending if order.direction == Direction.LONG),
                 positions={
-                    symbol: PortfolioPositionView(symbol, position.volume, position.average_cost, position.entry_date)
+                    symbol: PortfolioPositionView(
+                        symbol,
+                        position.volume,
+                        position.average_cost,
+                        position.entry_date,
+                        position.high_water_price,
+                        position.entry_trading_day_index,
+                    )
                     for symbol, position in self.positions.items() if position.volume > 0
                 },
                 daily_references=daily_references,
+                instrument_names=self.instrument_names,
+                trading_day_index=self._trading_day_index,
             )
             intents = list(strategy.on_minute(bars, context))
             if not allow_entries:
@@ -450,6 +468,8 @@ class MultiSymbolNextBarOpenEngine:
         position.average_cost = combined_cost / position.volume
         position.entry_date = bar.datetime.date()
         position.entry_datetime = bar.datetime
+        position.high_water_price = price
+        position.entry_trading_day_index = self._trading_day_index
         self.cash -= turnover + commission
         self._fill(PortfolioFill(order.symbol, Direction.LONG, bar.datetime, price, volume, order.reason, commission, 0.0, abs(price - bar.open_price) * volume,
                                  portfolio_equity_before=equity_before,
@@ -481,6 +501,8 @@ class MultiSymbolNextBarOpenEngine:
             position.average_cost = 0.0
             position.entry_date = None
             position.entry_datetime = None
+            position.high_water_price = None
+            position.entry_trading_day_index = None
         self.cash += turnover - commission - stamp_tax
         self._fill(PortfolioFill(order.symbol, Direction.SHORT, bar.datetime, price, volume, order.reason, commission, stamp_tax, abs(price - base) * volume,
                                  portfolio_equity_before=equity_before, signal_id=order.signal_id))
@@ -513,6 +535,15 @@ class MultiSymbolNextBarOpenEngine:
             position.volume * prices.get(symbol, self.last_prices.get(symbol, position.average_cost))
             for symbol, position in self.positions.items() if position.volume > 0
         )
+
+    def _update_high_water_marks(self, bars: Mapping[str, BarData]) -> None:
+        for symbol, position in self.positions.items():
+            if position.volume <= 0:
+                continue
+            bar = bars.get(symbol)
+            if bar is None or bar.high_price <= 0:
+                continue
+            position.high_water_price = max(position.high_water_price or 0.0, float(bar.high_price))
 
     def _rule(self, symbol: str) -> AShareTradingRule:
         return rule_for_symbol(

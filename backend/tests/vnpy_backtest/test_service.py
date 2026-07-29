@@ -72,6 +72,36 @@ def test_vnpy_service_keeps_native_style_execution_options() -> None:
     assert result["config"]["candidate_sort"] == "volume_ratio"
 
 
+def test_vnpy_service_returns_visible_opening_volume_risk_settings() -> None:
+    result = VnpyMinuteBacktestService(_Repo()).run(
+        VnpyMinuteBacktestConfig(
+            symbols=("600000.SH",),
+            start=date(2026, 1, 5),
+            end=date(2026, 1, 5),
+            params={
+                "stop_loss_pct": 0.02,
+                "take_profit_pct": 0.05,
+                "trailing_stop_pct": 0.03,
+                "trailing_take_profit_activate_pct": 0.08,
+                "trailing_take_profit_drawdown_pct": 0.02,
+                "max_hold_days": 3,
+            },
+        )
+    )
+
+    assert result["strategy_info"] == {
+        "id": "opening_volume_portfolio",
+        "name": "开盘突破股票池（vn.py）",
+        "source": "vnpy",
+        "stop_loss": 0.02,
+        "take_profit": 0.05,
+        "trailing_stop": 0.03,
+        "trailing_take_profit_activate": 0.08,
+        "trailing_take_profit_drawdown": 0.02,
+        "max_hold_days": 3,
+    }
+
+
 def test_vnpy_service_rejects_empty_repository_data() -> None:
     class EmptyRepo:
         def iter_minute_days(self, *args, **kwargs):
@@ -83,7 +113,7 @@ def test_vnpy_service_rejects_empty_repository_data() -> None:
         def get_instruments(self):
             return pl.DataFrame()
 
-    with pytest.raises(ValueError, match="没有本地分钟 K"):
+    with pytest.raises(ValueError, match="标准数据源.*可用日期范围"):
         VnpyMinuteBacktestService(EmptyRepo()).run(
             VnpyMinuteBacktestConfig(
                 symbols=("600000.SH",),

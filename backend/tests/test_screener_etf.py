@@ -44,12 +44,12 @@ def test_all_builtin_strategies_declare_asset_types_and_timeframes():
         assert meta["timeframes"] in (["1d"], ["1m"])
 
 
-def test_builtin_strategies_include_daily_matrix_and_minute_native_backends():
+def test_builtin_strategies_include_daily_matrix_and_vnpy_portfolio_backends():
     engine = _engine()
     assert engine.load_errors() == []
     strategies = [engine.get(meta["id"]) for meta in engine.list_strategies()]
     matrix_strategies = [s for s in strategies if s.execution_backend == "matrix_native"]
-    minute_strategies = [s for s in strategies if s.execution_backend == "minute_native"]
+    minute_strategies = [s for s in strategies if s.execution_backend == "vnpy_portfolio"]
 
     assert len(matrix_strategies) == 18
     assert len(minute_strategies) == 1

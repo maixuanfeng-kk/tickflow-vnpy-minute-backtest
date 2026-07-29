@@ -1,10 +1,18 @@
 import asyncio
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from app.api import backtest
+from app.api import strategy
+
+
+def test_no_production_native_minute_portfolio_route_or_import_remains() -> None:
+    assert "minute_portfolio" not in Path(backtest.__file__).read_text(encoding="utf-8")
+    assert "/minute-portfolio/stream" not in Path(backtest.__file__).read_text(encoding="utf-8")
+    assert "minute_portfolio" not in Path(strategy.__file__).read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio

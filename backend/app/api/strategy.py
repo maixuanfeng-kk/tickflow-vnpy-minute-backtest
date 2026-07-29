@@ -23,10 +23,9 @@ from app.strategy.ai_generator import AIStrategyGenerator, find_meta_assignment
 from app.strategy.engine import StrategyDef, StrategyEngine
 from app.strategy.monitor import StrategyMonitorService
 from app.strategy.prompt_builder import build_step1, build_step2
-from app.backtest.minute_portfolio import (
+from app.strategy.opening_volume_scan import (
     OpeningVolumeScanConfig,
     OpeningVolumeScanService,
-    OpeningVolumeStrategyParams,
 )
 
 router = APIRouter(prefix="/api/strategies", tags=["strategies"])
@@ -246,19 +245,19 @@ def run_strategy(req: RunRequest, request: Request):
 
     try:
         strategy = engine.get(req.strategy_id)
-        if strategy.execution_backend == "minute_native":
+        if req.strategy_id == "opening_volume_portfolio":
             if req.asset_type != "stock":
                 raise HTTPException(status_code=400, detail="分钟策略仅支持股票")
             try:
-                native_result = OpeningVolumeScanService(request.app.state.repo).run(
+                scan_result = OpeningVolumeScanService(request.app.state.repo).run(
                     OpeningVolumeScanConfig(
                         as_of=as_of,
-                        strategy_params=OpeningVolumeStrategyParams.from_mapping(params),
+                        strategy_params=params,
                     )
                 )
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e)) from e
-            return _safe(native_result)
+            return _safe(scan_result)
         from app.services.screener import ScreenerService
         svc = ScreenerService(request.app.state.repo, asset_type=req.asset_type)
         context = svc.build_strategy_context(

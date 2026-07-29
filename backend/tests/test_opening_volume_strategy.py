@@ -7,7 +7,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.api import strategy as strategy_api
-from app.backtest.minute_portfolio import OpeningVolumeScanConfig, OpeningVolumeScanService, OpeningVolumeStrategyParams
+from app.strategy.opening_volume_scan import OpeningVolumeScanConfig, OpeningVolumeScanService
 from app.strategy import config as strategy_config
 from app.strategy.engine import StrategyEngine
 
@@ -21,6 +21,7 @@ def test_opening_volume_strategy_is_registered_with_editable_defaults():
     strategy = engine.get("opening_volume_portfolio")
 
     assert strategy.meta["timeframes"] == ["1m"]
+    assert strategy.execution_backend == "vnpy_portfolio"
     assert strategy.meta["scanner_backend"] == "opening_volume"
     assert strategy.basic_filter["enabled"] is False
     assert strategy.meta["scoring"] == {"volume_ratio": 1.0, "today_return": 0.0}
@@ -50,44 +51,34 @@ def test_opening_volume_scan_service_reads_tickflow_watchlist_only(monkeypatch):
             self.daily_symbols = None
             self.minute_symbols = None
 
-        def get_daily_batch(self, symbols, start, end, columns):
-            self.daily_symbols = symbols
-            return pl.DataFrame({
-                "symbol": ["600000.SH", "600000.SH"],
-                "date": [date(2026, 1, 2), date(2026, 1, 5)],
-                "open": [11.0, 10.0],
-                "high": [10.5, 10.4],
-                "close": [10.0, 10.3],
-                "ma5": [9.0, 9.1],
-            })
-
-        def get_minute_range(self, symbols, start, end, asset_type):
+        def iter_minute_days(self, symbols, start, end):
             self.minute_symbols = symbols
-            return pl.DataFrame({
-                "symbol": ["600000.SH"] * 4,
+            def frame(day, open_price, high, close, volume):
+                return pl.DataFrame({
+                    "symbol": ["600000.SH"],
+                    "datetime": [datetime.combine(day, datetime.min.time()).replace(hour=9, minute=30)],
+                    "open": [open_price], "high": [high], "low": [close], "close": [close],
+                    "volume": [volume], "amount": [close * volume],
+                })
+            yield date(2026, 1, 1), frame(date(2026, 1, 1), 10.0, 10.0, 9.8, 100.0)
+            yield date(2026, 1, 2), frame(date(2026, 1, 2), 11.0, 11.0, 10.0, 100.0)
+            yield date(2026, 1, 5), pl.DataFrame({
+                "symbol": ["600000.SH"] * 2,
                 "datetime": [
-                    datetime(2026, 1, 2, 9, 30), datetime(2026, 1, 2, 9, 31),
                     datetime(2026, 1, 5, 9, 30), datetime(2026, 1, 5, 9, 31),
                 ],
-                "open": [10.0, 10.0, 10.0, 10.3],
-                "high": [10.0, 10.0, 10.6, 10.4],
-                "low": [10.0, 10.0, 10.0, 10.2],
-                "close": [10.0, 10.0, 10.2, 10.3],
-                "volume": [100.0, 100.0, 150.0, 100.0],
+                "open": [10.0, 10.3], "high": [11.1, 10.4], "low": [10.0, 10.2],
+                "close": [10.2, 10.3], "volume": [150.0, 100.0], "amount": [1530.0, 1030.0],
             })
 
     monkeypatch.setattr(
-        "app.backtest.minute_portfolio.watchlist.list_symbols",
+        "app.strategy.opening_volume_scan.watchlist.list_symbols",
         lambda: [{"symbol": "600000.SH"}, {"symbol": "510300.SH"}],
     )
     repo = Repo()
 
-    result = OpeningVolumeScanService(repo).run(OpeningVolumeScanConfig(
-        as_of=date(2026, 1, 5),
-        strategy_params=OpeningVolumeStrategyParams(),
-    ))
+    result = OpeningVolumeScanService(repo).run(OpeningVolumeScanConfig(as_of=date(2026, 1, 5)))
 
-    assert repo.daily_symbols == ["600000.SH", "510300.SH"]
     assert repo.minute_symbols == ["600000.SH", "510300.SH"]
     assert result["total"] == 1
     assert result["rows"][0]["symbol"] == "600000.SH"
@@ -123,8 +114,8 @@ def test_native_strategy_run_uses_saved_params(monkeypatch, tmp_path):
     ), request)
 
     assert result["total"] == 0
-    assert captured["config"].strategy_params.branch_a_volume_multiple == 2.1
-    assert captured["config"].strategy_params.branch_b_today_return_min == 0.015
+    assert captured["config"].strategy_params["branch_a_volume_multiple"] == 2.1
+    assert captured["config"].strategy_params["branch_b_today_return_min"] == 0.015
 
 
 def test_native_strategy_run_reports_missing_minute_data_as_bad_request(monkeypatch, tmp_path):

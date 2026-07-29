@@ -20,9 +20,15 @@ class OpeningBreakoutPoolStrategy:
         self.buy_start = time.fromisoformat(str(self.params.get("scan_start_time", self.params.get("buy_start", "09:30"))))
         self.buy_end = time.fromisoformat(str(self.params.get("scan_end_time", self.params.get("buy_end", "09:59"))))
         self.stop_loss = abs(float(self.params.get("stop_loss_pct", self.params.get("stop_loss", 0.02))))
+        self.take_profit = self._positive_param("take_profit_pct")
+        self.trailing_stop = self._positive_param("trailing_stop_pct")
+        self.trailing_take_profit_activate = self._positive_param("trailing_take_profit_activate_pct")
+        self.trailing_take_profit_drawdown = self._positive_param("trailing_take_profit_drawdown_pct")
+        self.max_hold_days = self._integer_param("max_hold_days")
         self.ma_window = int(self.params.get("ma_exit_period", self.params.get("ma_window", 5)))
         self._session_date: date | None = None
         self._today_cumulative_volume: dict[str, float] = defaultdict(float)
+        self._today_cumulative_amount: dict[str, float] = defaultdict(float)
 
     def on_minute(
         self,
@@ -32,10 +38,12 @@ class OpeningBreakoutPoolStrategy:
         if self._session_date != context.timestamp.date():
             self._session_date = context.timestamp.date()
             self._today_cumulative_volume.clear()
+            self._today_cumulative_amount.clear()
 
         if context.timestamp.time() <= self.buy_end:
             for symbol, bar in bars.items():
                 self._today_cumulative_volume[symbol] += max(float(bar.volume), 0.0)
+                self._today_cumulative_amount[symbol] += max(float(bar.turnover), 0.0)
 
         intents: list[OrderIntent] = []
         # Sell checks run through the whole session. The T+1 guard avoids a
@@ -48,6 +56,9 @@ class OpeningBreakoutPoolStrategy:
                 symbol,
                 float(bar.close_price),
                 position.average_cost,
+                position.high_water_price,
+                position.entry_trading_day_index,
+                context.trading_day_index,
                 context.daily_references.get(symbol),
             )
             if exit_diagnostic and position.entry_date != context.timestamp.date():
@@ -63,6 +74,8 @@ class OpeningBreakoutPoolStrategy:
         return intents
 
     def _buy_diagnostic(self, symbol: str, bar: BarData, context: PortfolioContext) -> dict[str, object] | None:
+        if not self._passes_basic_filter(symbol, bar, context):
+            return None
         reference = context.daily_references.get(symbol)
         price = float(bar.close_price)
         if reference is None or price <= 0 or reference.previous_close is None:
@@ -102,11 +115,57 @@ class OpeningBreakoutPoolStrategy:
             return None
         return reference.previous_close / reference.closes[-2] - 1
 
+    def _passes_basic_filter(self, symbol: str, bar: BarData, context: PortfolioContext) -> bool:
+        basic_filter = self.params.get("basic_filter")
+        if not isinstance(basic_filter, Mapping) or not basic_filter.get("enabled", True):
+            return True
+        price = float(bar.close_price)
+        if basic_filter.get("price_min") is not None and price < float(basic_filter["price_min"]):
+            return False
+        if basic_filter.get("price_max") is not None and price > float(basic_filter["price_max"]):
+            return False
+        amount = self._today_cumulative_amount[symbol]
+        if basic_filter.get("amount_min") is not None and amount < float(basic_filter["amount_min"]):
+            return False
+        if basic_filter.get("amount_max") is not None and amount > float(basic_filter["amount_max"]):
+            return False
+        name = context.instrument_names.get(symbol, "")
+        if basic_filter.get("exclude_st") and ("ST" in name.upper() or "退" in name):
+            return False
+        boards = basic_filter.get("boards")
+        return not isinstance(boards, list) or not boards or self._symbol_board(symbol) in boards
+
+    @staticmethod
+    def _symbol_board(symbol: str) -> str:
+        code, _, exchange = symbol.partition(".")
+        if exchange == "BJ":
+            return "北交所"
+        if code.startswith(("300", "301")):
+            return "创业板"
+        if code.startswith(("688", "689")):
+            return "科创板"
+        return "沪主板" if exchange == "SH" else "深主板"
+
+    def _positive_param(self, name: str) -> float | None:
+        value = self.params.get(name)
+        if value is None:
+            return None
+        return abs(float(value))
+
+    def _integer_param(self, name: str) -> int | None:
+        value = self.params.get(name)
+        if value is None:
+            return None
+        return max(int(value), 1)
+
     def _sell_diagnostic(
         self,
         symbol: str,
         current_price: float,
         cost_price: float,
+        high_water_price: float | None,
+        entry_trading_day_index: int | None,
+        trading_day_index: int,
         reference,
     ) -> dict[str, object] | None:
         if current_price <= 0 or cost_price <= 0:
@@ -115,8 +174,26 @@ class OpeningBreakoutPoolStrategy:
         if reference is not None and self.ma_window > 1 and len(reference.closes) >= self.ma_window - 1:
             # Dynamic MA5: four completed daily closes plus this minute's close.
             dynamic_ma = (sum(reference.closes[-(self.ma_window - 1):]) + current_price) / self.ma_window
-        if current_price <= cost_price * (1 - self.stop_loss):
+        if self.stop_loss > 0 and current_price <= cost_price * (1 - self.stop_loss):
             return {"matched_conditions": ["止损：跌幅达到设定阈值"], "signal_price": round(current_price, 6)}
+        if (
+            self.max_hold_days is not None
+            and entry_trading_day_index is not None
+            and trading_day_index - entry_trading_day_index >= self.max_hold_days
+        ):
+            return {"matched_conditions": ["达到最长持仓交易日"], "signal_price": round(current_price, 6)}
+        if self.take_profit is not None and current_price >= cost_price * (1 + self.take_profit):
+            return {"matched_conditions": ["止盈：涨幅达到设定阈值"], "signal_price": round(current_price, 6)}
+        if high_water_price is not None and self.trailing_stop is not None and current_price <= high_water_price * (1 - self.trailing_stop):
+            return {"matched_conditions": ["移动止损：从持仓高点回撤达到设定阈值"], "signal_price": round(current_price, 6), "high_water_price": round(high_water_price, 6)}
+        if (
+            high_water_price is not None
+            and self.trailing_take_profit_activate is not None
+            and self.trailing_take_profit_drawdown is not None
+            and high_water_price >= cost_price * (1 + self.trailing_take_profit_activate)
+            and current_price <= high_water_price * (1 - self.trailing_take_profit_drawdown)
+        ):
+            return {"matched_conditions": ["回撤止盈：达到启动收益后从持仓高点回撤"], "signal_price": round(current_price, 6), "high_water_price": round(high_water_price, 6)}
         if dynamic_ma is not None and current_price < dynamic_ma:
             return {"matched_conditions": [f"跌破动态 MA{self.ma_window}"], "signal_price": round(current_price, 6), "dynamic_ma": round(dynamic_ma, 6)}
         return None

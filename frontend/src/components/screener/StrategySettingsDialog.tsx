@@ -366,7 +366,7 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
   }
 
   if (!strategyId) return null
-  const isMinuteNative = detail?.execution_backend === 'minute_native'
+  const isVnpyPortfolio = detail?.execution_backend === 'vnpy_portfolio'
   const isOpeningVolume = detail?.id === 'opening_volume_portfolio'
 
   return (
@@ -421,7 +421,7 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
                         className="flex-1 h-8 px-3 rounded-lg bg-base border-0 ring-1 ring-border/30 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-accent/30 transition-shadow" />
                     </div>
                   </div>
-                  <div className={`flex items-center gap-1.5 pb-0.5 shrink-0 ${isMinuteNative ? 'hidden' : ''}`}>
+                  <div className={`flex items-center gap-1.5 pb-0.5 shrink-0 ${isVnpyPortfolio ? 'hidden' : ''}`}>
                     <span className="text-[10px] text-muted/50">显示上限</span>
                     <input type="number" value={displayLimit ?? ''} onChange={e => setDisplayLimit(e.target.value ? Number(e.target.value) : null)} step={1} min={10} max={200} placeholder="不限"
                       className="w-14 h-8 px-1.5 rounded-lg bg-base border border-border/40 text-xs font-mono text-foreground text-center focus:outline-none focus:border-accent/50" />
@@ -430,9 +430,9 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
                 </div>
 
                 {/* 三列 */}
-                <div className={`grid ${isOpeningVolume ? 'grid-cols-1' : isMinuteNative ? 'grid-cols-1 max-w-md' : 'grid-cols-3'} gap-5 items-start`}>
+                <div className={`grid ${isOpeningVolume ? 'grid-cols-1' : isVnpyPortfolio ? 'grid-cols-1 max-w-md' : 'grid-cols-3'} gap-5 items-start`}>
                   {/* 列1：选股条件 */}
-                  {!isMinuteNative && (
+                  {!isVnpyPortfolio && (
                   <Section icon={Filter} title="基础参数" accent="text-sky-400">
                       <div className="flex items-center justify-between mb-1">
                         <span className="text-[10px] text-muted">启用基础参数过滤</span>
@@ -492,7 +492,7 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
                   </div>
 
                   {/* 列3：评分 + 交易 */}
-                  {!isMinuteNative && <div className="space-y-3">
+                  {!isVnpyPortfolio && <div className="space-y-3">
                     <Section icon={Star} title="评分权重" accent="text-amber-400">
                       {Object.entries(scoring).length > 0 ? (() => {
                         const total = Object.values(scoring).reduce((a: number, b: number) => a + b, 0) || 1
