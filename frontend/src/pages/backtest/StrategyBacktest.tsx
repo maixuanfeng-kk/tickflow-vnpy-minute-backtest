@@ -1071,7 +1071,8 @@ export function StrategyBacktest() {
         max_positions: Number(maxPositions),
         initial_capital: Number(initialCapital),
         position_sizing: positionSizing,
-        max_volume_ratio: volumeLimitEnabled ? 0.10 : 0,
+        max_buy_volume_ratio: volumeLimitEnabled ? 0.10 : 0,
+        max_sell_volume_ratio: volumeLimitEnabled ? 0.10 : 0,
         params: { cash_reserve_ratio: 0.03, min_commission: 5 },
         engine: 'vnpy',
       })

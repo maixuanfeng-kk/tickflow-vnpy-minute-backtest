@@ -41,35 +41,40 @@ test('opening-volume advanced settings expose exactly the five strategy tabs', (
   assert.match(source, /openingVolumeStrategy\s*\?\s*OPENING_VOLUME_ADVANCED_TABS\s*:\s*minuteNative/)
 })
 
-test('minute-portfolio requests preserve an explicit stock range', () => {
+test('vn.py opening-volume requests preserve an explicit stock range', () => {
   installSseTestDoubles()
 
   startBacktest({
     strategy_id: 'opening_volume_portfolio',
     symbols: ['600000.SH', '000001.SZ'],
-    engine: 'minute_portfolio',
+    engine: 'vnpy',
   })
 
   const query = new URL(openedUrl, 'http://localhost').searchParams
   assert.equal(query.get('symbols'), '600000.SH,000001.SZ')
 })
 
-test('minute-portfolio requests serialize execution controls', () => {
+test('vn.py opening-volume requests serialize execution controls', () => {
   installSseTestDoubles()
   startBacktest({
     strategy_id: 'opening_volume_portfolio',
-    engine: 'minute_portfolio',
+    engine: 'vnpy',
+    symbols: ['600000.SH'],
     candidate_sort: 'score',
-    entry_fill: 'signal_minute_close',
+    entry_fill: 'next_minute_open',
     exit_fill: 'next_minute_open',
     force_close_at_end: false,
+    max_buy_volume_ratio: 1,
+    max_sell_volume_ratio: 0.5,
   })
 
   const query = new URL(openedUrl, 'http://localhost').searchParams
   assert.equal(query.get('candidate_sort'), 'score')
-  assert.equal(query.get('entry_fill'), 'signal_minute_close')
+  assert.equal(query.get('entry_fill'), 'next_minute_open')
   assert.equal(query.get('exit_fill'), 'next_minute_open')
   assert.equal(query.get('force_close_at_end'), 'false')
+  assert.equal(query.get('max_buy_volume_ratio'), '1')
+  assert.equal(query.get('max_sell_volume_ratio'), '0.5')
 })
 
 test('opening-volume fields keep risk and minute-supported filters unambiguous', () => {

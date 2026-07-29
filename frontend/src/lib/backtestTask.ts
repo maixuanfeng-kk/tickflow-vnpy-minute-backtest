@@ -184,7 +184,8 @@ export function startBacktest(params: {
   asset_type?: 'stock' | 'etf'
   minute_fill?: boolean
   minute_data_dir?: string
-  max_volume_ratio?: number | null
+  max_buy_volume_ratio?: number | null
+  max_sell_volume_ratio?: number | null
   engine?: 'matrix' | 'vnpy' | 'minute_portfolio'
 }): void {
   // 取消之前的任务状态
@@ -231,7 +232,8 @@ export function startBacktest(params: {
     asset_type: params.asset_type,
     minute_fill: params.minute_fill,
     minute_data_dir: params.minute_data_dir,
-    max_volume_ratio: params.max_volume_ratio,
+    max_buy_volume_ratio: params.max_buy_volume_ratio,
+    max_sell_volume_ratio: params.max_sell_volume_ratio,
     engine: params.engine,
   })
 
