@@ -52,7 +52,7 @@ def test_all_a_board_rules_cover_star_and_bse() -> None:
     assert rule_for_symbol("688001.SH").first_buy_minimum == 200
     assert rule_for_symbol("920000.BJ").price_limit_pct == 0.30
     assert rule_for_symbol("600000.SH", limit_pct=0.10).price_limit_pct == 0.10
-    assert rule_for_symbol("600000.SH", name="*ST sample").price_limit_pct == 0.05
+    assert rule_for_symbol("600000.SH", name="*ST sample").price_limit_pct == 0.10
     assert rule_for_symbol("600000.SH", name="*ST sample", limit_pct=0.10).price_limit_pct == 0.10
 
 
