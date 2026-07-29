@@ -73,11 +73,23 @@ LOG_LEVEL=INFO        # DEBUG | INFO | WARNING | ERROR
 
 ```ini
 DATA_DIR=./data       # Parquet / DuckDB 数据存储目录
+LOCAL_MINUTE_CSV_DIR=D:\\market-data\\2026  # 仅管理员命令行导入分钟 CSV 的目录
 ```
 
 整个 `data/` 目录都不纳入 git —— 行情 K线、财务、自选、回测、监控记录,乃至概念/行业扩展数据,全部是程序运行时生成/拉取的用户数据。
 
 如需迁移数据,直接拷贝整个 `data/` 目录即可。详见 [deployment.md → 更新代码](./deployment.md#更新代码已部署用户必读)。
+
+### 本地分钟 CSV 与 vn.py 回测
+
+`LOCAL_MINUTE_CSV_DIR` 是服务器文件系统上的固定目录，不会在网页中显示，也没有对应的上传或导入 API。管理员在后端目录执行以下命令，源 CSV 会转换到 `DATA_DIR/kline_minute`；成功后源文件不再是回测的运行依赖，可自行保留或归档。
+
+```powershell
+.\.venv\Scripts\python.exe -m app.scripts.import_local_minute_csv --dry-run
+.\.venv\Scripts\python.exe -m app.scripts.import_local_minute_csv
+```
+
+导入器要求 GBK 编码、首行为说明、第二行为包含“股票代码、k线结束时间、开盘价、收盘价、最高价、最低价、成交量、成交额”的 CSV 表头，文件名形如 `sh600000.csv`。已有 `symbol + datetime` 数据保持不变；成交量按“手”转为“股”；价格原样保存并标记为复权状态未知。
 
 ---
 

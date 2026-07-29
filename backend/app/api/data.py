@@ -584,6 +584,27 @@ def _last_finished(job_label: str) -> str | None:
     return cache.get(job_label)
 
 
+def _local_minute_import_status(data_dir: Path) -> dict | None:
+    """Read local-minute provenance without exposing the server source path."""
+    import json
+
+    path = data_dir / "user_data" / "local_minute_import.json"
+    if not path.exists():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("read local minute import manifest failed: %s", exc)
+        return None
+    allowed = {
+        "status", "dry_run", "source_label", "adjustment", "volume_unit",
+        "files_discovered", "files_imported", "rows_read", "rows_valid",
+        "rows_invalid", "rows_added", "rows_skipped_existing", "earliest_date",
+        "latest_date", "imported_at", "skipped_files", "failed_files",
+    }
+    return {key: value for key, value in raw.items() if key in allowed}
+
+
 @router.get("/status")
 def status(request: Request) -> dict:
     repo = request.app.state.repo
@@ -599,7 +620,8 @@ def status(request: Request) -> dict:
     "etf_daily":         _get_table_stats("etf_daily",         lambda: _safe_aggregate_etf_daily(repo)),
     "etf_enriched":      _get_table_stats("etf_enriched",      lambda: _safe_aggregate_etf_enriched(repo)),
     "etf_instruments":   _get_table_stats("etf_instruments",   lambda: _safe_aggregate_etf_instruments(repo)),
-    "minute":      _get_table_stats("minute",      lambda: _safe_aggregate_minute(repo)),
+        "minute":      _get_table_stats("minute",      lambda: _safe_aggregate_minute(repo)),
+        "local_minute_import": _local_minute_import_status(data_dir),
         "adj_factor":  _get_table_stats("adj_factor",  lambda: _safe_aggregate_adj_factor(repo)),
         "instruments": _get_table_stats("instruments", lambda: _safe_aggregate_instruments(repo)),
         "financials":  _get_table_stats("financials",  lambda: _safe_aggregate_financials(repo)),
