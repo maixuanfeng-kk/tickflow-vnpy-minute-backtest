@@ -515,14 +515,18 @@ async def vnpy_stream(
     symbols: str,
     start: str,
     end: str,
-    strategy_id: str = "opening_breakout_pool",
     initial_capital: float = 1_000_000.0,
     commission_pct: float = 0.0002,
     stamp_tax_pct: float = 0.001,
     slippage_bps: float = 5.0,
     max_positions: int = 10,
     position_sizing: str = "equal",
-    max_volume_ratio: float | None = 0.10,
+    max_buy_volume_ratio: float | None = 1.0,
+    max_sell_volume_ratio: float | None = 1.0,
+    candidate_sort: str = "volume_ratio",
+    entry_fill: str = "next_minute_open",
+    exit_fill: str = "next_minute_open",
+    force_close_at_end: bool = True,
     params: str | None = None,
 ):
     """Run a registered vn.py portfolio strategy over local minute Parquet data."""
@@ -540,15 +544,19 @@ async def vnpy_stream(
         raise HTTPException(status_code=400, detail="vn.py 股票池必须包含 1–1000 只股票")
     if max_positions <= 0:
         raise HTTPException(status_code=400, detail="max_positions must be positive")
-    if max_volume_ratio is not None and max_volume_ratio < 0:
-        raise HTTPException(status_code=400, detail="max_volume_ratio must be non-negative")
-    # The UI sends zero only to mean that the volume-cap toggle is off.
-    if max_volume_ratio == 0:
-        max_volume_ratio = None
+    for label, ratio in (("max_buy_volume_ratio", max_buy_volume_ratio), ("max_sell_volume_ratio", max_sell_volume_ratio)):
+        if ratio is not None and ratio < 0:
+            raise HTTPException(status_code=400, detail=f"{label} must be non-negative")
+    max_buy_volume_ratio = None if max_buy_volume_ratio == 0 else max_buy_volume_ratio
+    max_sell_volume_ratio = None if max_sell_volume_ratio == 0 else max_sell_volume_ratio
     if position_sizing not in {"equal", "score_weight"}:
         raise HTTPException(status_code=400, detail="position_sizing must be equal or score_weight")
+    if candidate_sort not in {"score", "volume_ratio", "watchlist_order"}:
+        raise HTTPException(status_code=400, detail="invalid candidate_sort")
+    if entry_fill != "next_minute_open" or exit_fill != "next_minute_open":
+        raise HTTPException(status_code=400, detail="vn.py minute execution uses next_minute_open")
 
-    raw = f"vnpy|{strategy_id}|{selected_symbols}|{start}|{end}|{initial_capital}|{commission_pct}|{stamp_tax_pct}|{slippage_bps}|{max_positions}|{position_sizing}|{max_volume_ratio}|{params}"
+    raw = f"vnpy|opening_volume_portfolio|{selected_symbols}|{start}|{end}|{initial_capital}|{commission_pct}|{stamp_tax_pct}|{slippage_bps}|{max_positions}|{position_sizing}|{max_buy_volume_ratio}|{max_sell_volume_ratio}|{candidate_sort}|{force_close_at_end}|{params}"
     job_key = f"vnpy:{hashlib.md5(raw.encode()).hexdigest()[:12]}"
     _cleanup_stale_jobs()
     with _jobs_lock:
@@ -568,7 +576,7 @@ async def vnpy_stream(
         else:
             config = VnpyMinuteBacktestConfig(
                 symbols=selected_symbols,
-                strategy_id=strategy_id,
+                strategy_id="opening_volume_portfolio",
                 start=start_date,
                 end=end_date,
                 initial_capital=initial_capital,
@@ -577,7 +585,12 @@ async def vnpy_stream(
                 slippage_bps=slippage_bps,
                 max_positions=max_positions,
                 position_sizing=position_sizing,
-                max_volume_ratio=max_volume_ratio,
+                max_buy_volume_ratio=max_buy_volume_ratio,
+                max_sell_volume_ratio=max_sell_volume_ratio,
+                candidate_sort=candidate_sort,
+                entry_fill=entry_fill,
+                exit_fill=exit_fill,
+                force_close_at_end=force_close_at_end,
                 params=strategy_params,
                 is_cancelled=job.cancel_event.is_set,
                 on_progress=lambda current, total, trading_day, equity: job.progress.append({
