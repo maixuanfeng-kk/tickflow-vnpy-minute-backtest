@@ -239,27 +239,22 @@ def test_daily_context_uses_completed_days_only() -> None:
     assert reference.previous_cumulative_volumes[start.time()] == 10_000
 
 
-def test_opening_breakout_uses_close_breakout_and_dynamic_ma5() -> None:
+def test_opening_breakout_uses_native_high_breakout_and_dynamic_ma5() -> None:
     moment = datetime(2026, 1, 6, 9, 30)
     reference = DailyReference(
         previous_open=11.0,
         previous_close=10.0,
         previous_high=11.0,
-        closes=(9.8, 10.0),
+        closes=(10.0, 10.0),
         previous_cumulative_volumes={time(9, 30): 100, time(9, 31): 160},
     )
     strategy = OpeningBreakoutPoolStrategy({})
 
-    below = _bar("600000.SH", Exchange.SSE, moment, 10.9)
-    below.volume = 100
+    intraminute_breakout = _bar("600000.SH", Exchange.SSE, moment, 10.9)
+    intraminute_breakout.high_price = 11.01
+    intraminute_breakout.volume = 150
     context = PortfolioContext(moment, 100_000, 0, {}, {"600000.SH": reference})
-    assert strategy.on_minute({"600000.SH": below}, context) == []
-
-    crossed = _bar("600000.SH", Exchange.SSE, moment + timedelta(minutes=1), 11.1)
-    crossed.open_price = 10.9
-    crossed.volume = 150
-    crossed_context = PortfolioContext(crossed.datetime, 100_000, 0, {}, {"600000.SH": reference})
-    intents = strategy.on_minute({"600000.SH": crossed}, crossed_context)
+    intents = strategy.on_minute({"600000.SH": intraminute_breakout}, context)
     assert [(item.symbol, item.direction) for item in intents] == [("600000.SH", Direction.LONG)]
 
     sell_reference = DailyReference(closes=(9.0, 10.0, 11.0, 12.0, 13.0))
@@ -275,7 +270,7 @@ def test_opening_breakout_uses_close_breakout_and_dynamic_ma5() -> None:
 
     still_below = _bar("600000.SH", Exchange.SSE, datetime(2026, 1, 6, 10, 31), 10.4)
     still_below_context = PortfolioContext(still_below.datetime, 90_000, 0, {"600000.SH": position}, {"600000.SH": sell_reference})
-    assert strategy.on_minute({"600000.SH": still_below}, still_below_context) == []
+    assert [(item.symbol, item.direction) for item in strategy.on_minute({"600000.SH": still_below}, still_below_context)] == [("600000.SH", Direction.SHORT)]
 
 
 def test_opening_breakout_condition_2_requires_same_time_volume_surge() -> None:
@@ -290,26 +285,26 @@ def test_opening_breakout_condition_2_requires_same_time_volume_surge() -> None:
     context = PortfolioContext(moment, 100_000, 0, {}, {"600000.SH": reference})
 
     low_volume = _bar("600000.SH", Exchange.SSE, moment, 10.4)
-    low_volume.volume = 149
-    assert OpeningBreakoutPoolStrategy({"volume_multiple": 3.0}).on_minute(
+    low_volume.volume = 299
+    assert OpeningBreakoutPoolStrategy({"volume_multiple": 3.0, "enable_branch_a": False}).on_minute(
         {"600000.SH": low_volume}, context
     ) == []
 
     enough_volume = _bar("600000.SH", Exchange.SSE, moment, 10.4)
-    enough_volume.volume = 150
-    intents = OpeningBreakoutPoolStrategy({"volume_multiple": 3.0}).on_minute(
+    enough_volume.volume = 300
+    intents = OpeningBreakoutPoolStrategy({"volume_multiple": 3.0, "enable_branch_a": False}).on_minute(
         {"600000.SH": enough_volume}, context
     )
     assert len(intents) == 1
-    assert any("2" in label for label in intents[0].diagnostic["matched_conditions"])
+    assert intents[0].diagnostic["matched_conditions"] == ["two_day_moderate_rise"]
 
 
-def test_opening_breakout_condition_3_keeps_three_percent_ceiling() -> None:
+def test_opening_breakout_condition_3_keeps_native_previous_return_ceiling() -> None:
     moment = datetime(2026, 1, 6, 9, 30)
 
     def _reference(previous_previous_close: float) -> DailyReference:
         return DailyReference(
-            previous_open=10.1,
+            previous_open=9.9,
             previous_close=10.0,
             previous_high=10.5,
             closes=(previous_previous_close, 10.0),
@@ -318,14 +313,14 @@ def test_opening_breakout_condition_3_keeps_three_percent_ceiling() -> None:
 
     bar = _bar("600000.SH", Exchange.SSE, moment, 10.1)
     bar.volume = 150
-    under_three = PortfolioContext(moment, 100_000, 0, {}, {"600000.SH": _reference(10 / 1.029)})
+    under_five = PortfolioContext(moment, 100_000, 0, {}, {"600000.SH": _reference(10 / 1.049)})
     assert OpeningBreakoutPoolStrategy({"volume_multiple": 1.5}).on_minute(
-        {"600000.SH": bar}, under_three
+        {"600000.SH": bar}, under_five
     )
 
-    at_three = PortfolioContext(moment, 100_000, 0, {}, {"600000.SH": _reference(10 / 1.03)})
+    at_five = PortfolioContext(moment, 100_000, 0, {}, {"600000.SH": _reference(10 / 1.05)})
     assert OpeningBreakoutPoolStrategy({"volume_multiple": 1.5}).on_minute(
-        {"600000.SH": bar}, at_three
+        {"600000.SH": bar}, at_five
     ) == []
 
 
@@ -366,7 +361,7 @@ def test_opening_breakout_condition_1_ignores_conditions_2_and_3() -> None:
     second_context = PortfolioContext(condition_1_bar.datetime, 100_000, 0, {}, {"600000.SH": second_reference})
     intents = condition_1_strategy.on_minute({"600000.SH": condition_1_bar}, second_context)
     assert [(item.symbol, item.direction) for item in intents] == [("600000.SH", Direction.LONG)]
-    assert intents[0].diagnostic["matched_conditions"] == ["条件1：阴线后同期累计量达1.5倍并突破昨日高点"]
+    assert intents[0].diagnostic["matched_conditions"] == ["previous_bearish_breakout"]
 
 
 def test_repository_streams_only_non_empty_minute_days() -> None:
