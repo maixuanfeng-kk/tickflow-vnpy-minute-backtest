@@ -44,6 +44,7 @@ import {
   Moon,
   X,
   WifiOff,
+  Workflow,
 } from 'lucide-react'
 import { Logo } from './Logo'
 import { api, type IndexQuote } from '@/lib/api'
@@ -61,6 +62,8 @@ const CORE_INDEXES = [
   { symbol: '399006.SZ', name: '创业板指' },
   { symbol: '000680.SH', name: '科创综指' },
 ] as const
+
+const stockPoolsNav = { to: '/stock-pools', label: 'Stock Pools', icon: Workflow }
 
 type CoreIndex = (typeof CORE_INDEXES)[number]
 
@@ -381,7 +384,7 @@ export function Layout() {
     .filter(m => m.visible)
     .map(m => ({ to: `/analysis/${m.id}`, label: m.label, icon: m.icon === 'tags' ? Tags : BarChart3 }))
 
-  const allNav = [...nav, ...analysisNav]
+  const allNav = [...nav, stockPoolsNav, ...analysisNav]
   const savedOrder = prefs?.nav_order ?? []
 
   const navItems = savedOrder.length > 0

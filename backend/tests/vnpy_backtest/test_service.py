@@ -7,11 +7,10 @@ from app.vnpy_backtest.service import VnpyMinuteBacktestConfig, VnpyMinuteBackte
 
 
 class _Repo:
-    def get_minute_range(self, symbols, start, end, asset_type="stock"):
+    def iter_minute_days(self, symbols, start, end):
         assert symbols == ["600000.SH"]
-        assert asset_type == "stock"
         base = datetime(2026, 1, 5, 9, 30)
-        return pl.DataFrame(
+        yield date(2026, 1, 5), pl.DataFrame(
             {
                 "symbol": ["600000.SH"] * 22,
                 "datetime": [base + timedelta(minutes=i) for i in range(22)],
@@ -24,32 +23,44 @@ class _Repo:
             }
         )
 
+    def minute_trading_days(self, start, end):
+        return [date(2026, 1, 5)]
 
-def test_vnpy_service_replays_repository_minute_bars() -> None:
+    def get_instruments(self):
+        return pl.DataFrame()
+
+
+def test_vnpy_service_replays_portfolio_minute_bars() -> None:
     result = VnpyMinuteBacktestService(_Repo()).run(
         VnpyMinuteBacktestConfig(
-            symbol="600000.SH",
+            symbols=("600000.SH",),
             start=date(2026, 1, 5),
             end=date(2026, 1, 5),
-            params={"amount_multiple": 0.1},
+            params={},
         )
     )
 
     assert result["config"]["engine"] == "vnpy"
     assert result["config"]["frequency"] == "1m"
-    assert result["strategy_info"]["id"] == "minute_double_ma_volume"
-    assert result["stats"]["total_trade_count"] == 1
+    assert result["strategy_info"]["id"] == "opening_breakout_pool"
+    assert result["stats"]["symbols_requested"] == 1
 
 
 def test_vnpy_service_rejects_empty_repository_data() -> None:
     class EmptyRepo:
-        def get_minute_range(self, *args, **kwargs):
+        def iter_minute_days(self, *args, **kwargs):
+            return iter(())
+
+        def minute_trading_days(self, *args, **kwargs):
+            return []
+
+        def get_instruments(self):
             return pl.DataFrame()
 
-    with pytest.raises(ValueError, match="no minute bars"):
+    with pytest.raises(ValueError, match="没有本地分钟 K"):
         VnpyMinuteBacktestService(EmptyRepo()).run(
             VnpyMinuteBacktestConfig(
-                symbol="600000.SH",
+                symbols=("600000.SH",),
                 start=date(2026, 1, 5),
                 end=date(2026, 1, 5),
             )

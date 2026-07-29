@@ -512,16 +512,20 @@ async def strategy_stream(
 @router.get("/vnpy/stream")
 async def vnpy_stream(
     request: Request,
-    symbol: str,
+    symbols: str,
     start: str,
     end: str,
+    strategy_id: str = "opening_breakout_pool",
     initial_capital: float = 1_000_000.0,
     commission_pct: float = 0.0002,
     stamp_tax_pct: float = 0.001,
     slippage_bps: float = 5.0,
+    max_positions: int = 10,
+    position_sizing: str = "equal",
+    max_volume_ratio: float | None = 0.10,
     params: str | None = None,
 ):
-    """Run the dedicated vn.py minute CTA backtest over stored minute K data."""
+    """Run a registered vn.py portfolio strategy over local minute Parquet data."""
     from app.vnpy_backtest.service import VnpyMinuteBacktestConfig, VnpyMinuteBacktestService
 
     try:
@@ -531,8 +535,20 @@ async def vnpy_stream(
         raise HTTPException(status_code=400, detail="start and end must be ISO dates") from exc
     if end_date < start_date:
         raise HTTPException(status_code=400, detail="end date must not precede start date")
+    selected_symbols = tuple(dict.fromkeys(item.strip().upper() for item in symbols.split(",") if item.strip()))
+    if not 1 <= len(selected_symbols) <= 1000:
+        raise HTTPException(status_code=400, detail="vn.py 股票池必须包含 1–1000 只股票")
+    if max_positions <= 0:
+        raise HTTPException(status_code=400, detail="max_positions must be positive")
+    if max_volume_ratio is not None and max_volume_ratio < 0:
+        raise HTTPException(status_code=400, detail="max_volume_ratio must be non-negative")
+    # The UI sends zero only to mean that the volume-cap toggle is off.
+    if max_volume_ratio == 0:
+        max_volume_ratio = None
+    if position_sizing not in {"equal", "score_weight"}:
+        raise HTTPException(status_code=400, detail="position_sizing must be equal or score_weight")
 
-    raw = f"vnpy|{symbol}|{start}|{end}|{initial_capital}|{commission_pct}|{stamp_tax_pct}|{slippage_bps}|{params}"
+    raw = f"vnpy|{strategy_id}|{selected_symbols}|{start}|{end}|{initial_capital}|{commission_pct}|{stamp_tax_pct}|{slippage_bps}|{max_positions}|{position_sizing}|{max_volume_ratio}|{params}"
     job_key = f"vnpy:{hashlib.md5(raw.encode()).hexdigest()[:12]}"
     _cleanup_stale_jobs()
     with _jobs_lock:
@@ -551,14 +567,25 @@ async def vnpy_stream(
             _finish_job(job, error="params must be JSON")
         else:
             config = VnpyMinuteBacktestConfig(
-                symbol=symbol,
+                symbols=selected_symbols,
+                strategy_id=strategy_id,
                 start=start_date,
                 end=end_date,
                 initial_capital=initial_capital,
                 commission_pct=commission_pct,
                 stamp_tax_pct=stamp_tax_pct,
                 slippage_bps=slippage_bps,
+                max_positions=max_positions,
+                position_sizing=position_sizing,
+                max_volume_ratio=max_volume_ratio,
                 params=strategy_params,
+                is_cancelled=job.cancel_event.is_set,
+                on_progress=lambda current, total, trading_day, equity: job.progress.append({
+                    "day": current,
+                    "total": total,
+                    "date": trading_day.isoformat(),
+                    "equity": equity,
+                }),
             )
 
             def _run_vnpy() -> None:
@@ -597,6 +624,14 @@ async def vnpy_stream(
             await asyncio.sleep(0.05)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@router.get("/vnpy/strategies")
+def vnpy_strategies() -> dict:
+    """Return selectable local-Parquet vn.py portfolio strategies."""
+    from app.vnpy_backtest.strategies.registry import list_strategies
+
+    return {"strategies": [item.to_public_dict() for item in list_strategies()]}
 
 
 @router.get("/minute-portfolio/stream")
@@ -864,28 +899,41 @@ async def strategy_cancel(request: Request):
         # 可选成本参数: 缺省或空串 → None (与 stream 侧 float | None 口径一致, 保证 job_key 对齐)。
         v = _get(key)
         return float(v) if v else None
-    job_key = _make_job_key(
-        _get("strategy_id"),
-        _get("symbols") or None,
-        _get("start") or None,
-        _get("end") or None,
-        _get("matching", "open_t+1"),
-        _get("entry_fill") or None,
-        _get("exit_fill") or None,
-        float(_get("fees_pct", "0.0002")),
-        float(_get("slippage_bps", "5")),
-        int(_get("max_positions", "10")),
-        float(_get("max_exposure_pct", "1")),
-        float(_get("initial_capital", "1000000")),
-        _get("position_sizing", "equal"),
-        _get("params") or None,
-        _get("overrides") or None,
-        _get("mode", "position"),
-        int(_get("holding_days", "5")),
-        commission_pct=_get_opt_float("commission_pct"),
-        stamp_tax_pct=_get_opt_float("stamp_tax_pct"),
-        asset_type=_get("asset_type", "stock"),
-    )
+    if _get("engine") == "vnpy":
+        volume_ratio = _get("max_volume_ratio")
+        normalized_volume_ratio = None if volume_ratio in {"", "0"} else float(volume_ratio)
+        raw = (
+            f"vnpy|{_get('strategy_id', 'opening_breakout_pool')}|"
+            f"{tuple(dict.fromkeys(item.strip().upper() for item in _get('symbols').split(',') if item.strip()))}|"
+            f"{_get('start')}|{_get('end')}|{float(_get('initial_capital', '1000000'))}|"
+            f"{float(_get('commission_pct', '0.0002'))}|{float(_get('stamp_tax_pct', '0.001'))}|"
+            f"{float(_get('slippage_bps', '5'))}|{int(_get('max_positions', '10'))}|"
+            f"{_get('position_sizing', 'equal')}|{normalized_volume_ratio}|{_get('params')}"
+        )
+        job_key = f"vnpy:{hashlib.md5(raw.encode()).hexdigest()[:12]}"
+    else:
+        job_key = _make_job_key(
+            _get("strategy_id"),
+            _get("symbols") or None,
+            _get("start") or None,
+            _get("end") or None,
+            _get("matching", "open_t+1"),
+            _get("entry_fill") or None,
+            _get("exit_fill") or None,
+            float(_get("fees_pct", "0.0002")),
+            float(_get("slippage_bps", "5")),
+            int(_get("max_positions", "10")),
+            float(_get("max_exposure_pct", "1")),
+            float(_get("initial_capital", "1000000")),
+            _get("position_sizing", "equal"),
+            _get("params") or None,
+            _get("overrides") or None,
+            _get("mode", "position"),
+            int(_get("holding_days", "5")),
+            commission_pct=_get_opt_float("commission_pct"),
+            stamp_tax_pct=_get_opt_float("stamp_tax_pct"),
+            asset_type=_get("asset_type", "stock"),
+        )
     # 持锁读任务表: 与 _cleanup_stale_jobs 的 pop、stream 的写入互斥
     with _jobs_lock:
         job = _running_jobs.get(job_key)

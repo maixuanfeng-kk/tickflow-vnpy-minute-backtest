@@ -184,6 +184,7 @@ export function startBacktest(params: {
   asset_type?: 'stock' | 'etf'
   minute_fill?: boolean
   minute_data_dir?: string
+  max_volume_ratio?: number | null
   engine?: 'matrix' | 'vnpy' | 'minute_portfolio'
 }): void {
   // 取消之前的任务状态
@@ -199,7 +200,7 @@ export function startBacktest(params: {
   const isVnpy = params.engine === 'vnpy'
   const isMinutePortfolio = params.engine === 'minute_portfolio'
   const symbols = params.symbols?.filter(Boolean) ?? []
-  if (isVnpy && symbols.length !== 1) {
+  if (isVnpy && (symbols.length < 1 || symbols.length > 1000)) {
     current = { ...current, isPending: false, error: 'vn.py 分钟回测仅支持单只股票', reconnecting: false }
     emit()
     return
@@ -207,8 +208,7 @@ export function startBacktest(params: {
 
   const qs = buildQuery({
     strategy_id: params.strategy_id,
-    symbols: isVnpy ? undefined : symbols.join(','),
-    symbol: isVnpy ? symbols[0] : undefined,
+    symbols: symbols.join(','),
     start: params.start ?? undefined,
     end: params.end ?? undefined,
     matching: params.matching,
@@ -231,6 +231,7 @@ export function startBacktest(params: {
     asset_type: params.asset_type,
     minute_fill: params.minute_fill,
     minute_data_dir: params.minute_data_dir,
+    max_volume_ratio: params.max_volume_ratio,
     engine: params.engine,
   })
 

@@ -22,17 +22,19 @@ def bars_from_minute_frame(symbol: str, frame: pl.DataFrame) -> list[BarData]:
 
     bars: list[BarData] = []
     for row in frame.sort("datetime").iter_rows(named=True):
-        bars.append(BarData(
-            gateway_name="TICKFLOW",
-            symbol=stock_symbol,
-            exchange=exchange,
-            datetime=row["datetime"],
-            interval=Interval.MINUTE,
-            volume=float(row["volume"] or 0.0),
-            turnover=float(row["amount"] or 0.0),
-            open_price=float(row["open"] or 0.0),
-            high_price=float(row["high"] or 0.0),
-            low_price=float(row["low"] or 0.0),
-            close_price=float(row["close"] or 0.0),
-        ))
+        bars.append(
+            BarData(
+                gateway_name="TICKFLOW",
+                symbol=stock_symbol,
+                exchange=exchange,
+                datetime=row["datetime"],
+                interval=Interval.MINUTE,
+                volume=float(row["volume"] or 0.0),
+                turnover=float(row["amount"] or 0.0),
+                open_price=float(row["open"] or 0.0),
+                high_price=float(row["high"] or 0.0),
+                low_price=float(row["low"] or 0.0),
+                close_price=float(row["close"] or 0.0),
+            )
+        )
     return bars

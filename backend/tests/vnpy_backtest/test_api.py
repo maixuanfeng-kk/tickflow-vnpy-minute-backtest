@@ -14,7 +14,10 @@ async def test_vnpy_stream_emits_progress_then_result(monkeypatch) -> None:
             assert repo == "repo"
 
         def run(self, config):
-            assert config.symbol == "600000.SH"
+            assert config.symbols == ("600000.SH",)
+            assert config.strategy_id == "opening_breakout_pool"
+            assert config.position_sizing == "score_weight"
+            assert config.max_volume_ratio is None
             return {"run_id": "run-1", "stats": {}, "trades": []}
 
     async def not_disconnected():
@@ -28,9 +31,11 @@ async def test_vnpy_stream_emits_progress_then_result(monkeypatch) -> None:
 
     response = await backtest.vnpy_stream(
         request,
-        symbol="600000.SH",
+        symbols="600000.SH",
         start="2026-01-05",
         end="2026-01-05",
+        position_sizing="score_weight",
+        max_volume_ratio=0,
     )
     chunks = []
     async for chunk in response.body_iterator:

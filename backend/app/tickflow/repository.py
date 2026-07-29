@@ -1381,6 +1381,92 @@ class KlineRepository:
             logger.warning("分钟K按日期查询失败: %s", e)
             return pl.DataFrame()
 
+
+    def _read_minute_partition(
+        self,
+        symbols: list[str],
+        trade_date: date,
+    ) -> pl.DataFrame | None:
+        """Read one standard local-minute date partition without scanning the library.
+
+        ``None`` means this is an older/non-partitioned store and callers should
+        use their compatibility scan.  An empty frame means the partition exists
+        but contains none of the requested symbols.
+        """
+        base = self.store.data_dir / "kline_minute"
+        part = base / f"date={trade_date.isoformat()}" / "part.parquet"
+        if not part.exists():
+            return None
+        try:
+            lf = pl.scan_parquet(str(part))
+            available = set(lf.collect_schema().names())
+            columns = [
+                column for column in ("symbol", "datetime", "open", "high", "low", "close", "volume", "amount")
+                if column in available
+            ]
+            if "symbol" not in columns or "datetime" not in columns:
+                return pl.DataFrame()
+            return (
+                lf.select(columns)
+                .filter(pl.col("symbol").is_in(symbols))
+                .sort(["symbol", "datetime"])
+                .collect(engine="streaming")
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("minute partition query failed for %s: %s", trade_date, e)
+            return pl.DataFrame()
+
+    def minute_trading_days(self, start: date, end: date) -> list[date]:
+        """List available local-minute partition dates without opening their data."""
+        if end < start:
+            return []
+        base = self.store.data_dir / "kline_minute"
+        dates: list[date] = []
+        try:
+            for directory in base.glob("date=*"):
+                if not directory.is_dir() or not (directory / "part.parquet").exists():
+                    continue
+                try:
+                    value = date.fromisoformat(directory.name.removeprefix("date="))
+                except ValueError:
+                    continue
+                if start <= value <= end:
+                    dates.append(value)
+        except OSError as e:
+            logger.warning("minute partition listing failed: %s", e)
+        return sorted(dates)
+
+    def iter_minute_days(
+        self,
+        symbols: list[str],
+        start: date,
+        end: date,
+    ):
+        """Yield local minute bars one trading day at a time.
+
+        Portfolio minute backtests use this instead of collecting an entire
+        multi-symbol date range in memory.  Empty calendar days are skipped.
+        """
+        from datetime import timedelta
+
+        if not symbols or end < start:
+            return
+        partition_days = self.minute_trading_days(start, end) if hasattr(self, "store") else []
+        if partition_days:
+            for current in partition_days:
+                frame = self._read_minute_partition(symbols, current)
+                if frame is not None and not frame.is_empty():
+                    yield current, frame
+            return
+
+        # Compatibility fallback for legacy stores without date partitions.
+        current = start
+        while current <= end:
+            frame = self.get_minute_range(symbols, current, current)
+            if not frame.is_empty():
+                yield current, frame
+            current += timedelta(days=1)
+
     # ================================================================
     # Polars 查询内部方法
     # ================================================================

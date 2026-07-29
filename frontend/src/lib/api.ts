@@ -826,6 +826,72 @@ export interface StrategyBacktestResult {
   error: string | null
 }
 
+export interface VnpyStrategy {
+  id: string
+  name: string
+  description: string
+  min_symbols: number
+  max_symbols: number
+  parameters: { id: string; label: string; default: number | string | boolean; kind?: string; minimum?: number; maximum?: number }[]
+}
+
+export interface StockPoolStrategy {
+  id: string
+  name: string
+  description: string
+  rule_version: string
+  parameters: Record<string, unknown>
+  warnings: string[]
+}
+
+export interface StockPoolReadiness {
+  status: 'ready' | 'not_ready'
+  month: string
+  as_of_date?: string | null
+  missing: string[]
+  warnings: string[]
+  coverage: Record<string, unknown>
+}
+
+export interface StockPoolMember {
+  symbol: string
+  stock_name?: string | null
+  condition_1: boolean
+  condition_2: boolean
+  market_cap?: number | null
+  market_cap_passed?: boolean | null
+  listing_date?: string | null
+  listing_trading_days?: number | null
+  revenue_yoy?: number | null
+  net_profit?: number | null
+  close?: number | null
+  ma60?: number | null
+  high_200?: number | null
+}
+
+export interface StockPoolResult {
+  status: 'ready' | 'not_ready'
+  strategy_id: string
+  month: string
+  as_of_date?: string | null
+  readiness: StockPoolReadiness
+  code_string?: string
+  members: StockPoolMember[]
+  warnings: string[]
+  run_id?: string
+  saved_at?: string
+}
+
+export interface StockPoolRun {
+  run_id: string
+  strategy_id: string
+  month: string
+  as_of_date?: string | null
+  member_count: number
+  saved_at?: string
+  warnings: string[]
+}
+
 // ===== Settings =====
 
 /** 端点发现清单 —— 对应 tickflow.org/endpoints.json */
@@ -1617,6 +1683,19 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+
+  vnpyStrategies: () => request<{ strategies: VnpyStrategy[] }>('/api/backtest/vnpy/strategies'),
+
+  stockPoolStrategies: () => request<{ strategies: StockPoolStrategy[] }>('/api/stock-pools/strategies'),
+  stockPoolReadiness: (strategyId: string, month: string) =>
+    request<StockPoolReadiness>(`/api/stock-pools/readiness?strategy_id=${encodeURIComponent(strategyId)}&month=${encodeURIComponent(month)}`),
+  stockPoolPreview: (strategyId: string, month: string) =>
+    request<StockPoolResult>('/api/stock-pools/preview', { method: 'POST', body: JSON.stringify({ strategy_id: strategyId, month }) }),
+  stockPoolSave: (strategyId: string, month: string) =>
+    request<StockPoolResult>('/api/stock-pools/save', { method: 'POST', body: JSON.stringify({ strategy_id: strategyId, month }) }),
+  stockPoolRuns: (strategyId?: string) =>
+    request<{ runs: StockPoolRun[] }>(`/api/stock-pools/runs${strategyId ? `?strategy_id=${encodeURIComponent(strategyId)}` : ''}`),
+  stockPoolRun: (runId: string) => request<StockPoolResult>(`/api/stock-pools/runs/${encodeURIComponent(runId)}`),
 
   pipelineRun: () => request<{ job_id: string; reused: boolean }>(
     '/api/pipeline/run', { method: 'POST' },
