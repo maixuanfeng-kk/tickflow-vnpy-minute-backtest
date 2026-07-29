@@ -39,10 +39,10 @@ The tests cover local imports, stock-pool readiness, vn.py registry/portfolio ma
 
 Configure local CSV directories only in server `.env`; do not commit `.env` or data files. Stock-pool snapshots remain local research output. Backtests deliberately use user-copied/pasted codes rather than automatically binding saved pools.
 
-The two minute engines share one page but do not share an execution engine. Roll back the merge with:
+The two minute engines share one page but do not share an execution engine. The main merge commit is `9734fb7`. Roll back the merge with:
 
 ```powershell
-git revert -m 1 <merge-commit>
+git revert -m 1 9734fb7
 ```
 
 ## Conflict record
