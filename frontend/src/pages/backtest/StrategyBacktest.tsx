@@ -8,6 +8,7 @@ import {
   type StrategyBacktestTrade,
   type StrategyDetail,
   type StrategyParamDef,
+  type VnpyStrategy,
 } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
@@ -900,6 +901,8 @@ export function StrategyBacktest() {
   const signalNames = useSignalNames()
   const [saved] = useState(() => storage.strategyBacktestLast.get(null))
   const [selectedStrategy, setSelectedStrategy] = useState<string | null>(saved?.selectedStrategy ?? null)
+  const [engineMode, setEngineMode] = useState<'native' | 'vnpy'>('native')
+  const [vnpyStrategyId, setVnpyStrategyId] = useState('opening_breakout_pool')
   const [strategyGroup, setStrategyGroup] = useState<StrategyGroup>('all')
   const [symbols, setSymbols] = useState(saved?.symbols ?? '')
   const [assetType, setAssetType] = useState<'stock' | 'etf'>(saved?.assetType ?? 'stock')
@@ -922,6 +925,7 @@ export function StrategyBacktest() {
   const [maxExposure, setMaxExposure] = useState(saved?.maxExposure ?? '100')
   const [initialCapital, setInitialCapital] = useState(saved?.initialCapital ?? '1000000')
   const [positionSizing, setPositionSizing] = useState<'equal' | 'score_weight'>(saved?.positionSizing ?? 'equal')
+  const [volumeLimitEnabled, setVolumeLimitEnabled] = useState(true)
   const [simMode, setSimMode] = useState<'position' | 'full'>(saved?.mode ?? 'position')
   const [holdingDays, setHoldingDays] = useState(saved?.holdingDays ?? '5')
   const [highGranularity, setHighGranularity] = useState(saved?.minuteFill ?? false)
@@ -961,6 +965,7 @@ export function StrategyBacktest() {
     queryKey: QK.screenerStrategies(assetType, true),
     queryFn: () => api.screenerStrategies(assetType, true),
   })
+  const vnpyStrategies = useQuery({ queryKey: ['vnpy-strategies'], queryFn: api.vnpyStrategies })
 
   const strategyList = useMemo(() => strategies.data?.presets ?? [], [strategies.data])
   const filteredStrategyList = useMemo(() => (
@@ -1054,6 +1059,24 @@ export function StrategyBacktest() {
   }, [backtestTask])
 
   const handleRun = () => {
+    if (engineMode === 'vnpy') {
+      startBacktest({
+        strategy_id: vnpyStrategyId,
+        symbols: symbols ? symbols.split(',').map(s => s.trim()).filter(Boolean) : null,
+        start: start || null,
+        end: end || undefined,
+        commission_pct: Number(fees) / 10000,
+        stamp_tax_pct: Number(stampTax) / 1000,
+        slippage_bps: Number(slippage),
+        max_positions: Number(maxPositions),
+        initial_capital: Number(initialCapital),
+        position_sizing: positionSizing,
+        max_volume_ratio: volumeLimitEnabled ? 0.10 : 0,
+        params: { cash_reserve_ratio: 0.03, min_commission: 5 },
+        engine: 'vnpy',
+      })
+      return
+    }
     if (!selectedStrategy) return
     const requestOverrides = detail
       ? normalizeStrategyOverrides(detail, overrides)
@@ -1371,6 +1394,23 @@ export function StrategyBacktest() {
       {/* 配置面板 */}
       <section className="space-y-3 border-b xl:border-b-0 xl:border-r border-border bg-base/25 px-3 py-3 xl:overflow-y-auto">
         <div>
+          <div className="mb-3 grid grid-cols-2 gap-1 rounded-input border border-border bg-surface p-1 text-[11px]">
+            <button type="button" onClick={() => setEngineMode('native')} className={`rounded-btn px-2 py-1.5 ${engineMode === 'native' ? 'bg-accent/15 text-accent' : 'text-muted'}`}>原生分钟组合</button>
+            <button type="button" onClick={() => setEngineMode('vnpy')} className={`rounded-btn px-2 py-1.5 ${engineMode === 'vnpy' ? 'bg-accent/15 text-accent' : 'text-muted'}`}>vn.py 开盘突破</button>
+          </div>
+          {engineMode === 'vnpy' ? (
+            <div className="space-y-2 rounded-input border border-border bg-surface p-2">
+              <select value={vnpyStrategyId} onChange={event => setVnpyStrategyId(event.target.value)} className={INPUT_CLS}>
+                {(vnpyStrategies.data?.strategies ?? []).map((strategy: VnpyStrategy) => <option key={strategy.id} value={strategy.id}>{strategy.name}</option>)}
+              </select>
+              <textarea value={symbols} onChange={event => setSymbols(event.target.value)} placeholder="粘贴股票池代码，例如 600000.SH,000001.SZ" className={`${INPUT_CLS} min-h-20 resize-y`} />
+              <label className="flex items-center gap-2 text-[11px] text-secondary">
+                <input type="checkbox" checked={volumeLimitEnabled} onChange={event => setVolumeLimitEnabled(event.target.checked)} />
+                单笔成交量限制为该分钟成交量的 10%
+              </label>
+              <p className="text-[10px] text-muted">从“股票池构建”页面复制代码串后粘贴；支持 1–1000 只股票。</p>
+            </div>
+          ) : <>
           <div className="flex items-center justify-between mb-1.5">
             <label className="text-xs font-medium text-secondary">选择策略</label>
             {/* 分钟K成交 */}
@@ -1452,6 +1492,7 @@ export function StrategyBacktest() {
             ))}
             </div>
           </div>
+          </>}
         </div>
 
         {selectedStrategy && strategyDetail.isLoading && (
