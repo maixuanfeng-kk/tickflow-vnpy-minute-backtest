@@ -66,3 +66,18 @@ def test_shared_entry_keeps_strict_three_percent_branch_b_boundary() -> None:
     )
 
     assert decision is None
+
+
+def test_shared_candidate_ranking_uses_volume_ratio_then_return() -> None:
+    shared = _shared_module()
+
+    assert shared is not None
+    rows = shared.rank_opening_volume_candidates(
+        [
+            {"symbol": "600000.SH", "volume_ratio": 1.5, "today_return": 0.04, "previous_return": -0.01},
+            {"symbol": "300001.SZ", "volume_ratio": 2.0, "today_return": 0.03, "previous_return": 0.01},
+        ],
+        mode="volume_ratio",
+    )
+
+    assert [row["symbol"] for row in rows] == ["300001.SZ", "600000.SH"]

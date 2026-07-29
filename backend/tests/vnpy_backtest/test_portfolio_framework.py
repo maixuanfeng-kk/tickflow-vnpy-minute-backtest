@@ -34,16 +34,14 @@ class _BuyThenSell:
 
 
 def test_registry_exposes_only_portfolio_strategies() -> None:
-    portfolio_spec = get_strategy("opening_breakout_pool")
+    portfolio_spec = get_strategy("opening_volume_portfolio")
     assert portfolio_spec is not None
     assert portfolio_spec.min_symbols == 1
     assert portfolio_spec.max_symbols == 1000
-    assert get_strategy("opening_breakout_condition_1") is not None
+    assert get_strategy("opening_breakout_pool") is None
+    assert get_strategy("opening_breakout_condition_1") is None
     assert get_strategy("minute_double_ma_volume") is None
-    assert [item.id for item in list_strategies()] == [
-        "opening_breakout_pool",
-        "opening_breakout_condition_1",
-    ]
+    assert [item.id for item in list_strategies()] == ["opening_volume_portfolio"]
 
 
 def test_all_a_board_rules_cover_star_and_bse() -> None:
@@ -153,7 +151,7 @@ def test_portfolio_equal_sizing_reserves_cash_for_unfilled_position_slots() -> N
     assert engine.cash == 60_000
 
 
-def test_portfolio_equal_sizing_refreshes_after_full_exit_but_keeps_fixed_reserve() -> None:
+def test_portfolio_equal_sizing_recalculates_cash_reserve_from_current_equity() -> None:
     first_day_start = datetime(2026, 1, 5, 9, 30)
     second_day_start = datetime(2026, 1, 6, 9, 30)
 
@@ -180,9 +178,9 @@ def test_portfolio_equal_sizing_refreshes_after_full_exit_but_keeps_fixed_reserv
     }
     second_day = {
         "600000.SH": [
-            _bar("600000.SH", Exchange.SSE, second_day_start, 20),
-            _bar("600000.SH", Exchange.SSE, second_day_start + timedelta(minutes=1), 20),
-            _bar("600000.SH", Exchange.SSE, second_day_start + timedelta(minutes=2), 20),
+                _bar("600000.SH", Exchange.SSE, second_day_start, 50),
+                _bar("600000.SH", Exchange.SSE, second_day_start + timedelta(minutes=1), 50),
+                _bar("600000.SH", Exchange.SSE, second_day_start + timedelta(minutes=2), 50),
         ],
         "300001.SZ": [
             _bar("300001.SZ", Exchange.SZSE, second_day_start, 10),
@@ -199,11 +197,12 @@ def test_portfolio_equal_sizing_refreshes_after_full_exit_but_keeps_fixed_reserv
     assert [(fill.symbol, fill.direction, fill.volume) for fill in engine.fills] == [
         ("600000.SH", Direction.LONG, 1_200),
         ("600000.SH", Direction.SHORT, 1_200),
-        ("300001.SZ", Direction.LONG, 1_300),
+        ("300001.SZ", Direction.LONG, 1_700),
     ]
+    assert engine.reserve_cash == 4_440
 
 
-def test_portfolio_priority_randomization_is_reproducible_despite_input_order() -> None:
+def test_portfolio_candidate_order_is_reproducible_despite_input_order() -> None:
     start = datetime(2026, 1, 5, 9, 30)
 
     class _TiedSignals:
@@ -494,3 +493,109 @@ def test_portfolio_engine_limits_positions_and_prioritizes_multi_condition_signa
     assert result.signals[0].status == "rejected"
     assert result.signals[0].rejection_reason == "max_positions"
     assert result.signals[1].status == "filled"
+
+
+def test_portfolio_engine_orders_candidates_by_selected_volume_ratio() -> None:
+    start = datetime(2026, 1, 5, 9, 30)
+
+    class _VolumeRatioSignals:
+        def on_minute(self, _bars, context):
+            if context.timestamp != start:
+                return []
+            return [
+                OrderIntent("600000.SH", Direction.LONG, "entry", diagnostic={"volume_ratio": 1.5}),
+                OrderIntent("300001.SZ", Direction.LONG, "entry", diagnostic={"volume_ratio": 2.0}),
+            ]
+
+    engine = MultiSymbolNextBarOpenEngine(
+        initial_cash=100_000, commission_rate=0, stamp_tax_rate=0,
+        slippage_rate=0, min_commission=0, max_buy_volume_ratio=None,
+        max_sell_volume_ratio=None, reserve_ratio=0, max_positions=1,
+        candidate_sort="volume_ratio",
+    )
+    bars = {
+        "600000.SH": [_bar("600000.SH", Exchange.SSE, start), _bar("600000.SH", Exchange.SSE, start + timedelta(minutes=1))],
+        "300001.SZ": [_bar("300001.SZ", Exchange.SZSE, start), _bar("300001.SZ", Exchange.SZSE, start + timedelta(minutes=1))],
+    }
+
+    engine.run_day(bars, _VolumeRatioSignals(), {})
+
+    assert [fill.symbol for fill in engine.fills] == ["300001.SZ"]
+
+
+def test_portfolio_engine_uses_independent_buy_and_sell_volume_limits() -> None:
+    first_day = datetime(2026, 1, 5, 9, 30)
+    second_day = datetime(2026, 1, 6, 9, 30)
+
+    class _EnterThenExit:
+        def on_minute(self, _bars, context):
+            if context.timestamp == first_day:
+                return [OrderIntent("600000.SH", Direction.LONG, "entry")]
+            if context.timestamp == second_day:
+                return [OrderIntent("600000.SH", Direction.SHORT, "exit")]
+            return []
+
+    engine = MultiSymbolNextBarOpenEngine(
+        initial_cash=10_000, commission_rate=0, stamp_tax_rate=0,
+        slippage_rate=0, min_commission=0, max_buy_volume_ratio=1.0,
+        max_sell_volume_ratio=0.5, reserve_ratio=0, max_positions=1,
+    )
+    first_bars = [_bar("600000.SH", Exchange.SSE, first_day), _bar("600000.SH", Exchange.SSE, first_day + timedelta(minutes=1))]
+    second_bars = [_bar("600000.SH", Exchange.SSE, second_day), _bar("600000.SH", Exchange.SSE, second_day + timedelta(minutes=1))]
+    for bar in [*first_bars, *second_bars]:
+        bar.volume = 1_000
+    engine.run_day({"600000.SH": first_bars}, _EnterThenExit(), {})
+    engine.run_day({"600000.SH": second_bars}, _EnterThenExit(), {})
+
+    assert [(fill.direction, fill.volume) for fill in engine.fills] == [
+        (Direction.LONG, 1_000),
+        (Direction.SHORT, 500),
+    ]
+
+
+def test_portfolio_engine_force_closes_at_final_minute_close() -> None:
+    first_day = datetime(2026, 1, 5, 9, 30)
+    final_day = datetime(2026, 1, 6, 9, 30)
+
+    class _EntrySignal:
+        def on_minute(self, _bars, context):
+            return [OrderIntent("600000.SH", Direction.LONG, "entry")] if context.timestamp == first_day else []
+
+    engine = MultiSymbolNextBarOpenEngine(
+        initial_cash=10_000, commission_rate=0, stamp_tax_rate=0,
+        slippage_rate=0, min_commission=0, max_buy_volume_ratio=None,
+        max_sell_volume_ratio=None, reserve_ratio=0, max_positions=1,
+    )
+    engine.run_day(
+        {"600000.SH": [_bar("600000.SH", Exchange.SSE, first_day, 10), _bar("600000.SH", Exchange.SSE, first_day + timedelta(minutes=1), 10)]},
+        _EntrySignal(), {},
+    )
+    final_bars = [_bar("600000.SH", Exchange.SSE, final_day, 11), _bar("600000.SH", Exchange.SSE, final_day + timedelta(minutes=1), 12)]
+    engine.run_day({"600000.SH": final_bars}, _EntrySignal(), {})
+
+    engine.force_close_at_end({"600000.SH": final_bars}, {})
+
+    assert [(fill.direction, fill.price, fill.reason) for fill in engine.fills] == [
+        (Direction.LONG, 10, "entry"),
+        (Direction.SHORT, 12, "end_of_backtest"),
+    ]
+
+
+def test_portfolio_engine_skips_entries_on_a_force_close_day() -> None:
+    start = datetime(2026, 1, 6, 9, 30)
+
+    class _EntrySignal:
+        def on_minute(self, _bars, context):
+            return [OrderIntent("600000.SH", Direction.LONG, "entry")] if context.timestamp == start else []
+
+    engine = MultiSymbolNextBarOpenEngine(
+        initial_cash=10_000, commission_rate=0, stamp_tax_rate=0,
+        slippage_rate=0, min_commission=0, max_buy_volume_ratio=None,
+        max_sell_volume_ratio=None, reserve_ratio=0, max_positions=1,
+    )
+    engine.run_day(
+        {"600000.SH": [_bar("600000.SH", Exchange.SSE, start), _bar("600000.SH", Exchange.SSE, start + timedelta(minutes=1))]},
+        _EntrySignal(), {}, allow_entries=False,
+    )
+
+    assert engine.fills == []

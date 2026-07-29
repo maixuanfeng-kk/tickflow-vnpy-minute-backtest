@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import time
+from math import isfinite
 from typing import Any, Mapping, Sequence
 
 
@@ -113,3 +114,49 @@ def evaluate_opening_volume_entry(
     if not matched:
         return None
     return EntryDecision(primary_reason=matched[0], matched_reasons=tuple(matched))
+
+
+def rank_opening_volume_candidates(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    mode: str,
+    weights: Mapping[str, float] | None = None,
+    score_min: float | None = None,
+    score_max: float | None = None,
+    watchlist_order: Sequence[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Return a deterministic opening-volume candidate order for one minute."""
+    candidates = [dict(row) for row in rows]
+    if mode == "volume_ratio":
+        return sorted(candidates, key=lambda row: (-float(row.get("volume_ratio") or 0), -float(row.get("today_return") or 0), str(row["symbol"])))
+    if mode == "watchlist_order":
+        order = {symbol: index for index, symbol in enumerate(watchlist_order or ())}
+        fallback = len(order)
+        return sorted(candidates, key=lambda row: (order.get(str(row["symbol"]), fallback), str(row["symbol"])))
+    if mode != "score":
+        raise ValueError("candidate_sort must be score, volume_ratio, or watchlist_order")
+
+    active_weights = {
+        key: float(weight)
+        for key, weight in (weights or {}).items()
+        if key in {"volume_ratio", "today_return", "previous_return"}
+        and isfinite(float(weight)) and float(weight) > 0
+    }
+    if not active_weights:
+        return rank_opening_volume_candidates(candidates, mode="volume_ratio")
+    ranges = {
+        key: (min(float(row.get(key) or 0) for row in candidates), max(float(row.get(key) or 0) for row in candidates))
+        for key in active_weights
+    }
+    total_weight = sum(active_weights.values())
+    scored: list[dict[str, Any]] = []
+    for row in candidates:
+        score = 0.0
+        for key, weight in active_weights.items():
+            low, high = ranges[key]
+            value = float(row.get(key) or 0)
+            score += ((value - low) / (high - low) * 100 if high > low else 0.0) * weight / total_weight
+        row["score"] = score
+        if (score_min is None or score >= float(score_min)) and (score_max is None or score <= float(score_max)):
+            scored.append(row)
+    return sorted(scored, key=lambda row: (-float(row["score"]), -float(row.get("volume_ratio") or 0), -float(row.get("today_return") or 0), str(row["symbol"])))

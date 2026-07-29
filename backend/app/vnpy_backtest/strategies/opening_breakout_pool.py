@@ -91,6 +91,9 @@ class OpeningBreakoutPoolStrategy:
             "matched_conditions": list(decision.matched_reasons),
             "primary_reason": decision.primary_reason,
             "signal_price": round(price, 6),
+            "volume_ratio": current_volume / float(previous_same_time_volume),
+            "today_return": price / float(reference.previous_close) - 1,
+            "previous_return": previous_gain,
         }
 
     @staticmethod
