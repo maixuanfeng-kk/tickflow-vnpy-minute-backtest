@@ -30,7 +30,7 @@ META = {
 }
 
 BASIC_FILTER = {"enabled": False}
-EXECUTION_BACKEND = "minute_native"
+EXECUTION_BACKEND = "vnpy_portfolio"
 ENTRY_SIGNALS = []
 EXIT_SIGNALS = []
 STOP_LOSS = None

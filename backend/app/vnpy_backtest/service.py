@@ -23,15 +23,21 @@ class VnpyMinuteBacktestConfig:
     start: date
     end: date
     symbols: tuple[str, ...] = ()
-    strategy_id: str = "opening_breakout_pool"
+    strategy_id: str = "opening_volume_portfolio"
     initial_capital: float = 100_000.0
     commission_pct: float = 0.0002
     stamp_tax_pct: float = 0.001
     slippage_bps: float = 5.0
     lot_size: int = 100
-    max_volume_ratio: float | None = 0.10
+    max_volume_ratio: float | None = None
+    max_buy_volume_ratio: float | None = 1.0
+    max_sell_volume_ratio: float | None = 1.0
     max_positions: int = 10
     position_sizing: str = "equal"
+    candidate_sort: str = "volume_ratio"
+    entry_fill: str = "next_minute_open"
+    exit_fill: str = "next_minute_open"
+    force_close_at_end: bool = True
     params: dict[str, Any] = field(default_factory=dict)
     is_cancelled: Callable[[], bool] | None = None
     on_progress: Callable[[int, int, date, float], None] | None = None
@@ -63,9 +69,14 @@ class VnpyMinuteBacktestService:
             **config.params,
             "initial_cash": config.initial_capital,
             "default_lot_size": config.lot_size,
-            "max_volume_ratio": config.max_volume_ratio,
+            "max_buy_volume_ratio": config.max_buy_volume_ratio,
+            "max_sell_volume_ratio": config.max_sell_volume_ratio,
             "max_positions": config.max_positions,
             "position_sizing": config.position_sizing,
+            "candidate_sort": config.candidate_sort,
+            "entry_fill": config.entry_fill,
+            "exit_fill": config.exit_fill,
+            "force_close_at_end": config.force_close_at_end,
             "commission_rate": config.commission_pct,
             "stamp_tax_rate": config.stamp_tax_pct,
             "slippage_rate": config.slippage_bps / 10_000,
@@ -80,9 +91,16 @@ class VnpyMinuteBacktestService:
             slippage_rate=config.slippage_bps / 10_000,
             min_commission=float(config.params.get("min_commission", 5.0)),
             max_volume_ratio=config.max_volume_ratio,
+            max_buy_volume_ratio=config.max_buy_volume_ratio,
+            max_sell_volume_ratio=config.max_sell_volume_ratio,
             max_positions=config.max_positions,
             position_sizing=config.position_sizing,
             reserve_ratio=float(config.params.get("cash_reserve_ratio", 0.03)),
+            candidate_sort=config.candidate_sort,
+            score_weights=config.params.get("scoring", {}),
+            score_min=config.params.get("score_min"),
+            score_max=config.params.get("score_max"),
+            watchlist_order=list(symbols),
             instrument_names=instrument_names,
             instrument_limit_pcts=instrument_limit_pcts,
         )
@@ -94,9 +112,14 @@ class VnpyMinuteBacktestService:
         # volume and four prior daily closes on the first requested trade day.
         warmup_start = config.start - timedelta(days=20)
         try:
-            total_days = len(self.repo.minute_trading_days(config.start, config.end))
+            trading_days = self.repo.minute_trading_days(config.start, config.end)
+            total_days = len(trading_days)
         except AttributeError:
+            trading_days = []
             total_days = max((config.end - config.start).days + 1, 1)
+        final_trading_day = trading_days[-1] if trading_days else config.end
+        final_bars_by_symbol = None
+        final_references = None
         for trading_day, frame in self.repo.iter_minute_days(list(symbols), warmup_start, config.end):
             if config.is_cancelled and config.is_cancelled():
                 raise RuntimeError("回测已取消")
@@ -106,14 +129,25 @@ class VnpyMinuteBacktestService:
             if trading_day < config.start:
                 daily_context.add_day(bars_by_symbol)
                 continue
-            engine.run_day(bars_by_symbol, strategy, daily_context.references())
+            references = daily_context.references()
+            engine.run_day(
+                bars_by_symbol,
+                strategy,
+                references,
+                allow_entries=not (config.force_close_at_end and trading_day == final_trading_day),
+            )
+            if trading_day == final_trading_day:
+                final_bars_by_symbol = bars_by_symbol
+                final_references = references
             daily_context.add_day(bars_by_symbol)
             days_seen += 1
             if config.on_progress:
                 current_equity = engine.equity_curve[-1]["value"] if engine.equity_curve else config.initial_capital
                 config.on_progress(days_seen, max(total_days, 1), trading_day, current_equity)
         if days_seen == 0:
-            raise ValueError("所选日期范围内没有本地分钟 K 数据")
+            raise ValueError(self._no_minute_data_message())
+        if config.force_close_at_end and final_bars_by_symbol is not None:
+            engine.force_close_at_end(final_bars_by_symbol, final_references or {})
         result = engine.result()
         end_balance = result.equity_curve[-1]["value"] if result.equity_curve else config.initial_capital
         timeline = self._timeline_indexes(result.equity_curve)
@@ -152,7 +186,17 @@ class VnpyMinuteBacktestService:
             "positions": positions,
             "signal_diagnostics": [self._portfolio_signal_to_dict(signal, instrument_names) for signal in result.signals],
             "rejections": [item.__dict__ for item in result.rejections],
-            "strategy_info": {"id": spec.id, "name": spec.name, "source": "vnpy"},
+            "strategy_info": {
+                "id": spec.id,
+                "name": spec.name,
+                "source": "vnpy",
+                "stop_loss": config.params.get("stop_loss_pct"),
+                "take_profit": config.params.get("take_profit_pct"),
+                "trailing_stop": config.params.get("trailing_stop_pct"),
+                "trailing_take_profit_activate": config.params.get("trailing_take_profit_activate_pct"),
+                "trailing_take_profit_drawdown": config.params.get("trailing_take_profit_drawdown_pct"),
+                "max_hold_days": config.params.get("max_hold_days"),
+            },
         }
 
     def _bars_by_symbol(self, frame: pl.DataFrame, symbols: tuple[str, ...]) -> dict[str, list]:
@@ -165,6 +209,20 @@ class VnpyMinuteBacktestService:
             if symbol in wanted:
                 result[symbol] = bars_from_minute_frame(symbol, sub)
         return result
+
+    def _no_minute_data_message(self) -> str:
+        earliest = latest = None
+        try:
+            earliest = self.repo.earliest_minute_date()
+            latest = self.repo.latest_minute_date_global()
+        except AttributeError:
+            pass
+        available = f"{earliest} 至 {latest}" if earliest and latest else "未检测到可用分区"
+        return (
+            "所选日期范围内没有本地分钟 K 数据。"
+            "标准数据源：kline_minute/date=YYYY-MM-DD/part.parquet；"
+            f"可用日期范围：{available}。"
+        )
 
     def _instrument_metadata(self, symbols: tuple[str, ...]) -> tuple[dict[str, str], dict[str, float]]:
         """Read optional security metadata without ever falling back to an online source."""
@@ -420,4 +478,8 @@ class VnpyMinuteBacktestService:
     @staticmethod
     def _result_config(config: VnpyMinuteBacktestConfig, spec: StrategySpec, symbols: list[str], settings: dict) -> dict:
         return {"engine": "vnpy", "frequency": "1m", "strategy_id": spec.id, "symbols": symbols,
-                "start": str(config.start), "end": str(config.end), "initial_capital": config.initial_capital, "params": settings}
+                "start": str(config.start), "end": str(config.end), "initial_capital": config.initial_capital,
+                "max_positions": config.max_positions, "max_buy_volume_ratio": config.max_buy_volume_ratio,
+                "max_sell_volume_ratio": config.max_sell_volume_ratio, "candidate_sort": config.candidate_sort,
+                "entry_fill": config.entry_fill, "exit_fill": config.exit_fill,
+                "force_close_at_end": config.force_close_at_end, "params": settings}

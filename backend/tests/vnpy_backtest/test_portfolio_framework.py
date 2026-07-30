@@ -34,16 +34,14 @@ class _BuyThenSell:
 
 
 def test_registry_exposes_only_portfolio_strategies() -> None:
-    portfolio_spec = get_strategy("opening_breakout_pool")
+    portfolio_spec = get_strategy("opening_volume_portfolio")
     assert portfolio_spec is not None
     assert portfolio_spec.min_symbols == 1
     assert portfolio_spec.max_symbols == 1000
-    assert get_strategy("opening_breakout_condition_1") is not None
+    assert get_strategy("opening_breakout_pool") is None
+    assert get_strategy("opening_breakout_condition_1") is None
     assert get_strategy("minute_double_ma_volume") is None
-    assert [item.id for item in list_strategies()] == [
-        "opening_breakout_pool",
-        "opening_breakout_condition_1",
-    ]
+    assert [item.id for item in list_strategies()] == ["opening_volume_portfolio"]
 
 
 def test_all_a_board_rules_cover_star_and_bse() -> None:
@@ -52,7 +50,7 @@ def test_all_a_board_rules_cover_star_and_bse() -> None:
     assert rule_for_symbol("688001.SH").first_buy_minimum == 200
     assert rule_for_symbol("920000.BJ").price_limit_pct == 0.30
     assert rule_for_symbol("600000.SH", limit_pct=0.10).price_limit_pct == 0.10
-    assert rule_for_symbol("600000.SH", name="*ST sample").price_limit_pct == 0.05
+    assert rule_for_symbol("600000.SH", name="*ST sample").price_limit_pct == 0.10
     assert rule_for_symbol("600000.SH", name="*ST sample", limit_pct=0.10).price_limit_pct == 0.10
 
 
@@ -153,7 +151,7 @@ def test_portfolio_equal_sizing_reserves_cash_for_unfilled_position_slots() -> N
     assert engine.cash == 60_000
 
 
-def test_portfolio_equal_sizing_refreshes_after_full_exit_but_keeps_fixed_reserve() -> None:
+def test_portfolio_equal_sizing_recalculates_cash_reserve_from_current_equity() -> None:
     first_day_start = datetime(2026, 1, 5, 9, 30)
     second_day_start = datetime(2026, 1, 6, 9, 30)
 
@@ -180,9 +178,9 @@ def test_portfolio_equal_sizing_refreshes_after_full_exit_but_keeps_fixed_reserv
     }
     second_day = {
         "600000.SH": [
-            _bar("600000.SH", Exchange.SSE, second_day_start, 20),
-            _bar("600000.SH", Exchange.SSE, second_day_start + timedelta(minutes=1), 20),
-            _bar("600000.SH", Exchange.SSE, second_day_start + timedelta(minutes=2), 20),
+                _bar("600000.SH", Exchange.SSE, second_day_start, 50),
+                _bar("600000.SH", Exchange.SSE, second_day_start + timedelta(minutes=1), 50),
+                _bar("600000.SH", Exchange.SSE, second_day_start + timedelta(minutes=2), 50),
         ],
         "300001.SZ": [
             _bar("300001.SZ", Exchange.SZSE, second_day_start, 10),
@@ -199,11 +197,12 @@ def test_portfolio_equal_sizing_refreshes_after_full_exit_but_keeps_fixed_reserv
     assert [(fill.symbol, fill.direction, fill.volume) for fill in engine.fills] == [
         ("600000.SH", Direction.LONG, 1_200),
         ("600000.SH", Direction.SHORT, 1_200),
-        ("300001.SZ", Direction.LONG, 1_300),
+        ("300001.SZ", Direction.LONG, 1_700),
     ]
+    assert engine.reserve_cash == 4_440
 
 
-def test_portfolio_priority_randomization_is_reproducible_despite_input_order() -> None:
+def test_portfolio_candidate_order_is_reproducible_despite_input_order() -> None:
     start = datetime(2026, 1, 5, 9, 30)
 
     class _TiedSignals:
@@ -239,27 +238,22 @@ def test_daily_context_uses_completed_days_only() -> None:
     assert reference.previous_cumulative_volumes[start.time()] == 10_000
 
 
-def test_opening_breakout_uses_close_breakout_and_dynamic_ma5() -> None:
+def test_opening_breakout_uses_native_high_breakout_and_dynamic_ma5() -> None:
     moment = datetime(2026, 1, 6, 9, 30)
     reference = DailyReference(
         previous_open=11.0,
         previous_close=10.0,
         previous_high=11.0,
-        closes=(9.8, 10.0),
+        closes=(10.0, 10.0),
         previous_cumulative_volumes={time(9, 30): 100, time(9, 31): 160},
     )
     strategy = OpeningBreakoutPoolStrategy({})
 
-    below = _bar("600000.SH", Exchange.SSE, moment, 10.9)
-    below.volume = 100
+    intraminute_breakout = _bar("600000.SH", Exchange.SSE, moment, 10.9)
+    intraminute_breakout.high_price = 11.01
+    intraminute_breakout.volume = 150
     context = PortfolioContext(moment, 100_000, 0, {}, {"600000.SH": reference})
-    assert strategy.on_minute({"600000.SH": below}, context) == []
-
-    crossed = _bar("600000.SH", Exchange.SSE, moment + timedelta(minutes=1), 11.1)
-    crossed.open_price = 10.9
-    crossed.volume = 150
-    crossed_context = PortfolioContext(crossed.datetime, 100_000, 0, {}, {"600000.SH": reference})
-    intents = strategy.on_minute({"600000.SH": crossed}, crossed_context)
+    intents = strategy.on_minute({"600000.SH": intraminute_breakout}, context)
     assert [(item.symbol, item.direction) for item in intents] == [("600000.SH", Direction.LONG)]
 
     sell_reference = DailyReference(closes=(9.0, 10.0, 11.0, 12.0, 13.0))
@@ -275,7 +269,74 @@ def test_opening_breakout_uses_close_breakout_and_dynamic_ma5() -> None:
 
     still_below = _bar("600000.SH", Exchange.SSE, datetime(2026, 1, 6, 10, 31), 10.4)
     still_below_context = PortfolioContext(still_below.datetime, 90_000, 0, {"600000.SH": position}, {"600000.SH": sell_reference})
-    assert strategy.on_minute({"600000.SH": still_below}, still_below_context) == []
+    assert [(item.symbol, item.direction) for item in strategy.on_minute({"600000.SH": still_below}, still_below_context)] == [("600000.SH", Direction.SHORT)]
+
+
+def test_opening_breakout_applies_enabled_price_and_cumulative_amount_filters() -> None:
+    moment = datetime(2026, 1, 6, 9, 30)
+    reference = DailyReference(
+        previous_open=11.0,
+        previous_close=10.0,
+        previous_high=11.0,
+        closes=(9.8, 10.0),
+        previous_cumulative_volumes={time(9, 30): 100},
+    )
+    context = PortfolioContext(moment, 100_000, 0, {}, {"600000.SH": reference})
+    bar = _bar("600000.SH", Exchange.SSE, moment, 11.1)
+    bar.high_price = 11.1
+    bar.volume = 150
+    bar.turnover = 20_000_000
+
+    too_expensive = OpeningBreakoutPoolStrategy({
+        "basic_filter": {"enabled": True, "price_max": 11.0},
+    })
+    assert too_expensive.on_minute({"600000.SH": bar}, context) == []
+
+    insufficient_amount = OpeningBreakoutPoolStrategy({
+        "basic_filter": {"enabled": True, "amount_min": 25_000_000},
+    })
+    assert insufficient_amount.on_minute({"600000.SH": bar}, context) == []
+
+
+def test_opening_breakout_uses_position_high_water_mark_for_moving_stop() -> None:
+    moment = datetime(2026, 1, 6, 10, 30)
+    position = PortfolioPositionView("600000.SH", 100, 10.0, date(2026, 1, 5), 12.0)
+    context = PortfolioContext(moment, 100_000, 0, {"600000.SH": position}, {})
+    bar = _bar("600000.SH", Exchange.SSE, moment, 10.7)
+
+    intents = OpeningBreakoutPoolStrategy({
+        "stop_loss_pct": 0,
+        "trailing_stop_pct": 0.10,
+    }).on_minute({"600000.SH": bar}, context)
+
+    assert [item.diagnostic["matched_conditions"] for item in intents] == [["移动止损：从持仓高点回撤达到设定阈值"]]
+
+
+def test_opening_breakout_exits_after_configured_trading_day_hold_limit() -> None:
+    moment = datetime(2026, 1, 7, 10, 30)
+    position = PortfolioPositionView(
+        "600000.SH",
+        100,
+        10.0,
+        date(2026, 1, 5),
+        entry_trading_day_index=3,
+    )
+    context = PortfolioContext(
+        moment,
+        100_000,
+        0,
+        {"600000.SH": position},
+        {},
+        trading_day_index=5,
+    )
+    bar = _bar("600000.SH", Exchange.SSE, moment, 10.0)
+
+    intents = OpeningBreakoutPoolStrategy({"max_hold_days": 2, "stop_loss_pct": 0}).on_minute(
+        {"600000.SH": bar},
+        context,
+    )
+
+    assert [item.diagnostic["matched_conditions"] for item in intents] == [["达到最长持仓交易日"]]
 
 
 def test_opening_breakout_condition_2_requires_same_time_volume_surge() -> None:
@@ -290,26 +351,26 @@ def test_opening_breakout_condition_2_requires_same_time_volume_surge() -> None:
     context = PortfolioContext(moment, 100_000, 0, {}, {"600000.SH": reference})
 
     low_volume = _bar("600000.SH", Exchange.SSE, moment, 10.4)
-    low_volume.volume = 149
-    assert OpeningBreakoutPoolStrategy({"volume_multiple": 3.0}).on_minute(
+    low_volume.volume = 299
+    assert OpeningBreakoutPoolStrategy({"volume_multiple": 3.0, "enable_branch_a": False}).on_minute(
         {"600000.SH": low_volume}, context
     ) == []
 
     enough_volume = _bar("600000.SH", Exchange.SSE, moment, 10.4)
-    enough_volume.volume = 150
-    intents = OpeningBreakoutPoolStrategy({"volume_multiple": 3.0}).on_minute(
+    enough_volume.volume = 300
+    intents = OpeningBreakoutPoolStrategy({"volume_multiple": 3.0, "enable_branch_a": False}).on_minute(
         {"600000.SH": enough_volume}, context
     )
     assert len(intents) == 1
-    assert any("2" in label for label in intents[0].diagnostic["matched_conditions"])
+    assert intents[0].diagnostic["matched_conditions"] == ["two_day_moderate_rise"]
 
 
-def test_opening_breakout_condition_3_keeps_three_percent_ceiling() -> None:
+def test_opening_breakout_condition_3_keeps_native_previous_return_ceiling() -> None:
     moment = datetime(2026, 1, 6, 9, 30)
 
     def _reference(previous_previous_close: float) -> DailyReference:
         return DailyReference(
-            previous_open=10.1,
+            previous_open=9.9,
             previous_close=10.0,
             previous_high=10.5,
             closes=(previous_previous_close, 10.0),
@@ -318,14 +379,14 @@ def test_opening_breakout_condition_3_keeps_three_percent_ceiling() -> None:
 
     bar = _bar("600000.SH", Exchange.SSE, moment, 10.1)
     bar.volume = 150
-    under_three = PortfolioContext(moment, 100_000, 0, {}, {"600000.SH": _reference(10 / 1.029)})
+    under_five = PortfolioContext(moment, 100_000, 0, {}, {"600000.SH": _reference(10 / 1.049)})
     assert OpeningBreakoutPoolStrategy({"volume_multiple": 1.5}).on_minute(
-        {"600000.SH": bar}, under_three
+        {"600000.SH": bar}, under_five
     )
 
-    at_three = PortfolioContext(moment, 100_000, 0, {}, {"600000.SH": _reference(10 / 1.03)})
+    at_five = PortfolioContext(moment, 100_000, 0, {}, {"600000.SH": _reference(10 / 1.05)})
     assert OpeningBreakoutPoolStrategy({"volume_multiple": 1.5}).on_minute(
-        {"600000.SH": bar}, at_three
+        {"600000.SH": bar}, at_five
     ) == []
 
 
@@ -366,7 +427,7 @@ def test_opening_breakout_condition_1_ignores_conditions_2_and_3() -> None:
     second_context = PortfolioContext(condition_1_bar.datetime, 100_000, 0, {}, {"600000.SH": second_reference})
     intents = condition_1_strategy.on_minute({"600000.SH": condition_1_bar}, second_context)
     assert [(item.symbol, item.direction) for item in intents] == [("600000.SH", Direction.LONG)]
-    assert intents[0].diagnostic["matched_conditions"] == ["条件1：阴线后同期累计量达1.5倍并突破昨日高点"]
+    assert intents[0].diagnostic["matched_conditions"] == ["previous_bearish_breakout"]
 
 
 def test_repository_streams_only_non_empty_minute_days() -> None:
@@ -499,3 +560,109 @@ def test_portfolio_engine_limits_positions_and_prioritizes_multi_condition_signa
     assert result.signals[0].status == "rejected"
     assert result.signals[0].rejection_reason == "max_positions"
     assert result.signals[1].status == "filled"
+
+
+def test_portfolio_engine_orders_candidates_by_selected_volume_ratio() -> None:
+    start = datetime(2026, 1, 5, 9, 30)
+
+    class _VolumeRatioSignals:
+        def on_minute(self, _bars, context):
+            if context.timestamp != start:
+                return []
+            return [
+                OrderIntent("600000.SH", Direction.LONG, "entry", diagnostic={"volume_ratio": 1.5}),
+                OrderIntent("300001.SZ", Direction.LONG, "entry", diagnostic={"volume_ratio": 2.0}),
+            ]
+
+    engine = MultiSymbolNextBarOpenEngine(
+        initial_cash=100_000, commission_rate=0, stamp_tax_rate=0,
+        slippage_rate=0, min_commission=0, max_buy_volume_ratio=None,
+        max_sell_volume_ratio=None, reserve_ratio=0, max_positions=1,
+        candidate_sort="volume_ratio",
+    )
+    bars = {
+        "600000.SH": [_bar("600000.SH", Exchange.SSE, start), _bar("600000.SH", Exchange.SSE, start + timedelta(minutes=1))],
+        "300001.SZ": [_bar("300001.SZ", Exchange.SZSE, start), _bar("300001.SZ", Exchange.SZSE, start + timedelta(minutes=1))],
+    }
+
+    engine.run_day(bars, _VolumeRatioSignals(), {})
+
+    assert [fill.symbol for fill in engine.fills] == ["300001.SZ"]
+
+
+def test_portfolio_engine_uses_independent_buy_and_sell_volume_limits() -> None:
+    first_day = datetime(2026, 1, 5, 9, 30)
+    second_day = datetime(2026, 1, 6, 9, 30)
+
+    class _EnterThenExit:
+        def on_minute(self, _bars, context):
+            if context.timestamp == first_day:
+                return [OrderIntent("600000.SH", Direction.LONG, "entry")]
+            if context.timestamp == second_day:
+                return [OrderIntent("600000.SH", Direction.SHORT, "exit")]
+            return []
+
+    engine = MultiSymbolNextBarOpenEngine(
+        initial_cash=10_000, commission_rate=0, stamp_tax_rate=0,
+        slippage_rate=0, min_commission=0, max_buy_volume_ratio=1.0,
+        max_sell_volume_ratio=0.5, reserve_ratio=0, max_positions=1,
+    )
+    first_bars = [_bar("600000.SH", Exchange.SSE, first_day), _bar("600000.SH", Exchange.SSE, first_day + timedelta(minutes=1))]
+    second_bars = [_bar("600000.SH", Exchange.SSE, second_day), _bar("600000.SH", Exchange.SSE, second_day + timedelta(minutes=1))]
+    for bar in [*first_bars, *second_bars]:
+        bar.volume = 1_000
+    engine.run_day({"600000.SH": first_bars}, _EnterThenExit(), {})
+    engine.run_day({"600000.SH": second_bars}, _EnterThenExit(), {})
+
+    assert [(fill.direction, fill.volume) for fill in engine.fills] == [
+        (Direction.LONG, 1_000),
+        (Direction.SHORT, 500),
+    ]
+
+
+def test_portfolio_engine_force_closes_at_final_minute_close() -> None:
+    first_day = datetime(2026, 1, 5, 9, 30)
+    final_day = datetime(2026, 1, 6, 9, 30)
+
+    class _EntrySignal:
+        def on_minute(self, _bars, context):
+            return [OrderIntent("600000.SH", Direction.LONG, "entry")] if context.timestamp == first_day else []
+
+    engine = MultiSymbolNextBarOpenEngine(
+        initial_cash=10_000, commission_rate=0, stamp_tax_rate=0,
+        slippage_rate=0, min_commission=0, max_buy_volume_ratio=None,
+        max_sell_volume_ratio=None, reserve_ratio=0, max_positions=1,
+    )
+    engine.run_day(
+        {"600000.SH": [_bar("600000.SH", Exchange.SSE, first_day, 10), _bar("600000.SH", Exchange.SSE, first_day + timedelta(minutes=1), 10)]},
+        _EntrySignal(), {},
+    )
+    final_bars = [_bar("600000.SH", Exchange.SSE, final_day, 11), _bar("600000.SH", Exchange.SSE, final_day + timedelta(minutes=1), 12)]
+    engine.run_day({"600000.SH": final_bars}, _EntrySignal(), {})
+
+    engine.force_close_at_end({"600000.SH": final_bars}, {})
+
+    assert [(fill.direction, fill.price, fill.reason) for fill in engine.fills] == [
+        (Direction.LONG, 10, "entry"),
+        (Direction.SHORT, 12, "end_of_backtest"),
+    ]
+
+
+def test_portfolio_engine_skips_entries_on_a_force_close_day() -> None:
+    start = datetime(2026, 1, 6, 9, 30)
+
+    class _EntrySignal:
+        def on_minute(self, _bars, context):
+            return [OrderIntent("600000.SH", Direction.LONG, "entry")] if context.timestamp == start else []
+
+    engine = MultiSymbolNextBarOpenEngine(
+        initial_cash=10_000, commission_rate=0, stamp_tax_rate=0,
+        slippage_rate=0, min_commission=0, max_buy_volume_ratio=None,
+        max_sell_volume_ratio=None, reserve_ratio=0, max_positions=1,
+    )
+    engine.run_day(
+        {"600000.SH": [_bar("600000.SH", Exchange.SSE, start), _bar("600000.SH", Exchange.SSE, start + timedelta(minutes=1))]},
+        _EntrySignal(), {}, allow_entries=False,
+    )
+
+    assert engine.fills == []

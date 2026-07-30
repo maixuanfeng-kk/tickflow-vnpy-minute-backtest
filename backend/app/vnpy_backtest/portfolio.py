@@ -5,12 +5,12 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from math import floor
-from random import Random
 from typing import Mapping, Sequence
 
 from vnpy.trader.constant import Direction
 from vnpy.trader.object import BarData
 
+from app.backtest.opening_volume_shared import rank_opening_volume_candidates
 from app.vnpy_backtest.market_rules import AShareTradingRule, rule_for_symbol
 from app.vnpy_backtest.strategies.base import (
     DailyReference,
@@ -28,6 +28,8 @@ class PortfolioPosition:
     average_cost: float = 0.0
     entry_date: date | None = None
     entry_datetime: datetime | None = None
+    high_water_price: float | None = None
+    entry_trading_day_index: int | None = None
 
 
 @dataclass
@@ -145,11 +147,17 @@ class MultiSymbolNextBarOpenEngine:
         stamp_tax_rate: float,
         slippage_rate: float,
         min_commission: float = 5.0,
-        max_volume_ratio: float | None = 0.10,
+        max_volume_ratio: float | None = None,
+        max_buy_volume_ratio: float | None = None,
+        max_sell_volume_ratio: float | None = None,
         max_positions: int = 10,
         position_sizing: str = "equal",
-        random_seed: int = 20260722,
         reserve_ratio: float = 0.03,
+        candidate_sort: str = "volume_ratio",
+        score_weights: Mapping[str, float] | None = None,
+        score_min: float | None = None,
+        score_max: float | None = None,
+        watchlist_order: Sequence[str] | None = None,
         instrument_names: Mapping[str, str] | None = None,
         instrument_limit_pcts: Mapping[str, float] | None = None,
     ) -> None:
@@ -159,17 +167,22 @@ class MultiSymbolNextBarOpenEngine:
         self.stamp_tax_rate = float(stamp_tax_rate)
         self.slippage_rate = float(slippage_rate)
         self.min_commission = float(min_commission)
-        self.max_volume_ratio = max_volume_ratio
+        self.max_buy_volume_ratio = max_buy_volume_ratio if max_buy_volume_ratio is not None else max_volume_ratio
+        self.max_sell_volume_ratio = max_sell_volume_ratio if max_sell_volume_ratio is not None else max_volume_ratio
         self.max_positions = max(1, int(max_positions))
         if position_sizing not in {"equal", "score_weight"}:
             raise ValueError("position_sizing must be equal or score_weight")
         self.position_sizing = position_sizing
-        self.random_seed = int(random_seed)
         self.reserve_ratio = max(float(reserve_ratio), 0.0)
-        # Keep a fixed cash floor based on starting capital.  Applying the
-        # ratio repeatedly to a shrinking balance makes later buys too large.
         self.reserve_cash = self.initial_cash * self.reserve_ratio
         self._daily_equal_budget: float | None = None
+        if candidate_sort not in {"score", "volume_ratio", "watchlist_order"}:
+            raise ValueError("candidate_sort must be score, volume_ratio, or watchlist_order")
+        self.candidate_sort = candidate_sort
+        self.score_weights = dict(score_weights or {})
+        self.score_min = score_min
+        self.score_max = score_max
+        self.watchlist_order = tuple(watchlist_order or ())
         self.instrument_names = dict(instrument_names or {})
         self.instrument_limit_pcts = dict(instrument_limit_pcts or {})
         self.positions: dict[str, PortfolioPosition] = {}
@@ -179,13 +192,21 @@ class MultiSymbolNextBarOpenEngine:
         self.equity_curve: list[dict] = []
         self.last_prices: dict[str, float] = {}
         self.signals: list[PortfolioSignal] = []
+        self._trading_day_index = 0
+        self._active_trading_day: date | None = None
 
     def run_day(
         self,
         bars_by_symbol: Mapping[str, Sequence[BarData]],
         strategy: PortfolioMinuteStrategy,
         daily_references: Mapping[str, DailyReference],
+        *,
+        allow_entries: bool = True,
     ) -> None:
+        day = next((bar.datetime.date() for bars in bars_by_symbol.values() for bar in bars), None)
+        if day is not None and day != self._active_trading_day:
+            self._active_trading_day = day
+            self._trading_day_index += 1
         by_timestamp: dict[datetime, dict[str, BarData]] = defaultdict(dict)
         next_times: dict[tuple[str, datetime], datetime] = {}
         for symbol, bars in bars_by_symbol.items():
@@ -195,25 +216,35 @@ class MultiSymbolNextBarOpenEngine:
                 if index + 1 < len(ordered):
                     next_times[(symbol, bar.datetime)] = ordered[index + 1].datetime
 
-        # Equal sizing is snapshotted for the day.  Later buys keep this
-        # amount unless a complete exit releases both cash and a position slot.
-        self._refresh_daily_equal_budget()
         for timestamp in sorted(by_timestamp):
             bars = by_timestamp[timestamp]
             self._fill_due(timestamp, bars, daily_references)
             self.last_prices.update({symbol: float(bar.close_price) for symbol, bar in bars.items() if bar.close_price > 0})
+            self._update_high_water_marks(bars)
+            self._refresh_daily_equal_budget(bars)
             context = PortfolioContext(
                 timestamp=timestamp,
                 cash=self.cash,
                 reserved_cash=sum(order.budget for order in self.pending if order.direction == Direction.LONG),
                 positions={
-                    symbol: PortfolioPositionView(symbol, position.volume, position.average_cost, position.entry_date)
+                    symbol: PortfolioPositionView(
+                        symbol,
+                        position.volume,
+                        position.average_cost,
+                        position.entry_date,
+                        position.high_water_price,
+                        position.entry_trading_day_index,
+                    )
                     for symbol, position in self.positions.items() if position.volume > 0
                 },
                 daily_references=daily_references,
+                instrument_names=self.instrument_names,
+                trading_day_index=self._trading_day_index,
             )
             intents = list(strategy.on_minute(bars, context))
-            self._queue_intents(intents, timestamp, next_times, context)
+            if not allow_entries:
+                intents = [intent for intent in intents if intent.direction != Direction.LONG]
+            self._queue_intents(intents, timestamp, next_times, context, bars)
             self._record_equity(timestamp)
 
         # next-bar orders that reached the end of the day are explicitly invalid.
@@ -238,6 +269,7 @@ class MultiSymbolNextBarOpenEngine:
         timestamp: datetime,
         next_times: Mapping[tuple[str, datetime], datetime],
         context: PortfolioContext,
+        bars: Mapping[str, BarData],
     ) -> None:
         recorded = [(intent, self._record_signal(intent, timestamp)) for intent in intents]
         sells = [(intent, signal_id) for intent, signal_id in recorded if intent.direction == Direction.SHORT]
@@ -260,9 +292,6 @@ class MultiSymbolNextBarOpenEngine:
                 signal.status = "queued"
                 signal.due_at = due_at
 
-        # New positions are chosen by the number of matched strategy conditions.
-        # Signals with the same priority are shuffled by a fixed-seed RNG so a
-        # backtest is fair across symbols and reproducible when rerun.
         active_symbols = {
             symbol for symbol, position in self.positions.items() if position.volume > 0
         } | {
@@ -270,7 +299,12 @@ class MultiSymbolNextBarOpenEngine:
         }
         occupied_slots = len(active_symbols)
         selected: list[tuple[OrderIntent, int, datetime]] = []
-        for intent, signal_id in self._prioritize_buys(buys, timestamp):
+        ranked_buys = self._prioritize_buys(buys, timestamp)
+        ranked_signal_ids = {signal_id for _, signal_id in ranked_buys}
+        for intent, signal_id in buys:
+            if signal_id not in ranked_signal_ids:
+                self._reject(intent.symbol, timestamp, "score_out_of_range", signal_id)
+        for intent, signal_id in ranked_buys:
             due_at = next_times.get((intent.symbol, timestamp))
             if due_at is None:
                 self._reject(intent.symbol, timestamp, "no_next_bar", signal_id)
@@ -284,7 +318,7 @@ class MultiSymbolNextBarOpenEngine:
             active_symbols.add(intent.symbol)
             selected.append((intent, signal_id, due_at))
 
-        available = max(context.available_cash * (1 - self.reserve_ratio), 0.0)
+        available = max(context.available_cash - self.reserve_cash, 0.0)
         remaining_slots = max(self.max_positions - occupied_slots, 0)
         budgets = self._allocation_budgets(selected, available, remaining_slots)
         for (intent, signal_id, due_at), budget in zip(selected, budgets):
@@ -302,20 +336,54 @@ class MultiSymbolNextBarOpenEngine:
         buys: Sequence[tuple[OrderIntent, int]],
         timestamp: datetime,
     ) -> list[tuple[OrderIntent, int]]:
-        groups: dict[int, list[tuple[OrderIntent, int]]] = defaultdict(list)
-        for item in buys:
-            matched = item[0].diagnostic.get("matched_conditions", [])
-            priority = len(matched) if isinstance(matched, (list, tuple)) else 0
-            groups[priority].append(item)
-        ordered: list[tuple[OrderIntent, int]] = []
-        for priority in sorted(groups, reverse=True):
-            # Never use data-source ordering as an input to the random draw.
-            # A timestamp-scoped, fixed-seed shuffle keeps equal-priority entry
-            # selection random yet makes identical backtest inputs reproducible.
-            group = sorted(groups[priority], key=lambda item: (item[0].symbol, item[1]))
-            Random(f"{self.random_seed}|{timestamp.isoformat()}|{priority}").shuffle(group)
-            ordered.extend(group)
-        return ordered
+        rows = [
+            {"intent": intent, "signal_id": signal_id, "symbol": intent.symbol, **intent.diagnostic}
+            for intent, signal_id in buys
+        ]
+        ranked = rank_opening_volume_candidates(
+            rows,
+            mode=self.candidate_sort,
+            weights=self.score_weights,
+            score_min=self.score_min,
+            score_max=self.score_max,
+            watchlist_order=self.watchlist_order,
+        )
+        return [(row["intent"], int(row["signal_id"])) for row in ranked]
+
+    def force_close_at_end(
+        self,
+        bars_by_symbol: Mapping[str, Sequence[BarData]],
+        daily_references: Mapping[str, DailyReference],
+    ) -> None:
+        """Close eligible remaining positions at the final available minute close."""
+        final_bars = {
+            symbol: max(bars, key=lambda item: item.datetime)
+            for symbol, bars in bars_by_symbol.items() if bars
+        }
+        if not final_bars:
+            return
+        self.last_prices.update({symbol: float(bar.close_price) for symbol, bar in final_bars.items() if bar.close_price > 0})
+        for symbol, position in list(self.positions.items()):
+            if position.volume <= 0:
+                continue
+            bar = final_bars.get(symbol)
+            if bar is None or bar.close_price <= 0 or bar.volume <= 0:
+                self._reject(symbol, bar.datetime if bar else datetime.min, "suspended_or_missing_bar")
+                continue
+            rule = self._rule(symbol)
+            if self._violates_limit(Direction.SHORT, float(bar.close_price), daily_references.get(symbol), rule):
+                self._reject(symbol, bar.datetime, "price_limit")
+                continue
+            volume = min(position.volume, self._capacity(bar, rule, Direction.SHORT))
+            self._sell(
+                PendingPortfolioOrder(symbol, Direction.SHORT, bar.datetime, "end_of_backtest", volume=volume),
+                bar,
+                volume,
+                rule,
+                self._equity_at_open(final_bars),
+                base_price=float(bar.close_price),
+            )
+        self._record_equity(max(bar.datetime for bar in final_bars.values()))
 
     def _allocation_budgets(
         self,
@@ -366,7 +434,7 @@ class MultiSymbolNextBarOpenEngine:
             if self._violates_limit(order.direction, float(bar.open_price), reference, rule):
                 self._reject(order.symbol, timestamp, "price_limit", order.signal_id)
                 continue
-            capacity = self._capacity(bar, rule)
+            capacity = self._capacity(bar, rule, order.direction)
             if order.direction == Direction.LONG:
                 volume = order.volume or self._buy_volume(order.budget, float(bar.open_price), rule)
                 volume = min(volume, capacity)
@@ -382,7 +450,7 @@ class MultiSymbolNextBarOpenEngine:
         # Recalculate after every same-minute fill has completed so later
         # signals see a coherent post-sale cash balance and slot count.
         if released_position_slot:
-            self._refresh_daily_equal_budget()
+            self._refresh_daily_equal_budget(bars)
 
     def _buy(self, order: PendingPortfolioOrder, bar: BarData, volume: int, rule: AShareTradingRule, equity_before: float) -> None:
         if volume < rule.first_buy_minimum:
@@ -400,18 +468,30 @@ class MultiSymbolNextBarOpenEngine:
         position.average_cost = combined_cost / position.volume
         position.entry_date = bar.datetime.date()
         position.entry_datetime = bar.datetime
+        position.high_water_price = price
+        position.entry_trading_day_index = self._trading_day_index
         self.cash -= turnover + commission
         self._fill(PortfolioFill(order.symbol, Direction.LONG, bar.datetime, price, volume, order.reason, commission, 0.0, abs(price - bar.open_price) * volume,
                                  portfolio_equity_before=equity_before,
                                  entry_position_pct=(turnover + commission) / equity_before if equity_before > 0 else None,
                                  signal_id=order.signal_id))
 
-    def _sell(self, order: PendingPortfolioOrder, bar: BarData, volume: int, rule: AShareTradingRule, equity_before: float) -> None:
+    def _sell(
+        self,
+        order: PendingPortfolioOrder,
+        bar: BarData,
+        volume: int,
+        rule: AShareTradingRule,
+        equity_before: float,
+        *,
+        base_price: float | None = None,
+    ) -> None:
         if volume < rule.lot_size:
             self._reject(order.symbol, bar.datetime, "below_lot_or_no_position", order.signal_id)
             return
         position = self.positions[order.symbol]
-        price = float(bar.open_price) * (1 - self.slippage_rate)
+        base = float(base_price if base_price is not None else bar.open_price)
+        price = base * (1 - self.slippage_rate)
         turnover = price * volume
         commission = max(turnover * self.commission_rate, self.min_commission)
         stamp_tax = turnover * self.stamp_tax_rate
@@ -421,8 +501,10 @@ class MultiSymbolNextBarOpenEngine:
             position.average_cost = 0.0
             position.entry_date = None
             position.entry_datetime = None
+            position.high_water_price = None
+            position.entry_trading_day_index = None
         self.cash += turnover - commission - stamp_tax
-        self._fill(PortfolioFill(order.symbol, Direction.SHORT, bar.datetime, price, volume, order.reason, commission, stamp_tax, abs(price - bar.open_price) * volume,
+        self._fill(PortfolioFill(order.symbol, Direction.SHORT, bar.datetime, price, volume, order.reason, commission, stamp_tax, abs(price - base) * volume,
                                  portfolio_equity_before=equity_before, signal_id=order.signal_id))
 
     def _record_signal(self, intent: OrderIntent, timestamp: datetime) -> int:
@@ -454,6 +536,15 @@ class MultiSymbolNextBarOpenEngine:
             for symbol, position in self.positions.items() if position.volume > 0
         )
 
+    def _update_high_water_marks(self, bars: Mapping[str, BarData]) -> None:
+        for symbol, position in self.positions.items():
+            if position.volume <= 0:
+                continue
+            bar = bars.get(symbol)
+            if bar is None or bar.high_price <= 0:
+                continue
+            position.high_water_price = max(position.high_water_price or 0.0, float(bar.high_price))
+
     def _rule(self, symbol: str) -> AShareTradingRule:
         return rule_for_symbol(
             symbol,
@@ -461,10 +552,11 @@ class MultiSymbolNextBarOpenEngine:
             limit_pct=self.instrument_limit_pcts.get(symbol),
         )
 
-    def _capacity(self, bar: BarData, rule: AShareTradingRule) -> int:
-        if self.max_volume_ratio is None:
+    def _capacity(self, bar: BarData, rule: AShareTradingRule, direction: Direction) -> int:
+        ratio = self.max_buy_volume_ratio if direction == Direction.LONG else self.max_sell_volume_ratio
+        if ratio is None:
             return 10**12
-        return floor(float(bar.volume) * self.max_volume_ratio / rule.lot_size) * rule.lot_size
+        return floor(float(bar.volume) * ratio / rule.lot_size) * rule.lot_size
 
     def _buy_volume(self, budget: float, open_price: float, rule: AShareTradingRule) -> int:
         effective = open_price * (1 + self.slippage_rate)
@@ -490,9 +582,10 @@ class MultiSymbolNextBarOpenEngine:
             order.symbol for order in self.pending if order.direction == Direction.LONG
         }
 
-    def _refresh_daily_equal_budget(self) -> None:
-        """Refresh equal sizing at day start or after a complete position exit."""
+    def _refresh_daily_equal_budget(self, bars: Mapping[str, BarData]) -> None:
+        """Refresh equal sizing with a cash floor based on current equity."""
         remaining_slots = self.max_positions - len(self._active_long_symbols())
+        self.reserve_cash = self._equity_at_open(bars) * self.reserve_ratio
         spendable_cash = max(self._available_cash() - self.reserve_cash, 0.0)
         self._daily_equal_budget = spendable_cash / remaining_slots if remaining_slots > 0 else 0.0
 

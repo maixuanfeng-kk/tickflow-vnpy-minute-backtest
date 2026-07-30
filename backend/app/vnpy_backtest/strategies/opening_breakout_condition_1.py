@@ -18,28 +18,11 @@ class OpeningBreakoutCondition1Strategy(OpeningBreakoutPoolStrategy):
         bar: BarData,
         context: PortfolioContext,
     ) -> dict[str, object] | None:
-        reference = context.daily_references.get(symbol)
-        price = float(bar.close_price)
-        if reference is None or price <= 0 or reference.previous_close is None:
-            return None
-
-        previous_same_time_volume = reference.previous_cumulative_volumes.get(bar.datetime.time())
-        current_volume = self._today_cumulative_volume[symbol]
-        has_volume_surge = (
-            previous_same_time_volume is not None
-            and previous_same_time_volume > 0
-            and current_volume >= previous_same_time_volume * self.volume_multiple
-        )
-        condition_1 = bool(
-            reference.previous_high is not None
-            and reference.previous_open is not None
-            and reference.previous_close < reference.previous_open
-            and has_volume_surge
-            and self._crossed_above(symbol, bar, reference.previous_high)
-        )
-        if not condition_1:
+        diagnostic = super()._buy_diagnostic(symbol, bar, context)
+        if not diagnostic or diagnostic.get("primary_reason") != "previous_bearish_breakout":
             return None
         return {
-            "matched_conditions": ["条件1：阴线后同期累计量达1.5倍并突破昨日高点"],
-            "signal_price": round(price, 6),
+            "matched_conditions": ["previous_bearish_breakout"],
+            "primary_reason": "previous_bearish_breakout",
+            "signal_price": diagnostic["signal_price"],
         }

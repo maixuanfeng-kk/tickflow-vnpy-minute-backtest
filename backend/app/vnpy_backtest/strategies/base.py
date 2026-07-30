@@ -65,6 +65,8 @@ class PortfolioPositionView:
     volume: int
     average_cost: float
     entry_date: date | None
+    high_water_price: float | None = None
+    entry_trading_day_index: int | None = None
 
 
 @dataclass(frozen=True)
@@ -74,6 +76,8 @@ class PortfolioContext:
     reserved_cash: float
     positions: Mapping[str, PortfolioPositionView]
     daily_references: Mapping[str, DailyReference]
+    instrument_names: Mapping[str, str] = field(default_factory=dict)
+    trading_day_index: int = 0
 
     @property
     def available_cash(self) -> float:

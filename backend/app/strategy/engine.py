@@ -336,7 +336,7 @@ class StrategyEngine:
                 ),
             )
         )
-        valid_backends = {"polars_expr", "matrix_native", "minute_native", "python_history_legacy"}
+        valid_backends = {"polars_expr", "matrix_native", "vnpy_portfolio", "python_history_legacy"}
         if execution_backend not in valid_backends:
             raise ValueError(
                 f"unsupported execution backend {execution_backend!r}; "
@@ -353,9 +353,9 @@ class StrategyEngine:
                 raise TypeError("MATRIX_STRATEGY must implement MatrixStrategy")
             if filter_fn is not None or filter_history_fn is not None:
                 raise ValueError("matrix_native strategy must not declare filter or filter_history")
-        elif execution_backend == "minute_native":
+        elif execution_backend == "vnpy_portfolio":
             if filter_fn is not None or filter_history_fn is not None:
-                raise ValueError("minute_native strategy must not declare filter or filter_history")
+                raise ValueError("minute portfolio strategy must not declare filter or filter_history")
         elif execution_backend == "polars_expr":
             if filter_fn is None or filter_history_fn is not None:
                 raise ValueError("polars_expr strategy must declare only filter")
