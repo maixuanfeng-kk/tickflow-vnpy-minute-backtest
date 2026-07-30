@@ -200,7 +200,7 @@ export function startBacktest(params: {
   const isVnpy = params.engine === 'vnpy'
   const symbols = params.symbols?.filter(Boolean) ?? []
   if (isVnpy && (symbols.length < 1 || symbols.length > 1000)) {
-    current = { ...current, isPending: false, error: 'vn.py 分钟回测仅支持单只股票', reconnecting: false }
+    current = { ...current, isPending: false, error: 'vn.py 分钟组合回测需要 1–1000 只股票', reconnecting: false }
     emit()
     return
   }

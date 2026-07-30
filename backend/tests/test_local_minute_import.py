@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import polars as pl
+import pytest
 
-from app.services.local_minute_import import LocalMinuteCsvImporter
+from app.services.local_minute_import import LocalMinuteCsvImporter, LocalMinuteParquetImporter
 
 
 def _write_source(path, *, close: str = "10.10") -> None:
@@ -58,3 +60,67 @@ def test_importer_dry_run_does_not_write_and_reports_invalid_files(tmp_path) -> 
     assert summary.rows_valid == 2
     assert summary.skipped_files[0]["file"] == "notes.csv"
     assert not (tmp_path / "data" / "kline_minute").exists()
+
+
+def test_parquet_importer_converts_single_symbol_files_to_date_partitions(tmp_path) -> None:
+    source = tmp_path / "source"
+    data_dir = tmp_path / "data"
+    source.mkdir()
+    pl.DataFrame({
+        "ts_code": ["600000.SH", "600000.SH"],
+        "trade_time": ["2026-01-05 09:30:00", "2026-01-05 09:31:00"],
+        "open": [10.0, 10.1],
+        "high": [10.2, 10.3],
+        "low": [9.9, 10.0],
+        "close": [10.1, 10.2],
+        "vol": [12_300, 45_600],
+        "amount": [123_000.0, 456_000.0],
+    }).write_parquet(source / "600000_SH.parquet")
+
+    summary = LocalMinuteParquetImporter(source, data_dir, batch_size=1).run()
+
+    output = data_dir / "kline_minute" / "date=2026-01-05" / "part.parquet"
+    frame = pl.read_parquet(output)
+    assert summary.status == "succeeded"
+    assert summary.volume_unit == "share"
+    assert summary.rows_added == 2
+    assert frame["symbol"].to_list() == ["600000.SH", "600000.SH"]
+    assert frame["volume"].to_list() == [12_300.0, 45_600.0]
+
+    pl.DataFrame({
+        "ts_code": ["600000.SH"],
+        "trade_time": ["2026-01-05 09:30:00"],
+        "open": [99.0], "high": [99.0], "low": [99.0], "close": [99.0],
+        "vol": [100], "amount": [9_900.0],
+    }).write_parquet(source / "600000_SH.parquet")
+    second = LocalMinuteParquetImporter(source, data_dir, batch_size=1).run()
+
+    assert second.rows_added == 0
+    assert pl.read_parquet(output)["close"].to_list() == [10.1, 10.2]
+
+
+@pytest.mark.asyncio
+async def test_parquet_import_endpoint_starts_pipeline_job(monkeypatch, tmp_path) -> None:
+    from app.api import kline as kline_api
+
+    source = tmp_path / "source"
+    source.mkdir()
+    scheduled = []
+
+    class JobStore:
+        def create(self, *, timeout_s):
+            assert timeout_s > 0
+            return "import-job", True
+
+    def capture(coroutine):
+        scheduled.append(coroutine)
+        coroutine.close()
+
+    monkeypatch.setattr("app.services.pipeline_jobs.job_store", JobStore())
+    monkeypatch.setattr("asyncio.create_task", capture)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(repo=object())))
+
+    result = await kline_api.import_local_minute_parquet(request, {"source_dir": str(source)})
+
+    assert result == {"status": "started", "job_id": "import-job"}
+    assert len(scheduled) == 1

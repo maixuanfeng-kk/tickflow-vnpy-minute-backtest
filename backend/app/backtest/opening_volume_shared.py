@@ -77,11 +77,14 @@ def evaluate_opening_volume_entry(
         return volume_ratio >= float(required if required is not None else 1.5)
 
     def matches_candle(direction: str) -> bool:
-        if direction == "any":
+        normalized = direction.strip().lower()
+        if normalized in {"any", "不限"}:
             return True
-        if direction == "bearish":
+        if normalized in {"bearish", "阴线"}:
             return previous_close < previous_open
-        return previous_close > previous_open
+        if normalized in {"bullish", "阳线"}:
+            return previous_close > previous_open
+        return False
 
     resolved_today_return = (
         today_return

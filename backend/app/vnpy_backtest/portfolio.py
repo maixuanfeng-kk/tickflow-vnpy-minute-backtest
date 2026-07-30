@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, time
 from math import floor
 from typing import Mapping, Sequence
 
@@ -119,14 +119,19 @@ class DailyContextBuilder:
         for symbol, symbol_bars in bars.items():
             if not symbol_bars:
                 continue
+            ordered_bars = sorted(symbol_bars, key=lambda item: item.datetime)
+            regular_open_bar = next(
+                (bar for bar in ordered_bars if bar.datetime.time() >= time(9, 30)),
+                ordered_bars[0],
+            )
             cumulative_volume = 0.0
             cumulative_volumes = {}
-            for bar in sorted(symbol_bars, key=lambda item: item.datetime):
+            for bar in ordered_bars:
                 cumulative_volume += float(bar.volume)
                 cumulative_volumes[bar.datetime.time()] = cumulative_volume
             self._history[symbol].append(
                 {
-                    "open": float(symbol_bars[0].open_price),
+                    "open": float(regular_open_bar.open_price),
                     "high": max(float(bar.high_price) for bar in symbol_bars),
                     "low": min(float(bar.low_price) for bar in symbol_bars),
                     "close": float(symbol_bars[-1].close_price),

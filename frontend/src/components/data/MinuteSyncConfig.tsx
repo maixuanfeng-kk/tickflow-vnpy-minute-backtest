@@ -22,6 +22,9 @@ export function MinuteSyncConfig({ caps, onJobStart }: { caps: { label: string; 
   const segmentDays = prefs.data?.minute_sync_segment_days ?? 20
   const [localDays, setLocalDays] = useState(days)
   const [localSegment, setLocalSegment] = useState(segmentDays)
+  const [localParquetDir, setLocalParquetDir] = useState('F:\\quant\\data\\minute_1min_pytdx')
+  const [localImporting, setLocalImporting] = useState(false)
+  const [localImportError, setLocalImportError] = useState('')
 
   useEffect(() => { setLocalDays(days) }, [days])
   useEffect(() => { setLocalSegment(segmentDays) }, [segmentDays])
@@ -67,6 +70,22 @@ export function MinuteSyncConfig({ caps, onJobStart }: { caps: { label: string; 
       // 通知主页面跟踪 job 进度 (ActiveJobCard 会显示实时进度+日志)
       if (res.job_id && onJobStart) onJobStart(res.job_id)
     }).finally(() => setFetchingMode(''))
+  }
+
+  const handleLocalParquetImport = async () => {
+    if (!localParquetDir.trim()) return
+    setLocalImporting(true)
+    setLocalImportError('')
+    try {
+      const result = await api.importLocalMinuteParquet(localParquetDir.trim())
+      qc.invalidateQueries({ queryKey: QK.pipelineJobs })
+      qc.invalidateQueries({ queryKey: QK.dataStatus })
+      if (result.job_id && onJobStart) onJobStart(result.job_id)
+    } catch (error: any) {
+      setLocalImportError(String(error?.message ?? '本地分钟 Parquet 导入失败'))
+    } finally {
+      setLocalImporting(false)
+    }
   }
 
   return (
@@ -181,6 +200,32 @@ export function MinuteSyncConfig({ caps, onJobStart }: { caps: { label: string; 
           A股标的 · 前复权价格 · 从本地最早数据向前叠加 ·{' '}
           均按上方「分段大小」分段拉取、每段即落盘
         </div>
+      </div>
+
+      <div className="pt-3 border-t border-border space-y-2">
+        <div className="flex items-center gap-1.5">
+          <Download className="h-3 w-3 text-secondary" />
+          <span className="text-[11px] text-secondary font-medium">本地分钟 Parquet 导入</span>
+          <span className="text-[10px] text-muted">不需要 Pro+ 权限</span>
+        </div>
+        <input
+          value={localParquetDir}
+          onChange={event => setLocalParquetDir(event.target.value)}
+          placeholder="F:\\quant\\data\\minute_1min_pytdx"
+          className="w-full h-8 rounded-btn border border-border bg-base px-2 text-[11px] text-foreground outline-none focus:border-accent/60"
+        />
+        <button
+          onClick={handleLocalParquetImport}
+          disabled={localImporting || !localParquetDir.trim()}
+          className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-btn border border-accent/30 bg-accent/10 text-accent text-xs font-medium hover:bg-accent/15 disabled:opacity-40 transition-colors duration-150"
+        >
+          {localImporting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+          {localImporting ? '正在启动导入…' : '导入并转换为回测分钟数据'}
+        </button>
+        <div className="text-[10px] text-muted leading-relaxed">
+          目录内每只股票一个 Parquet，例如 000001_SZ.parquet；必须含 ts_code、trade_time、OHLC、vol 和 amount。导入后可直接用于 vn.py 回测。
+        </div>
+        {localImportError && <div className="text-[10px] text-danger">{localImportError}</div>}
       </div>
 
       {/* 区块 C: 清空 (危险操作, 独立分隔) */}

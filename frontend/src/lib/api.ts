@@ -1499,6 +1499,11 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ ...(days ? { days } : {}), ...(extend ? { extend: true } : {}) }),
     }),
+  importLocalMinuteParquet: (sourceDir: string) =>
+    request<{ status: string; job_id: string }>('/api/kline/import_local_minute_parquet', {
+      method: 'POST',
+      body: JSON.stringify({ source_dir: sourceDir }),
+    }),
   syncMinuteSingle: (symbol: string) =>
     request<{ status: string; symbol: string; rows: number }>('/api/kline/sync_minute_single', {
       method: 'POST',

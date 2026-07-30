@@ -44,7 +44,18 @@ class VnpyMinuteBacktestConfig:
 
     @property
     def normalized_symbols(self) -> tuple[str, ...]:
-        return tuple(dict.fromkeys(item.strip().upper() for item in self.symbols if item and item.strip()))
+        exchange_aliases = {"XSHG": "SH", "XSHE": "SZ", "XBSE": "BJ"}
+        normalized: list[str] = []
+        for item in self.symbols:
+            symbol = item.strip().upper()
+            if not symbol:
+                continue
+            code, separator, exchange = symbol.rpartition(".")
+            if separator:
+                symbol = f"{code}.{exchange_aliases.get(exchange, exchange)}"
+            if symbol not in normalized:
+                normalized.append(symbol)
+        return tuple(normalized)
 
 
 class VnpyMinuteBacktestService:
@@ -225,28 +236,14 @@ class VnpyMinuteBacktestService:
         )
 
     def _instrument_metadata(self, symbols: tuple[str, ...]) -> tuple[dict[str, str], dict[str, float]]:
-        """Read optional security metadata without ever falling back to an online source."""
+        """Read optional security names without using a current price snapshot as history."""
         try:
             df = self.repo.get_instruments().filter(pl.col("symbol").is_in(symbols))
             names: dict[str, str] = {}
-            limit_pcts: dict[str, float] = {}
             for row in df.to_dicts():
                 symbol = row["symbol"]
                 names[symbol] = row.get("name") or ""
-                raw_limit = row.get("limit_up")
-                if raw_limit is None:
-                    continue
-                try:
-                    limit_pct = float(raw_limit)
-                except (TypeError, ValueError):
-                    continue
-                # TickFlow's security table documents this as a percentage.  Accept
-                # both 10 and 0.10 so older local tables work too.
-                if limit_pct > 1:
-                    limit_pct /= 100
-                if 0 < limit_pct <= 1:
-                    limit_pcts[symbol] = limit_pct
-            return names, limit_pcts
+            return names, {}
         except Exception:  # noqa: BLE001
             return {}, {}
 

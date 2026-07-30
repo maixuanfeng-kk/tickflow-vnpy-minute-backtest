@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import math
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -789,6 +790,60 @@ async def sync_minute(request: Request):
             invalidate_storage_cache()
         except Exception as e:  # noqa: BLE001
             job_store.fail(job_id, str(e))
+            invalidate_storage_cache()
+        finally:
+            release_run_slot()
+
+    asyncio.create_task(task())
+    return {"status": "started", "job_id": job_id}
+
+
+@router.post("/import_local_minute_parquet")
+async def import_local_minute_parquet(request: Request, body: dict):
+    """Import administrator-selected per-symbol minute Parquet files."""
+    import asyncio
+
+    source_value = str(body.get("source_dir") or "").strip()
+    if not source_value:
+        raise HTTPException(status_code=400, detail="请填写本地分钟 Parquet 目录")
+    source_dir = Path(source_value).expanduser()
+    if not source_dir.is_dir():
+        raise HTTPException(status_code=400, detail="本地分钟 Parquet 目录不存在或无法访问")
+
+    from app.api.data import invalidate_storage_cache
+    from app.jobs.daily_pipeline import _refresh_single_view
+    from app.services.local_minute_import import LocalMinuteParquetImporter
+    from app.services.pipeline_jobs import LONG_JOB_TIMEOUT_S, job_store, release_run_slot, try_acquire_run_slot
+
+    repo = request.app.state.repo
+    job_id, is_new = job_store.create(timeout_s=LONG_JOB_TIMEOUT_S)
+    if not is_new:
+        return {"status": "reused", "job_id": job_id}
+
+    async def task() -> None:
+        if not try_acquire_run_slot():
+            job_store.fail(job_id, "已有数据任务在运行(或上一次任务卡死未结束),请稍后再试")
+            return
+        loop = asyncio.get_event_loop()
+
+        def progress(current: int, total: int, stage: str) -> None:
+            pct = 5 + int(current / max(total, 1) * 85)
+            job_store.progress(job_id, "import_local_minute", pct, f"{stage} {current}/{total}")
+
+        try:
+            job_store.start(job_id)
+            job_store.progress(job_id, "import_local_minute", 2, "校验本地分钟 Parquet 文件…")
+            summary = await loop.run_in_executor(
+                _long_task_executor,
+                lambda: LocalMinuteParquetImporter(source_dir, repo.store.data_dir, batch_size=5, progress=progress).run(),
+            )
+            _refresh_single_view(repo, "kline_minute")
+            job_store.progress(job_id, "done", 100, f"本地分钟 Parquet 导入完成，新增 {summary.rows_added} 行")
+            job_store.succeed(job_id, summary.to_dict())
+            invalidate_storage_cache()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("local minute Parquet import failed: job_id=%s", job_id)
+            job_store.fail(job_id, str(exc))
             invalidate_storage_cache()
         finally:
             release_run_slot()

@@ -508,7 +508,7 @@ export function Data() {
             customProvider={getCustomProviderName('minute')}
             auto={minuteAuto}
             onShowFields={() => setSchemaTable('minute')}
-            onSettings={hasData ? () => setOpenSettings(v => v === 'minute' ? null : 'minute') : undefined}
+            onSettings={() => setOpenSettings(v => v === 'minute' ? null : 'minute')}
             settingsOpen={openSettings === 'minute'}
           />
         )

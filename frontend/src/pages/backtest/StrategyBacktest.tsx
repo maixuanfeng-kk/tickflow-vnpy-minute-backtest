@@ -17,7 +17,7 @@ import { BUILTIN_COLUMNS } from '@/lib/watchlist-columns'
 import { cnSignal } from '@/lib/signals'
 import { SignalPicker } from '@/components/screener/SignalPicker'
 import { startBacktest, stopBacktest, tryReconnect, useBacktestTask } from '@/lib/backtestTask'
-import { participationRatio } from '@/lib/openingVolumeExecution'
+import { participationRatio, resolveOpeningVolumePool } from '@/lib/openingVolumeExecution'
 import { useDataStatus, useCapabilities } from '@/lib/useSharedQueries'
 import { EmptyState } from '@/components/EmptyState'
 import { WarmupBadge } from '@/components/WarmupBadge'
@@ -904,6 +904,11 @@ export function StrategyBacktest() {
   const [selectedStrategy, setSelectedStrategy] = useState<string | null>(saved?.selectedStrategy ?? null)
   const [strategyGroup, setStrategyGroup] = useState<StrategyGroup>('all')
   const [symbols, setSymbols] = useState(saved?.symbols ?? '')
+  const openingVolumeWatchlist = useQuery({
+    queryKey: QK.watchlist,
+    queryFn: () => api.watchlistList(),
+    staleTime: 30_000,
+  })
   const [assetType, setAssetType] = useState<'stock' | 'etf'>(saved?.assetType ?? 'stock')
   const [start, setStart] = useState(saved?.start ?? THREE_MONTHS_AGO)
   const [end, setEnd] = useState(saved?.end ?? TODAY)
@@ -1061,9 +1066,13 @@ export function StrategyBacktest() {
       ? normalizeStrategyOverrides(detail, overrides)
       : overrides
     if (strategyDetail.data?.id === 'opening_volume_portfolio') {
+      const poolSymbols = resolveOpeningVolumePool(
+        symbols,
+        (openingVolumeWatchlist.data?.symbols ?? []).map(item => item.symbol),
+      )
       startBacktest({
         strategy_id: 'opening_volume_portfolio',
-        symbols: symbols ? symbols.split(',').map(s => s.trim()).filter(Boolean) : null,
+        symbols: poolSymbols,
         start: start || null,
         end: end || undefined,
         entry_fill: 'next_minute_open',

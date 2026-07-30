@@ -49,6 +49,30 @@ def test_shared_entry_uses_native_intraminute_high_breakout() -> None:
     assert decision.matched_reasons == ("previous_bearish_breakout",)
 
 
+def test_shared_entry_accepts_chinese_bearish_candle_value_from_ui() -> None:
+    shared = _shared_module()
+
+    assert shared is not None
+    decision = shared.evaluate_opening_volume_entry(
+        previous_open=11.0,
+        previous_close=10.0,
+        previous_high=11.0,
+        previous_change_pct=-0.01,
+        today_close=10.9,
+        minute_high=11.01,
+        volume_ratio=1.5,
+        params={
+            "enable_branch_a": True,
+            "branch_a_previous_candle": "阴线",
+            "enable_branch_b": False,
+            "enable_branch_c": False,
+        },
+    )
+
+    assert decision is not None
+    assert decision.matched_reasons == ("previous_bearish_breakout",)
+
+
 def test_shared_entry_keeps_strict_three_percent_branch_b_boundary() -> None:
     shared = _shared_module()
 

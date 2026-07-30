@@ -31,6 +31,33 @@ class _Repo:
         return pl.DataFrame()
 
 
+def test_vnpy_service_normalizes_watchlist_exchange_suffixes() -> None:
+    config = VnpyMinuteBacktestConfig(
+        symbols=("600362.XSHG", "301421.XSHE", "600362.XSHG"),
+        start=date(2026, 1, 5),
+        end=date(2026, 1, 5),
+    )
+
+    assert config.normalized_symbols == ("600362.SH", "301421.SZ")
+
+
+def test_vnpy_service_does_not_treat_absolute_limit_price_as_historical_limit_pct() -> None:
+    class InstrumentRepo(_Repo):
+        def get_instruments(self):
+            return pl.DataFrame(
+                {
+                    "symbol": ["688556.SH"],
+                    "name": ["科创样本"],
+                    "limit_up": [12.76],
+                }
+            )
+
+    names, limit_pcts = VnpyMinuteBacktestService(InstrumentRepo())._instrument_metadata(("688556.SH",))
+
+    assert names == {"688556.SH": "科创样本"}
+    assert limit_pcts == {}
+
+
 def test_vnpy_service_replays_portfolio_minute_bars() -> None:
     result = VnpyMinuteBacktestService(_Repo()).run(
         VnpyMinuteBacktestConfig(

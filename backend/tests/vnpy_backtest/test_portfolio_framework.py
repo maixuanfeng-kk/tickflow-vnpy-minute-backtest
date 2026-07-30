@@ -238,6 +238,23 @@ def test_daily_context_uses_completed_days_only() -> None:
     assert reference.previous_cumulative_volumes[start.time()] == 10_000
 
 
+def test_daily_context_uses_first_regular_session_bar_as_daily_open() -> None:
+    auction = datetime(2026, 1, 5, 9, 15)
+    regular_open = datetime(2026, 1, 5, 9, 30)
+    builder = DailyContextBuilder()
+    builder.add_day(
+        {
+            "600000.SH": [
+                _bar("600000.SH", Exchange.SSE, auction, 15.39),
+                _bar("600000.SH", Exchange.SSE, regular_open, 15.68),
+                _bar("600000.SH", Exchange.SSE, regular_open + timedelta(minutes=1), 15.55),
+            ]
+        }
+    )
+
+    assert builder.references()["600000.SH"].previous_open == 15.68
+
+
 def test_opening_breakout_uses_native_high_breakout_and_dynamic_ma5() -> None:
     moment = datetime(2026, 1, 6, 9, 30)
     reference = DailyReference(

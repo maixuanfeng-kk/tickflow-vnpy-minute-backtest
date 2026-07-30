@@ -54,6 +54,19 @@ test('vn.py opening-volume requests preserve an explicit stock range', () => {
   assert.equal(query.get('symbols'), '600000.SH,000001.SZ')
 })
 
+test('vn.py opening-volume accepts a multi-symbol stock pool', () => {
+  installSseTestDoubles()
+
+  startBacktest({
+    strategy_id: 'opening_volume_portfolio',
+    symbols: ['600000.SH', '000001.SZ', '300001.SZ'],
+    engine: 'vnpy',
+  })
+
+  assert.match(openedUrl, /\/api\/backtest\/vnpy\/stream/)
+  assert.doesNotMatch(openedUrl, /仅支持单只股票/)
+})
+
 test('vn.py opening-volume requests serialize execution controls', () => {
   installSseTestDoubles()
   startBacktest({

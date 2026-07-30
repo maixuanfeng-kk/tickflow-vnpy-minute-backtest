@@ -24,6 +24,7 @@ REQUIRED_SOURCE_COLUMNS = {
     "股票代码", "k线结束时间", "开盘价", "收盘价", "最高价", "最低价", "成交量", "成交额",
 }
 FILENAME_RE = re.compile(r"^(sh|sz|bj)(\d{6})\.csv$", re.IGNORECASE)
+PARQUET_FILENAME_RE = re.compile(r"^(\d{6})_(SH|SZ|BJ)\.parquet$", re.IGNORECASE)
 
 
 @dataclass
@@ -79,7 +80,7 @@ class LocalMinuteCsvImporter:
         if not source_dir.is_dir():
             raise ValueError(f"LOCAL_MINUTE_CSV_DIR 不是可访问目录: {source_dir}")
 
-        files = sorted(path for path in source_dir.iterdir() if path.is_file() and path.suffix.lower() == ".csv")
+        files = self._source_files(source_dir)
         summary = LocalMinuteImportSummary(
             status="preview" if dry_run else "running",
             dry_run=dry_run,
@@ -187,6 +188,10 @@ class LocalMinuteCsvImporter:
         summary.files_imported += 1
         return clean
 
+    @staticmethod
+    def _source_files(source_dir: Path) -> list[Path]:
+        return sorted(path for path in source_dir.iterdir() if path.is_file() and path.suffix.lower() == ".csv")
+
     def _stage_batch(self, frame: pl.DataFrame, stage_dir: Path, batch_index: int, dates: set[str]) -> None:
         dated = frame.with_columns(pl.col("datetime").dt.date().alias("_trade_date"))
         for partition in dated.partition_by("_trade_date", maintain_order=True):
@@ -238,6 +243,79 @@ class LocalMinuteCsvImporter:
         # Keep the manifest bounded even when a source directory contains many bad files.
         if len(records) < 100:
             records.append({"file": filename, "reason": reason})
+
+
+class LocalMinuteParquetImporter(LocalMinuteCsvImporter):
+    """Import per-symbol minute Parquet files into the canonical date partitions."""
+
+    def run(self, *, dry_run: bool = False) -> LocalMinuteImportSummary:
+        summary = super().run(dry_run=dry_run)
+        summary.volume_unit = "share"
+        if not dry_run:
+            self._write_manifest(summary)
+        return summary
+
+    @staticmethod
+    def _source_files(source_dir: Path) -> list[Path]:
+        return sorted(path for path in source_dir.iterdir() if path.is_file() and path.suffix.lower() == ".parquet")
+
+    def _read_file(self, path: Path, summary: LocalMinuteImportSummary) -> pl.DataFrame | None:
+        match = PARQUET_FILENAME_RE.match(path.name)
+        if not match:
+            self._record(summary.skipped_files, path.name, "文件名必须形如 600000_SH.parquet")
+            return None
+        try:
+            raw = pl.read_parquet(path)
+        except Exception as exc:
+            self._record(summary.failed_files, path.name, f"Parquet 读取失败: {exc}")
+            return None
+        required = {"ts_code", "trade_time", "open", "high", "low", "close", "amount"}
+        if missing := required - set(raw.columns):
+            self._record(summary.failed_files, path.name, f"缺少列: {', '.join(sorted(missing))}")
+            return None
+        volume_column = "vol" if "vol" in raw.columns else "volume" if "volume" in raw.columns else None
+        if volume_column is None:
+            self._record(summary.failed_files, path.name, "缺少列: vol 或 volume")
+            return None
+
+        summary.rows_read += raw.height
+        expected_symbol = f"{match.group(1)}.{match.group(2).upper()}"
+        frame = raw.select(
+            pl.col("ts_code").cast(pl.Utf8).str.strip_chars().str.to_uppercase().alias("_source_symbol"),
+            pl.col("trade_time").cast(pl.Utf8).str.strip_chars().str.strptime(
+                pl.Datetime("us"), "%Y-%m-%d %H:%M:%S", strict=False
+            ).alias("datetime"),
+            pl.col("open").cast(pl.Float64, strict=False).alias("open"),
+            pl.col("high").cast(pl.Float64, strict=False).alias("high"),
+            pl.col("low").cast(pl.Float64, strict=False).alias("low"),
+            pl.col("close").cast(pl.Float64, strict=False).alias("close"),
+            pl.col(volume_column).cast(pl.Float64, strict=False).alias("volume"),
+            pl.col("amount").cast(pl.Float64, strict=False).alias("amount"),
+        )
+        valid = (
+            (pl.col("_source_symbol") == expected_symbol)
+            & pl.col("datetime").is_not_null()
+            & pl.all_horizontal(*[pl.col(name).is_not_null() for name in ("open", "high", "low", "close", "volume", "amount")])
+            & (pl.col("open") > 0)
+            & (pl.col("high") > 0)
+            & (pl.col("low") > 0)
+            & (pl.col("close") > 0)
+            & (pl.col("high") >= pl.max_horizontal("open", "close", "low"))
+            & (pl.col("low") <= pl.min_horizontal("open", "close", "high"))
+            & (pl.col("volume") >= 0)
+            & (pl.col("amount") >= 0)
+        )
+        clean = frame.filter(valid).with_columns(pl.lit(expected_symbol).alias("symbol")).select(CANONICAL_COLUMNS)
+        invalid = frame.height - clean.height
+        summary.rows_valid += clean.height
+        summary.rows_invalid += invalid
+        if invalid:
+            self._record(summary.skipped_files, path.name, f"跳过 {invalid} 行无效数据")
+        if clean.is_empty():
+            self._record(summary.failed_files, path.name, "没有可导入的有效数据")
+            return None
+        summary.files_imported += 1
+        return clean
 
 
 def refresh_minute_view(repo) -> None:
