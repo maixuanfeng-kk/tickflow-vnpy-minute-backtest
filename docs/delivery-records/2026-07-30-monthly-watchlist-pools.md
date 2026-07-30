@@ -9,6 +9,7 @@ Integrate independently editable monthly watchlist pools, Stock Pools publicatio
 - Feature branch: `feature/20260730-monthly-watchlist-pools-delivery`
 - Feature commits: `f1e216c`, `22ef4ef`, `aac2696`
 - Functional integration merge: `8c39887ceefb6db7e8fa2ddad34250ed68e46986`
+- Published main integration merge: `bf84a9859a665461c48422ebe3d459242c02465c`
 - Delivery-record branch: `docs/20260730-monthly-watchlist-delivery`
 
 ## Changes
@@ -67,4 +68,4 @@ git revert -m 1 8c39887ceefb6db7e8fa2ddad34250ed68e46986
 
 ## Multi-remote delivery exception
 
-The local branch named `main` tracks a different repository (`origin`). The requested repository is `vnpy-origin`, so the integration used a temporary branch created directly from `vnpy-origin/main` and will push that verified branch to `vnpy-origin/main`. This preserves the target history, uses a non-fast-forward merge, and does not force-push or rewrite any shared commit.
+The local branch named `main` tracks a different repository (`origin`). The requested repository is `vnpy-origin`, so the integration used a temporary branch created directly from `vnpy-origin/main` and pushed that verified branch to `vnpy-origin/main`. This preserves the target history, uses a non-fast-forward merge, and does not force-push or rewrite any shared commit.
