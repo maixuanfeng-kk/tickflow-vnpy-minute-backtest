@@ -39,6 +39,10 @@ class BatchAddRequest(BaseModel):
     note: str = ""
 
 
+class CreatePoolRequest(BaseModel):
+    month: str
+
+
 def _with_names(rows: list[dict], request: Request) -> list[dict]:
     if not rows:
         return rows
@@ -54,21 +58,56 @@ def _with_names(rows: list[dict], request: Request) -> list[dict]:
 
 
 @router.get("")
-def list_all(request: Request):
-    return {"symbols": _with_names(watchlist.list_symbols(), request)}
+def list_all(
+    request: Request,
+    pool_key: str | None = Query(None),
+    view: str | None = Query(None),
+):
+    aggregate = view == "all"
+    rows = watchlist.list_symbols(pool_key, aggregate=aggregate)
+    pool = None if aggregate else watchlist.get_pool(pool_key or watchlist._store().default_pool_key())
+    return {"symbols": _with_names(rows, request), "pool": pool, "view": "all" if aggregate else "pool"}
+
+
+@router.get("/pools")
+def list_pools():
+    return {"pools": watchlist.list_pools()}
+
+
+@router.post("/pools")
+def create_pool(body: CreatePoolRequest):
+    try:
+        return {"pool": watchlist.create_pool(body.month)}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.get("/migration")
+def legacy_migration_status():
+    """读取旧自选迁移状态，供自选页展示用户可见的迁移入口。"""
+    return watchlist.legacy_migration_status()
+
+
+@router.post("/migration")
+def migrate_legacy_watchlist():
+    """将旧自选迁移至 2026-01；已有目标池时保持其成员不变。"""
+    return watchlist.migrate_legacy_watchlist()
 
 
 @router.post("")
-def add_one(req: AddRequest, request: Request):
-    rows = watchlist.add(req.symbol, req.note)
+def add_one(req: AddRequest, request: Request, pool_key: str | None = Query(None)):
+    try:
+        rows = watchlist.add(req.symbol, req.note, pool_key)
+    except KeyError as exc:
+        raise HTTPException(404, "股票池不存在") from exc
     return {"symbols": _with_names(rows, request)}
 
 
 @router.post("/batch")
-def add_batch(req: BatchAddRequest, request: Request):
+def add_batch(req: BatchAddRequest, request: Request, pool_key: str | None = Query(None)):
     for sym in req.symbols:
-        watchlist.add(sym, req.note)
-    return {"symbols": _with_names(watchlist.list_symbols(), request), "added": len(req.symbols)}
+        watchlist.add(sym, req.note, pool_key)
+    return {"symbols": _with_names(watchlist.list_symbols(pool_key), request), "added": len(req.symbols)}
 
 
 @router.get("/ocr-status")
@@ -118,21 +157,21 @@ async def import_from_image(request: Request, file: UploadFile = File(...)):
 
 
 @router.post("/{symbol}/top")
-def move_one_to_top(symbol: str, request: Request):
-    rows = watchlist.move_to_top(symbol)
+def move_one_to_top(symbol: str, request: Request, pool_key: str | None = Query(None)):
+    rows = watchlist.move_to_top(symbol, pool_key)
     return {"symbols": _with_names(rows, request)}
 
 
 @router.delete("/{symbol}")
-def remove_one(symbol: str, request: Request):
-    rows = watchlist.remove(symbol)
+def remove_one(symbol: str, request: Request, pool_key: str | None = Query(None)):
+    rows = watchlist.remove(symbol, pool_key)
     return {"symbols": _with_names(rows, request)}
 
 
 @router.delete("")
-def clear_all():
+def clear_all(pool_key: str | None = Query(None)):
     """清空自选列表。"""
-    count = watchlist.clear()
+    count = watchlist.clear(pool_key)
     return {"removed": count}
 
 
@@ -164,6 +203,8 @@ _WATCHLIST_COLS = [
 def watchlist_enriched(
     request: Request,
     ext_columns: str | None = Query(None, description="逗号分隔的 ext 列: config_id.field_name"),
+    pool_key: str | None = Query(None),
+    view: str | None = Query(None),
 ):
     """自选股 enriched 数据 — 直接从 enriched 最新日读取, 无即时计算。
 
@@ -173,7 +214,13 @@ def watchlist_enriched(
     t0 = time.perf_counter()
 
     repo = request.app.state.repo
-    symbols = [r["symbol"] for r in watchlist.list_symbols()]
+    pool_value = pool_key if isinstance(pool_key, str) else None
+    view_value = view if isinstance(view, str) else None
+    if pool_value is None and view_value != "all":
+        rows = watchlist.list_symbols()
+    else:
+        rows = watchlist.list_symbols(pool_value, aggregate=view_value == "all")
+    symbols = [r["symbol"] for r in rows]
     if not symbols:
         return {"rows": [], "as_of": None, "elapsed_ms": 0}
 

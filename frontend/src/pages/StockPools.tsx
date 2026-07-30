@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Copy, Database, RefreshCw, Save, Workflow } from 'lucide-react'
 import { EmptyState } from '@/components/EmptyState'
@@ -18,6 +18,7 @@ export function StockPools() {
   const [month, setMonth] = useState(DEFAULT_MONTH)
   const [strategyId, setStrategyId] = useState('monthly_growth_trend')
   const [result, setResult] = useState<StockPoolResult | null>(null)
+  const [params, setParams] = useState<Record<string, number>>({})
 
   const strategies = useQuery({
     queryKey: QK.stockPoolStrategies,
@@ -32,25 +33,43 @@ export function StockPools() {
     queryKey: QK.stockPoolRuns(strategyId),
     queryFn: () => api.stockPoolRuns(strategyId),
   })
+  const watchlistPools = useQuery({
+    queryKey: QK.watchlistPools,
+    queryFn: api.watchlistPools,
+  })
+
+  const activeStrategy = strategies.data?.strategies.find(item => item.id === strategyId)
+  useEffect(() => {
+    if (!activeStrategy) return
+    // 策略切换时按后端描述恢复默认参数，避免沿用不兼容的旧参数。
+    setParams(Object.fromEntries(activeStrategy.parameters.map(parameter => [parameter.key, parameter.default])))
+  }, [activeStrategy])
 
   const preview = useMutation({
-    mutationFn: () => api.stockPoolPreview(strategyId, month),
+    mutationFn: () => api.stockPoolPreview(strategyId, month, params),
     onSuccess: setResult,
     onError: () => toast('股票池预览失败，请检查数据状态。', 'error'),
   })
   const save = useMutation({
-    mutationFn: () => api.stockPoolSave(strategyId, month),
+    mutationFn: () => api.stockPoolSave(strategyId, month, params),
     onSuccess: (saved) => {
       setResult(saved)
       queryClient.invalidateQueries({ queryKey: QK.stockPoolRuns(strategyId) })
-      toast('股票池已手动保存。', 'success')
+      queryClient.invalidateQueries({ queryKey: ['watchlist'] })
+      queryClient.invalidateQueries({ queryKey: QK.watchlistPools })
+      queryClient.invalidateQueries({ queryKey: ['watchlist-enriched'] })
+      toast('股票池已保存并发布到对应月份自选池。', 'success')
     },
     onError: () => toast('保存失败：请先确认数据已就绪并完成预览。', 'error'),
   })
 
   const activeReadiness = result?.readiness ?? readiness.data
   const ready = activeReadiness?.status === 'ready'
-  const activeStrategy = strategies.data?.strategies.find(item => item.id === strategyId)
+  const savePublishedPool = () => {
+    const existing = watchlistPools.data?.pools.find(pool => pool.month === month)
+    if (existing && !window.confirm(`${month} 已有 ${existing.member_count} 只股票。发布将更新该月份当前股票池，历史研究记录会保留。是否继续？`)) return
+    save.mutate()
+  }
 
   const copyCodeString = async () => {
     if (!result?.code_string) return
@@ -108,7 +127,29 @@ export function StockPools() {
               预览构建
             </button>
           </div>
-          {activeStrategy && <p className="mt-3 text-xs leading-relaxed text-secondary">{activeStrategy.description}</p>}
+          {activeStrategy && (
+            <>
+              <p className="mt-3 text-xs leading-relaxed text-secondary">{activeStrategy.description}</p>
+              <div className="mt-4 grid gap-3 border-t border-border pt-4 sm:grid-cols-2 lg:grid-cols-3">
+                {activeStrategy.parameters.map(parameter => (
+                  <label key={parameter.key} className="block">
+                    <span className="mb-1.5 block text-xs text-secondary">
+                      {parameter.label}{parameter.unit ? ` (${parameter.unit})` : ''}
+                    </span>
+                    <input
+                      type="number"
+                      value={params[parameter.key] ?? parameter.default}
+                      min={parameter.min}
+                      max={parameter.max}
+                      step={parameter.step ?? 1}
+                      onChange={event => setParams(current => ({ ...current, [parameter.key]: Number(event.target.value) }))}
+                      className="w-full rounded-btn border border-border bg-base px-3 py-2 text-sm outline-none focus:border-accent"
+                    />
+                  </label>
+                ))}
+              </div>
+            </>
+          )}
         </section>
 
         <section className={`rounded-card border p-4 ${ready ? 'border-bull/30 bg-bull/[0.04]' : 'border-warning/30 bg-warning/[0.04]'}`}>
@@ -135,12 +176,12 @@ export function StockPools() {
                   <p className="mt-1 text-xs text-secondary">{result.month} 股票池，共 {result.members.length} 只，时点 {result.as_of_date}</p>
                 </div>
                 <button
-                  onClick={() => save.mutate()}
+                  onClick={savePublishedPool}
                   disabled={save.isPending}
                   className="inline-flex items-center gap-2 rounded-btn border border-accent/40 bg-accent/10 px-3 py-2 text-sm text-accent disabled:opacity-50"
                 >
                   <Save className="h-4 w-4" />
-                  手动保存本次结果
+                  保存并发布
                 </button>
               </div>
               <div className="mt-4 rounded-btn border border-border bg-base p-3">

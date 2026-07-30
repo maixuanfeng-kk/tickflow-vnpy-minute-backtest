@@ -297,6 +297,25 @@ export interface WatchlistEntry {
   added_at: string
   note?: string
   name?: string | null
+  source?: string
+  pool_keys?: string[]
+}
+
+export interface WatchlistPool {
+  pool_key: string
+  month: string | null
+  source: string
+  updated_at: string
+  member_count: number
+  strategy_id?: string
+  params?: Record<string, unknown>
+}
+
+export interface WatchlistMigrationStatus {
+  legacy_count: number
+  target_month: string
+  target_count: number
+  migrated: boolean
 }
 
 export interface WatchlistImportCandidate {
@@ -840,8 +859,20 @@ export interface StockPoolStrategy {
   name: string
   description: string
   rule_version: string
-  parameters: Record<string, unknown>
+  parameters: StockPoolParameter[]
   warnings: string[]
+}
+
+/** 股票池策略在前端动态渲染的参数定义。 */
+export interface StockPoolParameter {
+  key: string
+  label: string
+  type: 'number'
+  default: number
+  min?: number
+  max?: number
+  step?: number
+  unit?: string
 }
 
 export interface StockPoolReadiness {
@@ -880,6 +911,7 @@ export interface StockPoolResult {
   warnings: string[]
   run_id?: string
   saved_at?: string
+  published_pool?: WatchlistPool
 }
 
 export interface StockPoolRun {
@@ -1524,14 +1556,27 @@ export const api = {
       method: 'POST',
     }),
 
-  watchlistList: () => request<{ symbols: WatchlistEntry[] }>('/api/watchlist'),
-  watchlistAdd: (symbol: string, note = '') =>
-    request<{ symbols: WatchlistEntry[] }>('/api/watchlist', {
+  watchlistPools: () => request<{ pools: WatchlistPool[] }>('/api/watchlist/pools'),
+  watchlistPoolCreate: (month: string) => request<{ pool: WatchlistPool }>('/api/watchlist/pools', {
+    method: 'POST', body: JSON.stringify({ month }),
+  }),
+  watchlistMigrationStatus: () => request<WatchlistMigrationStatus>('/api/watchlist/migration'),
+  watchlistMigrateLegacy: () => request<{ migrated_count: number; pool: WatchlistPool | null }>('/api/watchlist/migration', {
+    method: 'POST',
+  }),
+  watchlistList: (poolKey?: string, view?: 'all') => {
+    const query = new URLSearchParams()
+    if (poolKey) query.set('pool_key', poolKey)
+    if (view) query.set('view', view)
+    return request<{ symbols: WatchlistEntry[]; pool?: WatchlistPool | null }>(`/api/watchlist${query.size ? `?${query}` : ''}`)
+  },
+  watchlistAdd: (symbol: string, note = '', poolKey?: string) =>
+    request<{ symbols: WatchlistEntry[] }>(`/api/watchlist${poolKey ? `?pool_key=${encodeURIComponent(poolKey)}` : ''}`, {
       method: 'POST',
       body: JSON.stringify({ symbol, note }),
     }),
-  watchlistBatchAdd: (symbols: string[], note = '') =>
-    request<{ symbols: WatchlistEntry[]; added: number }>('/api/watchlist/batch', {
+  watchlistBatchAdd: (symbols: string[], note = '', poolKey?: string) =>
+    request<{ symbols: WatchlistEntry[]; added: number }>(`/api/watchlist/batch${poolKey ? `?pool_key=${encodeURIComponent(poolKey)}` : ''}`, {
       method: 'POST',
       body: JSON.stringify({ symbols, note }),
     }),
@@ -1545,25 +1590,28 @@ export const api = {
       body: fd,
     })
   },
-  watchlistRemove: (symbol: string) =>
+  watchlistRemove: (symbol: string, poolKey?: string) =>
     request<{ symbols: WatchlistEntry[] }>(
-      `/api/watchlist/${encodeURIComponent(symbol)}`,
+      `/api/watchlist/${encodeURIComponent(symbol)}${poolKey ? `?pool_key=${encodeURIComponent(poolKey)}` : ''}`,
       { method: 'DELETE' },
     ),
-  watchlistMoveToTop: (symbol: string) =>
+  watchlistMoveToTop: (symbol: string, poolKey?: string) =>
     request<{ symbols: WatchlistEntry[] }>(
-      `/api/watchlist/${encodeURIComponent(symbol)}/top`,
+      `/api/watchlist/${encodeURIComponent(symbol)}/top${poolKey ? `?pool_key=${encodeURIComponent(poolKey)}` : ''}`,
       { method: 'POST' },
     ),
-  watchlistClear: () =>
-    request<{ removed: number }>('/api/watchlist', { method: 'DELETE' }),
+  watchlistClear: (poolKey?: string) =>
+    request<{ removed: number }>(`/api/watchlist${poolKey ? `?pool_key=${encodeURIComponent(poolKey)}` : ''}`, { method: 'DELETE' }),
   watchlistQuotes: () => request<{ quotes: Quote[] }>('/api/watchlist/quotes'),
-  watchlistEnriched: (extColumns?: string) =>
-    request<{ rows: any[]; as_of: string | null; elapsed_ms: number }>(
-      extColumns
-        ? `/api/watchlist/enriched?ext_columns=${encodeURIComponent(extColumns)}`
-        : '/api/watchlist/enriched',
-    ),
+  watchlistEnriched: (extColumns?: string, poolKey?: string, view?: 'all') => {
+    const query = new URLSearchParams()
+    if (extColumns) query.set('ext_columns', extColumns)
+    if (poolKey) query.set('pool_key', poolKey)
+    if (view) query.set('view', view)
+    return request<{ rows: any[]; as_of: string | null; elapsed_ms: number }>(
+      `/api/watchlist/enriched${query.size ? `?${query}` : ''}`,
+    )
+  },
 
   screenerStrategies: async (assetType?: 'stock' | 'etf', includeMinute = false) => {
     const query = new URLSearchParams()
@@ -1689,10 +1737,10 @@ export const api = {
   stockPoolStrategies: () => request<{ strategies: StockPoolStrategy[] }>('/api/stock-pools/strategies'),
   stockPoolReadiness: (strategyId: string, month: string) =>
     request<StockPoolReadiness>(`/api/stock-pools/readiness?strategy_id=${encodeURIComponent(strategyId)}&month=${encodeURIComponent(month)}`),
-  stockPoolPreview: (strategyId: string, month: string) =>
-    request<StockPoolResult>('/api/stock-pools/preview', { method: 'POST', body: JSON.stringify({ strategy_id: strategyId, month }) }),
-  stockPoolSave: (strategyId: string, month: string) =>
-    request<StockPoolResult>('/api/stock-pools/save', { method: 'POST', body: JSON.stringify({ strategy_id: strategyId, month }) }),
+  stockPoolPreview: (strategyId: string, month: string, params: Record<string, number>) =>
+    request<StockPoolResult>('/api/stock-pools/preview', { method: 'POST', body: JSON.stringify({ strategy_id: strategyId, month, params }) }),
+  stockPoolSave: (strategyId: string, month: string, params: Record<string, number>) =>
+    request<StockPoolResult>('/api/stock-pools/save', { method: 'POST', body: JSON.stringify({ strategy_id: strategyId, month, params }) }),
   stockPoolRuns: (strategyId?: string) =>
     request<{ runs: StockPoolRun[] }>(`/api/stock-pools/runs${strategyId ? `?strategy_id=${encodeURIComponent(strategyId)}` : ''}`),
   stockPoolRun: (runId: string) => request<StockPoolResult>(`/api/stock-pools/runs/${encodeURIComponent(runId)}`),

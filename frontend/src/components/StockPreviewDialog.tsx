@@ -47,8 +47,8 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
   const qc = useQueryClient()
 
   const watchlist = useQuery({
-    queryKey: QK.watchlist,
-    queryFn: api.watchlistList,
+    queryKey: QK.watchlist(),
+    queryFn: () => api.watchlistList(),
     enabled: !!symbol,
   })
   const inWatchlist = (watchlist.data?.symbols ?? []).some((s: any) => s.symbol === symbol)
@@ -56,7 +56,7 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
   const toggleWatchlist = useMutation({
     mutationFn: () => inWatchlist ? api.watchlistRemove(symbol!) : api.watchlistAdd(symbol!),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: QK.watchlist })
+      qc.invalidateQueries({ queryKey: ['watchlist'] })
       qc.invalidateQueries({ queryKey: ['watchlist-enriched'] })
     },
   })

@@ -95,6 +95,10 @@ export const storage = {
     selectedStrategy: string | null
     symbols: string
     assetType?: 'stock' | 'etf'
+    universeSource?: 'market' | 'manual' | 'monthly_pool'
+    poolKey?: string | null
+    poolMonth?: string | null
+    poolUpdatedAt?: string | null
     start: string
     end: string
     matching: 'close_t' | 'open_t+1'

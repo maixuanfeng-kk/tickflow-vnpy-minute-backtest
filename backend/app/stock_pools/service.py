@@ -8,6 +8,7 @@ import polars as pl
 from app.stock_pools.data import StockPoolDataAdapter
 from app.stock_pools.registry import get_strategy
 from app.stock_pools.store import StockPoolStore
+from app.services.watchlist_pools import WatchlistPoolStore
 
 
 @dataclass
@@ -32,6 +33,7 @@ class StockPoolService:
     def __init__(self, repo) -> None:
         self.adapter = StockPoolDataAdapter(repo.store.data_dir)
         self.store = StockPoolStore(repo.store.data_dir)
+        self.watchlist_store = WatchlistPoolStore(repo.store.data_dir)
 
     def readiness(self, month: str) -> dict[str, object]:
         return self.adapter.readiness(month).to_dict()
@@ -67,10 +69,22 @@ class StockPoolService:
             "params": params or {},
         }
         saved = self.store.save(strategy_id=strategy_id, month=month, members=members, manifest=manifest)
+        published = self.watchlist_store.replace(
+            month,
+            result.members,
+            {
+                "source": "stock_pool_strategy",
+                "strategy_id": strategy_id,
+                "strategy_version": get_strategy(strategy_id).version,
+                "params": params or {},
+                "source_run_id": saved["run_id"],
+            },
+        )
         return {
             **result.to_dict(),
             "run_id": saved["run_id"],
             "saved_at": saved["saved_at"],
+            "published_pool": published,
         }
 
     def list_runs(self, strategy_id: str | None = None) -> list[dict[str, object]]:
