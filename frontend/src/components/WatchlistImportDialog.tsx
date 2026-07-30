@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ImagePlus, Loader2, Upload, X } from 'lucide-react'
+import { ClipboardPaste, ImagePlus, Loader2, Upload, X } from 'lucide-react'
 import { Modal } from '@/components/Modal'
 import { toast } from '@/components/Toast'
 import { api, type WatchlistImportCandidate } from '@/lib/api'
+import { parseWatchlistSymbols } from '@/lib/watchlist-text-import'
 import { useWatchlistBatchAdd } from '@/lib/useSharedMutations'
 
 interface Props {
@@ -11,9 +12,13 @@ interface Props {
   poolKey?: string
 }
 
+type ImportMode = 'image' | 'text'
+
 export function WatchlistImportDialog({ open, onClose, poolKey }: Props) {
   const inputRef = useRef<HTMLInputElement>(null)
   const [busy, setBusy] = useState(false)
+  const [mode, setMode] = useState<ImportMode>('image')
+  const [textInput, setTextInput] = useState('')
   const [provider, setProvider] = useState<string>('')
   const [candidates, setCandidates] = useState<WatchlistImportCandidate[]>([])
   const [selected, setSelected] = useState<Set<string>>(new Set())
@@ -22,6 +27,8 @@ export function WatchlistImportDialog({ open, onClose, poolKey }: Props) {
 
   const reset = useCallback(() => {
     setBusy(false)
+    setMode('image')
+    setTextInput('')
     setCandidates([])
     setSelected(new Set())
     setProvider('')
@@ -82,6 +89,11 @@ export function WatchlistImportDialog({ open, onClose, poolKey }: Props) {
   const matched = candidates.filter(c => c.matched && c.symbol)
   const selectable = matched.filter(c => !c.already_in_watchlist)
   const allSelected = selectable.length > 0 && selectable.every(c => selected.has(c.symbol!))
+  const textSymbols = parseWatchlistSymbols(textInput)
+  // 导入始终写入当前自选视图对应的股票池，避免用户误以为写入全部池。
+  const targetPoolLabel = poolKey?.startsWith('month:')
+    ? `${poolKey.slice('month:'.length)} 股票池`
+    : '未分组自选'
 
   const toggleAll = () => {
     if (allSelected) setSelected(new Set())
@@ -89,9 +101,9 @@ export function WatchlistImportDialog({ open, onClose, poolKey }: Props) {
   }
 
   const confirmAdd = async () => {
-    const symbols = [...selected]
+    const symbols = mode === 'text' ? textSymbols : [...selected]
     if (symbols.length === 0) {
-      toast('请至少选择一只股票', 'error')
+      toast(mode === 'text' ? '未识别到标准股票代码' : '请至少选择一只股票', 'error')
       return
     }
     try {
@@ -114,11 +126,12 @@ export function WatchlistImportDialog({ open, onClose, poolKey }: Props) {
       <div className="flex items-center justify-between px-4 py-3 border-b border-border shrink-0">
         <div>
           <h2 id="watchlist-import-title" className="text-sm font-semibold text-foreground">
-            从截图导入自选
+            导入自选
           </h2>
           <p className="text-[11px] text-muted mt-0.5">
-            上传券商自选列表截图，识别代码后确认添加
-            {provider ? ` · ${provider}` : ''}
+            {mode === 'image'
+              ? <>上传券商自选列表截图，识别代码后确认添加{provider ? ` · ${provider}` : ''}</>
+              : `粘贴标准股票代码后批量添加到 ${targetPoolLabel}`}
           </p>
         </div>
         <button
@@ -132,42 +145,69 @@ export function WatchlistImportDialog({ open, onClose, poolKey }: Props) {
       </div>
 
       <div className="px-4 py-3 overflow-y-auto flex-1 space-y-3">
-        <input
-          ref={inputRef}
-          type="file"
-          accept="image/jpeg,image/png,image/webp,image/bmp,image/gif,.jpg,.jpeg,.png"
-          className="hidden"
-          onChange={e => onPick(e.target.files?.[0])}
-        />
+        <div className="flex rounded-btn bg-elevated p-0.5">
+          <button
+            type="button"
+            onClick={() => setMode('image')}
+            className={`flex-1 rounded-btn px-3 py-1.5 text-xs transition-colors ${mode === 'image' ? 'bg-surface text-foreground shadow-sm' : 'text-muted hover:text-secondary'}`}
+          >
+            截图识别
+          </button>
+          <button
+            type="button"
+            onClick={() => setMode('text')}
+            className={`flex-1 rounded-btn px-3 py-1.5 text-xs transition-colors ${mode === 'text' ? 'bg-surface text-foreground shadow-sm' : 'text-muted hover:text-secondary'}`}
+          >
+            文本导入
+          </button>
+        </div>
 
-        <button
-          type="button"
-          disabled={busy}
-          onClick={() => inputRef.current?.click()}
-          onDragOver={e => { e.preventDefault(); e.stopPropagation() }}
-          onDrop={e => {
-            e.preventDefault()
-            onPick(e.dataTransfer.files?.[0])
-          }}
-          className="w-full flex flex-col items-center justify-center gap-2 rounded-btn border border-dashed border-border bg-elevated/40 hover:bg-elevated/70 px-4 py-6 text-secondary transition-colors disabled:opacity-50"
-        >
-          {busy ? (
-            <Loader2 className="h-6 w-6 animate-spin text-accent" />
-          ) : (
-            <ImagePlus className="h-6 w-6 text-accent" />
-          )}
-          <span className="text-xs">
-            {busy ? '识别中…' : '点击选择或拖拽截图到此处'}
-          </span>
-        </button>
+        {mode === 'image' ? (
+          <>
+            <input
+              ref={inputRef}
+              type="file"
+              accept="image/jpeg,image/png,image/webp,image/bmp,image/gif,.jpg,.jpeg,.png"
+              className="hidden"
+              onChange={e => onPick(e.target.files?.[0])}
+            />
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => inputRef.current?.click()}
+              onDragOver={e => { e.preventDefault(); e.stopPropagation() }}
+              onDrop={e => {
+                e.preventDefault()
+                onPick(e.dataTransfer.files?.[0])
+              }}
+              className="w-full flex flex-col items-center justify-center gap-2 rounded-btn border border-dashed border-border bg-elevated/40 hover:bg-elevated/70 px-4 py-6 text-secondary transition-colors disabled:opacity-50"
+            >
+              {busy ? <Loader2 className="h-6 w-6 animate-spin text-accent" /> : <ImagePlus className="h-6 w-6 text-accent" />}
+              <span className="text-xs">{busy ? '识别中…' : '点击选择或拖拽截图到此处'}</span>
+            </button>
+          </>
+        ) : (
+          <div className="space-y-2">
+            <textarea
+              value={textInput}
+              onChange={event => setTextInput(event.target.value)}
+              placeholder={'000021.SZ,000060.SZ,000070.SZ\n000100.SZ'}
+              className="min-h-36 w-full resize-y rounded-btn border border-border bg-elevated/40 px-3 py-2.5 font-mono text-xs leading-5 text-foreground outline-none placeholder:text-muted focus:border-accent"
+            />
+            <div className="flex items-center gap-2 text-[11px] text-muted">
+              <ClipboardPaste className="h-3.5 w-3.5 shrink-0 text-accent" />
+              <span>支持逗号、空格、分号或换行分隔；已识别 {textSymbols.length} 只标准代码。</span>
+            </div>
+          </div>
+        )}
 
-        {previewUrl && (
+        {mode === 'image' && previewUrl && (
           <div className="rounded-btn overflow-hidden border border-border bg-black/40 max-h-40">
             <img src={previewUrl} alt="预览" className="w-full h-full object-contain max-h-40" />
           </div>
         )}
 
-        {candidates.length > 0 && (
+        {mode === 'image' && candidates.length > 0 && (
           <div className="space-y-2">
             <div className="flex items-center justify-between">
               <span className="text-xs text-secondary">
@@ -238,7 +278,7 @@ export function WatchlistImportDialog({ open, onClose, poolKey }: Props) {
         </button>
         <button
           type="button"
-          disabled={selected.size === 0 || batchAdd.isPending || busy}
+          disabled={(mode === 'text' ? textSymbols.length === 0 : selected.size === 0) || batchAdd.isPending || busy}
           onClick={() => void confirmAdd()}
           className="h-8 px-3 rounded-btn text-xs inline-flex items-center gap-1.5 bg-accent text-white hover:bg-accent/90 disabled:opacity-40"
         >
@@ -247,7 +287,7 @@ export function WatchlistImportDialog({ open, onClose, poolKey }: Props) {
           ) : (
             <Upload className="h-3.5 w-3.5" />
           )}
-          添加所选 ({selected.size})
+          {mode === 'text' ? `导入 ${textSymbols.length} 只` : `添加所选 (${selected.size})`}
         </button>
       </div>
     </Modal>

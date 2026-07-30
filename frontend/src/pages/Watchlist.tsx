@@ -1080,7 +1080,7 @@ export function Watchlist() {
             <button
               onClick={() => setImportOpen(true)}
               className="inline-flex items-center justify-center h-8 w-8 rounded-btn bg-elevated hover:bg-elevated/80 text-secondary hover:text-foreground transition-colors duration-150 ease-smooth"
-              title="从截图导入自选"
+              title="导入自选"
             >
               <ImagePlus className="h-4 w-4" />
             </button>
