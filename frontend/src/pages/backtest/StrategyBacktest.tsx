@@ -27,6 +27,7 @@ import { ReturnDistributionChart } from './charts/ReturnDistributionChart'
 import { TradeKlineModal } from './components/TradeKlineModal'
 import { SignalTriggerActions } from '@/components/signals/SignalTriggerActions'
 import { OpeningVolumeParamsEditor } from '@/components/strategy/OpeningVolumeParamsEditor'
+import { toast } from '@/components/Toast'
 
 const formatDate = (date: Date) => date.toISOString().slice(0, 10)
 const monthsAgo = (months: number) => {
@@ -771,7 +772,7 @@ function StockPoolPicker({
   const results = search.data?.results ?? []
   // 自选列表 — 供「从自选导入」一键填入回测范围
   const watchlist = useQuery({
-    queryKey: QK.watchlist,
+    queryKey: QK.watchlist(),
     queryFn: () => api.watchlistList(),
     staleTime: 30_000,
   })
@@ -904,6 +905,27 @@ export function StrategyBacktest() {
   const [selectedStrategy, setSelectedStrategy] = useState<string | null>(saved?.selectedStrategy ?? null)
   const [strategyGroup, setStrategyGroup] = useState<StrategyGroup>('all')
   const [symbols, setSymbols] = useState(saved?.symbols ?? '')
+  const [universeSource, setUniverseSource] = useState<'market' | 'manual' | 'monthly_pool'>(saved?.universeSource ?? (saved?.symbols ? 'manual' : 'market'))
+  const [poolKey, setPoolKey] = useState<string | null>(saved?.poolKey ?? null)
+  const openingVolumeWatchlist = useQuery({
+    queryKey: QK.watchlist(),
+    queryFn: () => api.watchlistList(),
+    staleTime: 30_000,
+  })
+  const watchlistPools = useQuery({
+    queryKey: QK.watchlistPools,
+    queryFn: api.watchlistPools,
+  })
+  const monthlyPools = useMemo(
+    () => (watchlistPools.data?.pools ?? []).filter(pool => pool.month).sort((a, b) => b.month!.localeCompare(a.month!)),
+    [watchlistPools.data?.pools],
+  )
+  const selectedMonthlyPool = monthlyPools.find(pool => pool.pool_key === poolKey)
+  const selectedMonthlyMembers = useQuery({
+    queryKey: QK.watchlist(poolKey ?? undefined),
+    queryFn: () => api.watchlistList(poolKey ?? undefined),
+    enabled: universeSource === 'monthly_pool' && !!poolKey,
+  })
   const [assetType, setAssetType] = useState<'stock' | 'etf'>(saved?.assetType ?? 'stock')
   const [start, setStart] = useState(saved?.start ?? THREE_MONTHS_AGO)
   const [end, setEnd] = useState(saved?.end ?? TODAY)
@@ -1028,6 +1050,10 @@ export function StrategyBacktest() {
         selectedStrategy,
         symbols,
         assetType,
+        universeSource,
+        poolKey,
+        poolMonth: selectedMonthlyPool?.month ?? null,
+        poolUpdatedAt: selectedMonthlyPool?.updated_at ?? null,
         start,
         end,
         matching,
@@ -1054,16 +1080,43 @@ export function StrategyBacktest() {
     }
   }, [backtestTask])
 
-  const handleRun = () => {
+  const handleRun = async () => {
     const detail = strategyDetail.data
     if (!selectedStrategy) return
+    let frozenPoolSymbols: string[] | null = null
+    if (universeSource === 'monthly_pool') {
+      if (!poolKey) {
+        toast('请先选择月份股票池。', 'error')
+        return
+      }
+      try {
+        // 启动前重新读取成员，提交具体代码以冻结本次回测范围。
+        const snapshot = await api.watchlistList(poolKey)
+        frozenPoolSymbols = snapshot.symbols.map(item => item.symbol).filter(Boolean)
+      } catch {
+        return
+      }
+      if (frozenPoolSymbols.length === 0) {
+        toast('所选月份股票池为空。', 'error')
+        return
+      }
+      if ((highGranularity || detail?.id === 'opening_volume_portfolio') && frozenPoolSymbols.length > 1000) {
+        toast('vn.py 分钟组合回测最多支持 1000 只股票。', 'error')
+        return
+      }
+      setSymbols(frozenPoolSymbols.join(','))
+    }
     const requestOverrides = detail
       ? normalizeStrategyOverrides(detail, overrides)
       : overrides
     if (strategyDetail.data?.id === 'opening_volume_portfolio') {
+      const poolSymbols = frozenPoolSymbols ?? resolveOpeningVolumePool(
+        symbols,
+        (openingVolumeWatchlist.data?.symbols ?? []).map(item => item.symbol),
+      )
       startBacktest({
         strategy_id: 'opening_volume_portfolio',
-        symbols: symbols ? symbols.split(',').map(s => s.trim()).filter(Boolean) : null,
+        symbols: poolSymbols,
         start: start || null,
         end: end || undefined,
         entry_fill: 'next_minute_open',
@@ -1099,7 +1152,7 @@ export function StrategyBacktest() {
     startBacktest({
       strategy_id: highGranularity ? 'minute_double_ma_volume' : selectedStrategy,
       asset_type: assetType,
-      symbols: symbols ? symbols.split(',').map(s => s.trim()).filter(Boolean) : null,
+      symbols: frozenPoolSymbols ?? (symbols ? symbols.split(',').map(s => s.trim()).filter(Boolean) : null),
       start: start || null,
       end: end || undefined,
       matching,
@@ -1362,6 +1415,53 @@ export function StrategyBacktest() {
   const stockPoolSummary = openingVolumeStrategy
     ? stockPoolCount > 0 ? `股票池 自选股子集 ${stockPoolCount} 只` : '股票池 TickFlow 自选股'
     : stockPoolCount > 0 ? `股票池 已限定 ${stockPoolCount} 只` : '股票池 全市场'
+  const chooseMonthlyPool = (nextPoolKey: string) => {
+    setPoolKey(nextPoolKey || null)
+    setUniverseSource('monthly_pool')
+  }
+  const universeSelector = (
+    <div className="space-y-2">
+      <div className="inline-flex h-8 overflow-hidden rounded-btn border border-border">
+        <button
+          type="button"
+          onClick={() => { setUniverseSource('market'); setSymbols('') }}
+          className={`px-3 text-xs transition-colors ${universeSource === 'market' ? 'bg-accent/10 text-accent' : 'text-muted hover:text-foreground'}`}
+        >
+          {openingVolumeStrategy ? '全部自选' : '全市场'}
+        </button>
+        <button
+          type="button"
+          onClick={() => setUniverseSource('manual')}
+          className={`px-3 text-xs transition-colors ${universeSource === 'manual' ? 'bg-accent/10 text-accent' : 'text-muted hover:text-foreground'}`}
+        >
+          手工股票池
+        </button>
+        <button
+          type="button"
+          onClick={() => chooseMonthlyPool(poolKey ?? monthlyPools[0]?.pool_key ?? '')}
+          disabled={monthlyPools.length === 0}
+          className={`px-3 text-xs transition-colors disabled:opacity-40 ${universeSource === 'monthly_pool' ? 'bg-accent/10 text-accent' : 'text-muted hover:text-foreground'}`}
+        >
+          月份股票池
+        </button>
+      </div>
+      {universeSource === 'monthly_pool' && (
+        <div className="flex flex-wrap items-center gap-2">
+          <select
+            value={poolKey ?? ''}
+            onChange={event => chooseMonthlyPool(event.target.value)}
+            className="h-8 rounded-btn border border-border bg-surface px-2 text-xs outline-none focus:border-accent"
+          >
+            <option value="" disabled>选择月份</option>
+            {monthlyPools.map(pool => <option key={pool.pool_key} value={pool.pool_key}>{pool.month}</option>)}
+          </select>
+          <span className="text-[11px] text-secondary">
+            {selectedMonthlyMembers.isFetching ? '读取成员中...' : `${selectedMonthlyMembers.data?.symbols.length ?? selectedMonthlyPool?.member_count ?? 0} 只，启动时冻结成员`}
+          </span>
+        </div>
+      )}
+    </div>
+  )
   const resultStartDate = result?.config?.start ?? result?.equity_curve?.[0]?.date ?? start
   const resultEndDate = result?.config?.end ?? result?.equity_curve?.[result.equity_curve.length - 1]?.date ?? end
   const resultTradeDays = result?.equity_curve?.length ?? 0
@@ -2444,14 +2544,17 @@ export function StrategyBacktest() {
                         <span className="text-[11px] text-muted">资产类型</span>
                         <span className="rounded-btn border border-accent/40 bg-accent/10 px-3 py-1.5 text-accent">股票</span>
                       </div>
-                      <StockPoolPicker
-                        value={symbols}
-                        onChange={setSymbols}
-                        assetType="stock"
-                        emptyLabel="全部自选股"
-                        emptyDescription="默认使用全部 TickFlow 自选股。"
-                      />
-                      <div className="text-[11px] leading-5 text-muted">留空使用全部 TickFlow 自选股；指定股票时按自选股子集回测。</div>
+                      {universeSelector}
+                      {universeSource === 'manual' && (
+                        <StockPoolPicker
+                          value={symbols}
+                          onChange={(next) => { setUniverseSource('manual'); setSymbols(next) }}
+                          assetType="stock"
+                          emptyLabel="全部自选股"
+                          emptyDescription="默认使用全部 TickFlow 自选股。"
+                        />
+                      )}
+                      <div className="text-[11px] leading-5 text-muted">月份股票池会在启动回测时重新读取并冻结实际提交的股票代码。</div>
                     </>
                   ) : (
                     <>
@@ -2462,7 +2565,7 @@ export function StrategyBacktest() {
                             <button
                               key={t}
                               type="button"
-                              onClick={() => { setAssetType(t); setSelectedStrategy(null); setSymbols('') }}
+                              onClick={() => { setAssetType(t); setSelectedStrategy(null); setSymbols(''); setUniverseSource('market') }}
                               className={`h-full px-3 text-xs font-medium transition-colors cursor-pointer
                                 ${assetType === t ? 'bg-accent/10 text-accent' : 'text-muted hover:text-foreground'}`}
                             >
@@ -2472,8 +2575,15 @@ export function StrategyBacktest() {
                         </div>
                         <span className="text-[11px] text-muted/70">ETF 仅技术类策略,读 ETF enriched</span>
                       </div>
-                      <StockPoolPicker value={symbols} onChange={setSymbols} assetType={assetType} />
-                      <div className="text-[11px] leading-5 text-muted">默认全市场回测，由基础过滤、策略条件和买卖触发器筛选；需要单票调试或自选池回测时再限定股票池。</div>
+                      {assetType === 'stock' && universeSelector}
+                      {(assetType === 'etf' || universeSource === 'manual') && (
+                        <StockPoolPicker
+                          value={symbols}
+                          onChange={(next) => { setUniverseSource('manual'); setSymbols(next) }}
+                          assetType={assetType}
+                        />
+                      )}
+                      <div className="text-[11px] leading-5 text-muted">默认全市场回测；月份股票池会在启动时重新读取成员并冻结实际提交范围。</div>
                     </>
                   )}
                 </ConfigSection>

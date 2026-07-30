@@ -2,8 +2,9 @@ import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Trash2, RefreshCw, Star, X, Search, LayoutGrid, List, Settings2, Plus, Check, Filter, Eye, EyeOff, Minus, ChevronsUp, Clock, RotateCcw, ImagePlus } from 'lucide-react'
+import { Trash2, RefreshCw, Star, X, Search, LayoutGrid, List, Settings2, Plus, Check, Filter, Eye, EyeOff, Minus, ChevronsUp, Clock, RotateCcw, ImagePlus, ArchiveRestore } from 'lucide-react'
 import { api, type KlineRow, type MinuteKlineRow } from '@/lib/api'
+import { toast } from '@/components/Toast'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
 import { fmtPrice, fmtPct, fmtBigNum, priceColorClass } from '@/lib/format'
@@ -388,6 +389,8 @@ const StockCard = React.memo(function StockCard({
   onToggleExpand,
   onDimensionClick,
   isMonitored,
+  showPoolTags,
+  poolLabels,
 }: {
   r: any
   candleRows: KlineRow[]
@@ -402,6 +405,8 @@ const StockCard = React.memo(function StockCard({
   onToggleExpand: (key: string) => void
   onDimensionClick: (target: DimensionMembersTarget) => void
   isMonitored?: boolean
+  showPoolTags?: boolean
+  poolLabels?: Record<string, string>
 }) {
   const board = boardTag(r.symbol)
   const price = r.rt_price ?? r.close
@@ -431,7 +436,7 @@ const StockCard = React.memo(function StockCard({
       <div className={`absolute left-0 top-0 bottom-0 w-[3px] rounded-l-lg ${barColor}`} />
 
       {/* 删除按钮 / 确认区 */}
-      <div className="absolute top-1.5 right-1.5 z-10">
+      {!showPoolTags && <div className="absolute top-1.5 right-1.5 z-10">
         {isConfirming ? (
           <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
             <button
@@ -453,7 +458,7 @@ const StockCard = React.memo(function StockCard({
             <Trash2 className="h-3.5 w-3.5" />
           </button>
         )}
-      </div>
+      </div>}
 
       {/* 卡片内容 */}
       <div className="pl-4 pr-2.5 pt-2.5 pb-0">
@@ -477,6 +482,15 @@ const StockCard = React.memo(function StockCard({
           )}
           {isMonitored && <span className="ml-auto"><RealtimeDot /></span>}
         </div>
+        {showPoolTags && r.pool_keys?.length > 0 && (
+          <div className="mb-2 flex flex-wrap gap-1">
+            {r.pool_keys.map((poolKey: string) => (
+              <span key={poolKey} className="rounded border border-border bg-elevated px-1 py-0.5 text-[9px] text-muted">
+                {poolLabels?.[poolKey] ?? poolKey}
+              </span>
+            ))}
+          </div>
+        )}
 
         {/* 第二行: 大价格 + 涨跌幅胶囊 */}
         <div className="flex items-end justify-between gap-2 mb-2">
@@ -556,6 +570,10 @@ const StockCard = React.memo(function StockCard({
 
 export function Watchlist() {
   const qc = useQueryClient()
+  const [activePoolKey, setActivePoolKey] = useState<string | 'all' | null>(null)
+  const [createPoolOpen, setCreatePoolOpen] = useState(false)
+  const [newPoolMonth, setNewPoolMonth] = useState(() => new Date().toISOString().slice(0, 7))
+  const [migrationOpen, setMigrationOpen] = useState(false)
   const [viewMode, setViewMode] = useState<'table' | 'card'>(() => {
     return (storage.watchlistView.get('table') as 'table' | 'card')
   })
@@ -656,15 +674,65 @@ export function Watchlist() {
     })
   }, [])
 
+  const pools = useQuery({
+    queryKey: QK.watchlistPools,
+    queryFn: api.watchlistPools,
+  })
+  const migration = useQuery({
+    queryKey: QK.watchlistMigration,
+    queryFn: api.watchlistMigrationStatus,
+  })
+  const monthPools = useMemo(
+    () => (pools.data?.pools ?? []).filter(pool => pool.month).sort((a, b) => b.month!.localeCompare(a.month!)),
+    [pools.data?.pools],
+  )
+  const isAllView = activePoolKey === 'all'
+  const selectedPoolKey = isAllView ? undefined : activePoolKey ?? undefined
+  const activeView = isAllView ? 'all' as const : undefined
+  const mutationPoolKey = isAllView ? 'ungrouped' : selectedPoolKey
+  const poolLabels = useMemo(() => Object.fromEntries(
+    (pools.data?.pools ?? []).map(pool => [pool.pool_key, pool.month ?? '未分组']),
+  ), [pools.data?.pools])
+
+  useEffect(() => {
+    if (activePoolKey !== null) return
+    setActivePoolKey(monthPools[0]?.pool_key ?? 'ungrouped')
+  }, [activePoolKey, monthPools])
+
+  const createPool = useMutation({
+    mutationFn: () => api.watchlistPoolCreate(newPoolMonth),
+    onSuccess: ({ pool }) => {
+      setActivePoolKey(pool.pool_key)
+      setCreatePoolOpen(false)
+      qc.invalidateQueries({ queryKey: QK.watchlistPools })
+    },
+  })
+  const migrateLegacy = useMutation({
+    mutationFn: api.watchlistMigrateLegacy,
+    onSuccess: ({ pool }) => {
+      if (pool) setActivePoolKey(pool.pool_key)
+      qc.invalidateQueries({ queryKey: QK.watchlistMigration })
+      qc.invalidateQueries({ queryKey: QK.watchlistPools })
+      qc.invalidateQueries({ queryKey: ['watchlist'] })
+      qc.invalidateQueries({ queryKey: ['watchlist-enriched'] })
+    },
+    onError: (error) => {
+      // 状态接口未随后端重启时，按钮仍可点击并把真实错误反馈给用户。
+      toast(error instanceof Error ? error.message : '迁移请求失败，请检查后端服务。', 'error')
+      qc.invalidateQueries({ queryKey: QK.watchlistMigration })
+    },
+  })
+
   const list = useQuery({
-    queryKey: QK.watchlist,
-    queryFn: api.watchlistList,
+    queryKey: QK.watchlist(selectedPoolKey, activeView),
+    queryFn: () => api.watchlistList(selectedPoolKey, activeView),
+    enabled: activePoolKey !== null,
   })
 
   // enriched 数据 — 传入 ext_columns 参数
   const enriched = useQuery({
-    queryKey: QK.watchlistEnriched(extColumnsParam),
-    queryFn: () => api.watchlistEnriched(extColumnsParam || undefined),
+    queryKey: QK.watchlistEnriched(extColumnsParam, selectedPoolKey, activeView),
+    queryFn: () => api.watchlistEnriched(extColumnsParam || undefined, selectedPoolKey, activeView),
     enabled: (list.data?.symbols.length ?? 0) > 0,
   })
 
@@ -701,35 +769,36 @@ export function Watchlist() {
   const minuteData = intradayVisible ? (minuteBatch.data?.data ?? {}) : {}
 
   const addMutation = useMutation({
-    mutationFn: (sym: string) => api.watchlistAdd(sym),
+    mutationFn: (sym: string) => api.watchlistAdd(sym, '', mutationPoolKey),
     onSuccess: (data) => {
-      qc.setQueryData(QK.watchlist, data)
-      qc.invalidateQueries({ queryKey: QK.watchlist })
+      // 全部视图新增会写入未分组，响应不能覆盖跨月份汇总缓存。
+      if (!isAllView) qc.setQueryData(QK.watchlist(selectedPoolKey, activeView), data)
+      qc.invalidateQueries({ queryKey: ['watchlist'] })
       qc.invalidateQueries({ queryKey: ['watchlist-enriched'] })
       qc.invalidateQueries({ queryKey: ['watchlist-kline-batch'] })
     },
   })
 
   const remove = useMutation({
-    mutationFn: (sym: string) => api.watchlistRemove(sym),
+    mutationFn: (sym: string) => api.watchlistRemove(sym, selectedPoolKey),
     onSuccess: (_data, sym) => {
       // 1. 立即从 enriched 缓存中移除该股票，UI 即时更新
-      qc.setQueryData(['watchlist-enriched', extColumnsParam], (old: any) => {
+      qc.setQueryData(QK.watchlistEnriched(extColumnsParam, selectedPoolKey, activeView), (old: any) => {
         if (!old?.rows) return old
         return { ...old, rows: old.rows.filter((r: any) => r.symbol !== sym) }
       })
       // 2. 清除 list 缓存，触发后台 refetch
-      qc.invalidateQueries({ queryKey: QK.watchlist })
+      qc.invalidateQueries({ queryKey: ['watchlist'] })
       qc.invalidateQueries({ queryKey: ['watchlist-enriched'] })
       qc.invalidateQueries({ queryKey: ['watchlist-kline-batch'] })
     },
   })
 
   const moveToTop = useMutation({
-    mutationFn: (sym: string) => api.watchlistMoveToTop(sym),
+    mutationFn: (sym: string) => api.watchlistMoveToTop(sym, selectedPoolKey),
     onSuccess: (data) => {
-      qc.setQueryData(QK.watchlist, data)
-      qc.invalidateQueries({ queryKey: QK.watchlist })
+      qc.setQueryData(QK.watchlist(selectedPoolKey, activeView), data)
+      qc.invalidateQueries({ queryKey: ['watchlist'] })
       qc.invalidateQueries({ queryKey: ['watchlist-enriched'] })
       qc.invalidateQueries({ queryKey: ['watchlist-kline-batch'] })
       qc.invalidateQueries({ queryKey: QK.preferences })
@@ -738,12 +807,12 @@ export function Watchlist() {
   })
 
   const clearAll = useMutation({
-    mutationFn: () => api.watchlistClear(),
+    mutationFn: () => api.watchlistClear(selectedPoolKey),
     onSuccess: () => {
       setConfirmClear(false)
       // 立即清空 enriched 缓存
-      qc.setQueryData(['watchlist-enriched', extColumnsParam], { rows: [], as_of: null, elapsed_ms: 0 })
-      qc.invalidateQueries({ queryKey: QK.watchlist })
+      qc.setQueryData(QK.watchlistEnriched(extColumnsParam, selectedPoolKey, activeView), { rows: [], as_of: null, elapsed_ms: 0 })
+      qc.invalidateQueries({ queryKey: ['watchlist'] })
       qc.invalidateQueries({ queryKey: ['watchlist-enriched'] })
       qc.invalidateQueries({ queryKey: ['watchlist-kline-batch'] })
     },
@@ -764,7 +833,10 @@ export function Watchlist() {
   const handleCardRequestRemove = useCallback((sym: string) => setConfirmRemove(sym), [])
 
   const allSymbols = list.data?.symbols?.map(s => s.symbol) ?? []
-  const rows = enriched.data?.rows ?? []
+  const rows = useMemo(() => {
+    const memberships = new Map((list.data?.symbols ?? []).map(entry => [entry.symbol, entry.pool_keys ?? []]))
+    return (enriched.data?.rows ?? []).map((row: any) => ({ ...row, pool_keys: memberships.get(row.symbol) ?? [] }))
+  }, [enriched.data?.rows, list.data?.symbols])
 
   // 实时监控圆点: 仅 Free/低档 "按自选股实时监控" 模式 (mode === 'watchlist') 下显示;
   // Starter+ 全市场模式 (mode === 'full_market') 全部标的都在监控, 标圆点无意义, 故不显示。
@@ -936,6 +1008,8 @@ export function Watchlist() {
       onToggleExpand={handleToggleExpand}
       onDimensionClick={setDimensionTarget}
       isMonitored={monitoredSymbols.has(r.symbol)}
+      showPoolTags={isAllView}
+      poolLabels={poolLabels}
     />
   )
 
@@ -1000,7 +1074,7 @@ export function Watchlist() {
             )}
             <StockSearchBox
               onPreview={(sym, name) => { setPreviewSymbol(sym); setPreviewName(name) }}
-              existingSymbols={allSymbols as string[]}
+              existingSymbols={(isAllView ? [] : allSymbols) as string[]}
               onAdd={(sym) => addMutation.mutate(sym)}
             />
             <button
@@ -1036,7 +1110,7 @@ export function Watchlist() {
             >
               <RefreshCw className={`h-4 w-4 ${enriched.isFetching ? 'animate-spin' : ''}`} />
             </button>
-            {allSymbols.length > 0 && (
+            {!isAllView && allSymbols.length > 0 && (
               <>
                 <div className="w-px h-5 bg-border" />
                 <button
@@ -1051,6 +1125,57 @@ export function Watchlist() {
           </div>
         }
       />
+
+      <div className="flex items-center gap-1 overflow-x-auto border-b border-border bg-surface px-5 py-2">
+        <button
+          type="button"
+          onClick={() => setActivePoolKey('all')}
+          className={`shrink-0 rounded-btn px-2.5 py-1 text-xs transition-colors ${isAllView ? 'bg-accent/15 text-accent' : 'text-secondary hover:bg-elevated'}`}
+        >
+          全部
+        </button>
+        <button
+          type="button"
+          onClick={() => setActivePoolKey('ungrouped')}
+          className={`shrink-0 rounded-btn px-2.5 py-1 text-xs transition-colors ${activePoolKey === 'ungrouped' ? 'bg-accent/15 text-accent' : 'text-secondary hover:bg-elevated'}`}
+        >
+          未分组
+        </button>
+        {monthPools.map(pool => (
+          <button
+            key={pool.pool_key}
+            type="button"
+            onClick={() => setActivePoolKey(pool.pool_key)}
+            className={`shrink-0 rounded-btn px-2.5 py-1 text-xs transition-colors ${activePoolKey === pool.pool_key ? 'bg-accent/15 text-accent' : 'text-secondary hover:bg-elevated'}`}
+          >
+            {pool.month} <span className="ml-1 font-mono text-[10px] opacity-70">{pool.member_count}</span>
+          </button>
+        ))}
+        <button
+          type="button"
+          onClick={() => setCreatePoolOpen(true)}
+          className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-btn text-secondary hover:bg-elevated hover:text-accent"
+          title="新建月份股票池"
+          aria-label="新建月份股票池"
+        >
+          <Plus className="h-3.5 w-3.5" />
+        </button>
+        <button
+          type="button"
+          onClick={() => setMigrationOpen(true)}
+          className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-btn transition-colors ${migration.data?.migrated ? 'text-accent hover:bg-accent/10' : 'text-warning hover:bg-warning/10'}`}
+          title={migration.data?.migrated ? '查看旧自选迁移状态' : '迁移旧自选到 2026-01'}
+          aria-label="旧自选迁移"
+        >
+          <ArchiveRestore className="h-3.5 w-3.5" />
+        </button>
+      </div>
+
+      {isAllView && (
+        <div className="border-b border-border bg-warning/5 px-5 py-1.5 text-[11px] text-secondary">
+          全部视图为跨月份汇总；新增股票会写入未分组，删除、置顶和清空操作在此视图不可用。
+        </div>
+      )}
 
       {/* 筛选栏 */}
       {filterOpen && (
@@ -1241,10 +1366,15 @@ export function Watchlist() {
                               {board.label}
                             </span>
                           ) : null}
+                          {isAllView && r.pool_keys?.map((poolKey: string) => (
+                            <span key={poolKey} className="shrink-0 rounded border border-border bg-elevated px-1 py-0.5 text-[9px] text-muted">
+                              {poolLabels[poolKey] ?? poolKey}
+                            </span>
+                          ))}
                           {monitoredSymbols.has(r.symbol) && <span className="ml-2"><RealtimeDot /></span>}
                         </button>
-                        {/* 删除入口：默认减号图标，二次确认时替换为确定按钮 */}
-                        <div className="ml-auto pl-1 shrink-0">
+                        {/* 全部视图只汇总查看，避免对多个归属池执行歧义操作。 */}
+                        {!isAllView && <div className="ml-auto pl-1 shrink-0">
                           {confirmRemove === r.symbol ? (
                             <div className="flex items-center gap-1">
                               <button
@@ -1281,7 +1411,7 @@ export function Watchlist() {
                               </button>
                             </div>
                           )}
-                        </div>
+                        </div>}
                       </div>
                     </td>
                   )
@@ -1449,7 +1579,69 @@ export function Watchlist() {
         }}
       />
 
-      <WatchlistImportDialog open={importOpen} onClose={() => setImportOpen(false)} />
+      <WatchlistImportDialog open={importOpen} onClose={() => setImportOpen(false)} poolKey={mutationPoolKey} />
+
+      <AnimatePresence>
+        {createPoolOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center">
+            <motion.div className="absolute inset-0 bg-black/60" onClick={() => setCreatePoolOpen(false)} />
+            <motion.div className="relative w-[90vw] max-w-xs rounded-card border border-border bg-base p-5 shadow-2xl">
+              <h3 className="text-sm font-medium text-foreground">新建月份股票池</h3>
+              <input
+                type="month"
+                value={newPoolMonth}
+                onChange={event => setNewPoolMonth(event.target.value)}
+                className="mt-4 w-full rounded-btn border border-border bg-surface px-3 py-2 text-sm outline-none focus:border-accent"
+              />
+              <div className="mt-4 flex justify-end gap-2">
+                <button type="button" onClick={() => setCreatePoolOpen(false)} className="rounded-btn px-3 py-1.5 text-sm text-secondary hover:bg-elevated">取消</button>
+                <button
+                  type="button"
+                  onClick={() => createPool.mutate()}
+                  disabled={!/^\d{4}-\d{2}$/.test(newPoolMonth) || createPool.isPending}
+                  className="rounded-btn bg-accent px-3 py-1.5 text-sm text-white disabled:opacity-50"
+                >
+                  {createPool.isPending ? '创建中...' : '创建'}
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {migrationOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center">
+            <motion.div className="absolute inset-0 bg-black/60" onClick={() => setMigrationOpen(false)} />
+            <motion.div className="relative w-[90vw] max-w-sm rounded-card border border-border bg-base p-5 shadow-2xl">
+              <h3 className="text-sm font-medium text-foreground">旧自选迁移</h3>
+              <div className="mt-4 space-y-2 text-xs text-secondary">
+                <div className="flex justify-between gap-4"><span>旧自选股票</span><span className="font-mono text-foreground">{migration.data?.legacy_count ?? '—'} 只</span></div>
+                <div className="flex justify-between gap-4"><span>目标月份</span><span className="font-mono text-foreground">{migration.data?.target_month ?? '2026-01'}</span></div>
+                <div className="flex justify-between gap-4"><span>目标池成员</span><span className="font-mono text-foreground">{migration.data?.target_count ?? '—'} 只</span></div>
+              </div>
+              <p className="mt-4 text-xs leading-5 text-muted">
+                {migration.data?.migrated
+                  ? '迁移已完成。原始自选文件保留不变，可在 2026-01 月份池查看成员。'
+                  : '迁移会复制旧自选到 2026-01 月份池，并保留原始自选文件。'}
+              </p>
+              <div className="mt-5 flex justify-end gap-2">
+                <button type="button" onClick={() => setMigrationOpen(false)} className="rounded-btn px-3 py-1.5 text-sm text-secondary hover:bg-elevated">关闭</button>
+                {!migration.data?.migrated && (
+                  <button
+                    type="button"
+                    onClick={() => migrateLegacy.mutate()}
+                    disabled={migrateLegacy.isPending}
+                    className="rounded-btn bg-accent px-3 py-1.5 text-sm text-white disabled:opacity-50"
+                  >
+                    {migrateLegacy.isPending ? '迁移中...' : '迁移到 2026-01'}
+                  </button>
+                )}
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   )
 }

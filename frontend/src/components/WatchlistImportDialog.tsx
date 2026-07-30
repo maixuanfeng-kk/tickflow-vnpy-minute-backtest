@@ -8,16 +8,17 @@ import { useWatchlistBatchAdd } from '@/lib/useSharedMutations'
 interface Props {
   open: boolean
   onClose: () => void
+  poolKey?: string
 }
 
-export function WatchlistImportDialog({ open, onClose }: Props) {
+export function WatchlistImportDialog({ open, onClose, poolKey }: Props) {
   const inputRef = useRef<HTMLInputElement>(null)
   const [busy, setBusy] = useState(false)
   const [provider, setProvider] = useState<string>('')
   const [candidates, setCandidates] = useState<WatchlistImportCandidate[]>([])
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
-  const batchAdd = useWatchlistBatchAdd()
+  const batchAdd = useWatchlistBatchAdd(poolKey)
 
   const reset = useCallback(() => {
     setBusy(false)

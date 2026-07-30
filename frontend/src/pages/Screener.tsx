@@ -491,8 +491,8 @@ export function Screener() {
 
   // 自选股列表 (用于判断是否在自选中)
   const watchlist = useQuery({
-    queryKey: QK.watchlist,
-    queryFn: api.watchlistList,
+    queryKey: QK.watchlist(),
+    queryFn: () => api.watchlistList(),
   })
   const watchlistSet = useMemo(() => {
     const symbols = watchlist.data?.symbols ?? []
@@ -504,7 +504,7 @@ export function Screener() {
     mutationFn: ({ symbol, inList }: { symbol: string; inList: boolean }) =>
       inList ? api.watchlistRemove(symbol) : api.watchlistAdd(symbol),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: QK.watchlist })
+      qc.invalidateQueries({ queryKey: ['watchlist'] })
       qc.invalidateQueries({ queryKey: ['watchlist-enriched'] })
     },
   })

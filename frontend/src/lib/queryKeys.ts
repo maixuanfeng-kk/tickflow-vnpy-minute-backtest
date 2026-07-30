@@ -22,9 +22,11 @@ export const QK = {
   indexList:      ['index-list'] as const,
 
   // Watchlist
-  watchlist:            ['watchlist'] as const,
+  watchlist:            (poolKey?: string, view?: 'all') => ['watchlist', poolKey ?? 'default', view ?? 'pool'] as const,
+  watchlistPools:       ['watchlist', 'pools'] as const,
+  watchlistMigration:   ['watchlist', 'migration'] as const,
   watchlistQuotes:      ['watchlist-quotes'] as const,
-  watchlistEnriched:    (ext?: string) => ['watchlist-enriched', ext] as const,
+  watchlistEnriched:    (ext?: string, poolKey?: string, view?: 'all') => ['watchlist-enriched', ext ?? '', poolKey ?? 'default', view ?? 'pool'] as const,
   watchlistKlineBatch:  (symbols: string) => ['watchlist-kline-batch', symbols] as const,
   // 不用 watchlist- 前缀: 避免被 SSE quotes_updated 高频失效(expert 1s/pro 2s)
   // 导致每次都拉 TickFlow 触限流。分时图用固定 refetchInterval 刷新即可。

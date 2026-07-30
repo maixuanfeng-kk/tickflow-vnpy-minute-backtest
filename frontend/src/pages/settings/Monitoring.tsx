@@ -109,7 +109,7 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
   }, [wecomBotId, wecomBotSecret])
   const watchlistSymbols = prefs?.realtime_watchlist_symbols ?? []
   const watchlist = useQuery({
-    queryKey: QK.watchlist,
+    queryKey: QK.watchlist(),
     queryFn: () => api.watchlistList(),
     enabled: isFreeTier && watchlistSymbols.length > 0,
   })

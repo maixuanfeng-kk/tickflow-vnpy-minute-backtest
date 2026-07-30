@@ -10,6 +10,8 @@ from app.stock_pools.data import DataReadiness, StockPoolDataAdapter
 from app.stock_pools.service import StockPoolService
 from app.stock_pools.store import StockPoolStore
 from app.stock_pools.strategies import MonthlyGrowthTrendStrategy
+from app.stock_pools.registry import get_strategy
+from app.services.watchlist_pools import WatchlistPoolStore
 
 
 def _strategy_input() -> StockPoolInput:
@@ -141,3 +143,18 @@ def test_manual_save_writes_members_and_manifest(tmp_path) -> None:
     manifest = service.store.get_run(saved["run_id"])[0]
     assert manifest["data_coverage"]["daily_trading_days_before_as_of"] == 200
     assert service.list_runs("monthly_growth_trend")[0]["member_count"] == 2
+    published = WatchlistPoolStore(tmp_path).get_pool("month:2026-05")
+    assert published["source"] == "stock_pool_strategy"
+    assert published["source_run_id"] == saved["run_id"]
+    assert [row["symbol"] for row in WatchlistPoolStore(tmp_path).list_members("month:2026-05")] == ["000001.SZ", "600000.SH"]
+
+
+def test_monthly_growth_strategy_exposes_editable_parameter_descriptors() -> None:
+    spec = get_strategy("monthly_growth_trend")
+
+    assert spec is not None
+    assert [item["key"] for item in spec.parameters] == [
+        "revenue_yoy_min", "ma_window", "ma_days", "high_window",
+        "high_days", "listing_days_min", "market_cap_min",
+    ]
+    assert spec.parameters[0]["default"] == 0.15
