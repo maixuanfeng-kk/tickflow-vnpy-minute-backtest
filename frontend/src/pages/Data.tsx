@@ -143,6 +143,15 @@ export function Data() {
     queryFn: api.extDataList,
   })
 
+  const financialImport = useQuery({
+    queryKey: QK.financialImportStatus,
+    queryFn: api.financialImportStatus,
+    refetchInterval: query => {
+      const importJob = query.state.data?.job
+      return importJob && (importJob.status === 'pending' || importJob.status === 'running') ? 1_000 : 30_000
+    },
+  })
+
   const deleteExt = useMutation({
     mutationFn: (id: string) => api.extDataDelete(id),
     onSuccess: () => qc.invalidateQueries({ queryKey: QK.extData }),
@@ -510,6 +519,7 @@ export function Data() {
             capLimits={caps.data?.capabilities}
             tierLabel={caps.data?.label}
             customProvider={getCustomProviderName('minute')}
+            localData={Boolean(s?.minute?.trading_days)}
             auto={minuteAuto}
             onShowFields={() => setSchemaTable('minute')}
             onSettings={hasData ? () => setOpenSettings(v => v === 'minute' ? null : 'minute') : undefined}
@@ -517,18 +527,30 @@ export function Data() {
           />
         )
       case 'financials': {
-        const historicalShareRows = s?.financials?.tables?.shares?.rows ?? 0
+        const dataset = financialImport.data?.dataset
+        const financialRows = dataset?.rows ?? s?.financials?.rows ?? 0
+        const financialStats = dataset
+          ? {
+              rows: dataset.rows,
+              symbols_covered: dataset.symbols,
+              trading_days: 0,
+              earliest_date: dataset.latest_report_date,
+              latest_date: dataset.latest_publish_date,
+            }
+          : s?.financials
+            ? { rows: financialRows, symbols_covered: 0, trading_days: 0, earliest_date: null, latest_date: null }
+            : null
         return (
           <StatCard
             title="财务数据"
-            hint="财报 / 指标 / 历史股本"
-            stats={s?.financials ? { rows: s.financials.rows } : null}
-            loading={isLoading}
+            hint="本地导入 · 财报数据"
+            stats={financialStats}
+            loading={isLoading || financialImport.isLoading}
             tierKey="financials"
             capLimits={caps.data?.capabilities}
             tierLabel={caps.data?.label}
-            customProvider={getCustomProviderName('financials')}
-            subLabel={`历史股本 · ${historicalShareRows.toLocaleString()} 条`}
+            localData
+            subLabel={dataset ? `财报 · ${dataset.symbols.toLocaleString()} 只股票` : '等待导入财务数据'}
             onSettings={hasData ? () => setOpenSettings(v => v === 'financials' ? null : 'financials') : undefined}
             settingsOpen={openSettings === 'financials'}
           />

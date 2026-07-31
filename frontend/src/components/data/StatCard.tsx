@@ -93,7 +93,7 @@ export function StatCard({
   title, hint, stats, isInstrument = false, loading = false,
   active = false, done = false, skipped = false, stagePct = 0,
   tierKey, capLimits, tierLabel, customProvider,
-  auto, onSettings, onShowFields, settingsOpen, subLabel, localBadgeSuffix, fieldTabs,
+  auto, onSettings, onShowFields, settingsOpen, subLabel, localBadgeSuffix, fieldTabs, localData = false,
 }: {
   title: string
   hint: string
@@ -114,6 +114,7 @@ export function StatCard({
   auto?: boolean
   subLabel?: string
   localBadgeSuffix?: string
+  localData?: boolean
   // 多表字段入口: [{label: '维表', table: 'index_instruments'}, ...]
   // 提供时渲染多个图标按钮(每个对应一张表的字段说明); 否则回退到单个 onShowFields
   fieldTabs?: FieldTab[]
@@ -127,7 +128,7 @@ export function StatCard({
   const bgCls = active ? 'bg-accent/[0.03]' : 'bg-surface'
 
   const meta = tierKey ? CARD_META[tierKey] : undefined
-  const isLocal = meta?.capKey === ''
+  const isLocal = localData || meta?.capKey === ''
   const capInfo = meta?.capKey ? capLimits?.[meta.capKey] : undefined
   const hasCap = isLocal || !!capInfo
 
