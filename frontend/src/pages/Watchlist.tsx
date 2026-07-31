@@ -691,7 +691,7 @@ export function Watchlist() {
   const activeView = isAllView ? 'all' as const : undefined
   const mutationPoolKey = isAllView ? 'ungrouped' : selectedPoolKey
   const poolLabels = useMemo(() => Object.fromEntries(
-    (pools.data?.pools ?? []).map(pool => [pool.pool_key, pool.month ?? '未分组']),
+    (pools.data?.pools ?? []).map(pool => [pool.pool_key, pool.label ?? pool.month ?? '未分组']),
   ), [pools.data?.pools])
 
   useEffect(() => {
@@ -1148,7 +1148,7 @@ export function Watchlist() {
             onClick={() => setActivePoolKey(pool.pool_key)}
             className={`shrink-0 rounded-btn px-2.5 py-1 text-xs transition-colors ${activePoolKey === pool.pool_key ? 'bg-accent/15 text-accent' : 'text-secondary hover:bg-elevated'}`}
           >
-            {pool.month} <span className="ml-1 font-mono text-[10px] opacity-70">{pool.member_count}</span>
+            {pool.label ?? pool.month} <span className="ml-1 font-mono text-[10px] opacity-70">{pool.member_count}</span>
           </button>
         ))}
         <button

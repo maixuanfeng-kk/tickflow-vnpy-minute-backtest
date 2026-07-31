@@ -119,15 +119,20 @@ class StockPoolDataAdapter:
             self._manifest_value("local_financial_import.json", "imported_at"),
         )
 
-    def load(self, readiness: DataReadiness, symbols: set[str]) -> StockPoolInput:
+    def load(self, readiness: DataReadiness, symbols: set[str] | None = None) -> StockPoolInput:
         if not readiness.ready or readiness.as_of_date is None:
             raise ValueError("数据尚未就绪")
         daily_path = self.data_dir / "kline_daily_xbx" / "**" / "*.parquet"
-        daily = (
+        daily_scan = (
             pl.scan_parquet(str(daily_path))
             .select("symbol", "name", "date", "high", "close", "total_mv")
             .with_columns(pl.col("date").cast(pl.Date))
-            .filter((pl.col("date") <= readiness.as_of_date) & pl.col("symbol").is_in(symbols))
+            .filter(pl.col("date") <= readiness.as_of_date)
+        )
+        if symbols is not None:
+            daily_scan = daily_scan.filter(pl.col("symbol").is_in(symbols))
+        daily = (
+            daily_scan
             .sort(["symbol", "date"])
             # The strategy only needs the latest 250 sessions: 200 prior bars
             # for a strict breakout, 20 recent trigger sessions, and MA60.
@@ -137,7 +142,9 @@ class StockPoolDataAdapter:
             .collect()
         )
         income = pl.read_parquet(self.data_dir / "financials" / "income" / "part.parquet")
-        financials = self._normalise_financials(income).filter(pl.col("symbol").is_in(symbols))
+        financials = self._normalise_financials(income)
+        if symbols is not None:
+            financials = financials.filter(pl.col("symbol").is_in(symbols))
         return StockPoolInput(
             month=readiness.month,
             as_of_date=readiness.as_of_date,

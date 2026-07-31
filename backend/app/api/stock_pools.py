@@ -13,7 +13,7 @@ router = APIRouter(prefix="/api/stock-pools", tags=["stock-pools"])
 class StockPoolBuildRequest(BaseModel):
     strategy_id: str = "monthly_growth_trend"
     month: str = Field(pattern=r"^\d{4}-(0[1-9]|1[0-2])$")
-    source_pool_key: str
+    source_pool_key: str | None = None
     params: dict[str, object] = Field(default_factory=dict)
 
 
@@ -27,7 +27,7 @@ def strategies() -> dict:
 
 
 @router.get("/readiness")
-def readiness(request: Request, month: str, source_pool_key: str, strategy_id: str = "monthly_growth_trend") -> dict:
+def readiness(request: Request, month: str, source_pool_key: str | None = None, strategy_id: str = "monthly_growth_trend") -> dict:
     if not any(item.id == strategy_id for item in list_strategies()):
         raise HTTPException(400, f"不支持的股票池策略: {strategy_id}")
     try:

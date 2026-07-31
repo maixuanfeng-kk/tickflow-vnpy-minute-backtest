@@ -33,6 +33,13 @@ def pool_key_for_month(month: str) -> str:
     return f"month:{month}"
 
 
+def generated_pool_key(strategy_id: str, month: str) -> str:
+    pool_key_for_month(month)
+    if not re.fullmatch(r"[a-z0-9_]+", strategy_id):
+        raise ValueError("无效的生成股票池策略标识")
+    return f"generated:{strategy_id}:{month}"
+
+
 class WatchlistPoolStore:
     def __init__(self, data_dir: Path) -> None:
         self.data_dir = Path(data_dir)
@@ -50,6 +57,10 @@ class WatchlistPoolStore:
             month = pool_key.split(":", 1)[1]
             pool_key_for_month(month)
             return f"month={month}"
+        if pool_key.startswith("generated:"):
+            _, strategy_id, month = pool_key.split(":", 2)
+            generated_pool_key(strategy_id, month)
+            return f"generated={strategy_id}--{month}"
         raise ValueError("无效的股票池标识")
 
     def _directory(self, pool_key: str) -> Path:
@@ -178,6 +189,37 @@ class WatchlistPoolStore:
         manifest = {
             "pool_key": pool_key,
             "month": month,
+            "created_at": (old or {}).get("created_at", now),
+            "updated_at": now,
+            **metadata,
+            "member_count": len(rows),
+        }
+        self._write_pool(pool_key, manifest, rows)
+        return manifest
+
+    def replace_generated(self, strategy_id: str, month: str, members: list[dict], metadata: dict) -> dict:
+        pool_key = generated_pool_key(strategy_id, month)
+        old = self.get_pool(pool_key)
+        now = self._now()
+        seen: set[str] = set()
+        rows: list[dict] = []
+        for member in members:
+            symbol = normalize_symbol(str(member.get("symbol", "")))
+            if not symbol or symbol in seen:
+                continue
+            seen.add(symbol)
+            rows.append({
+                "symbol": symbol,
+                "added_at": now,
+                "note": str(member.get("note") or ""),
+                "source": "stock_pool",
+            })
+        manifest = {
+            "pool_key": pool_key,
+            "month": month,
+            "label": f"{month} 条件选股结果",
+            "source": "stock_pool",
+            "strategy_id": strategy_id,
             "created_at": (old or {}).get("created_at", now),
             "updated_at": now,
             **metadata,

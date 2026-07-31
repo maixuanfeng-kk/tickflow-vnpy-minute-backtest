@@ -155,7 +155,7 @@ def test_save_writes_research_snapshot(tmp_path) -> None:
     assert [row["symbol"] for row in WatchlistPoolStore(tmp_path).list_members("month:2026-05")] == ["000001.SZ", "600000.SH"]
 
 
-def test_screening_is_limited_to_source_template_and_preserves_it(tmp_path) -> None:
+def test_screening_uses_full_market_and_creates_generated_pool(tmp_path) -> None:
     class ReadyAdapter:
         def readiness(self, month: str) -> DataReadiness:
             return DataReadiness(month, date(2026, 4, 30), True, (), (), 200)
@@ -186,13 +186,17 @@ def test_screening_is_limited_to_source_template_and_preserves_it(tmp_path) -> N
     service.adapter = ReadyAdapter()
     service.store = StockPoolStore(tmp_path)
 
-    preview = service.build("monthly_growth_trend", "2026-05", source_pool_key="month:2026-05")
+    preview = service.build("monthly_growth_trend", "2026-05")
 
-    assert [member["symbol"] for member in preview.members] == ["600000.SH"]
-    saved = service.save("monthly_growth_trend", "2026-05", source_pool_key="month:2026-05")
-    assert saved["source_pool_key"] == "month:2026-05"
+    assert [member["symbol"] for member in preview.members] == ["000001.SZ", "600000.SH"]
+    saved = service.save("monthly_growth_trend", "2026-05")
+    assert saved["generated_pool_key"] == "generated:monthly_growth_trend:2026-05"
     assert members_path.read_bytes() == original_members
     assert manifest_path.read_bytes() == original_manifest
+    generated_pool = WatchlistPoolStore(tmp_path).get_pool(saved["generated_pool_key"])
+    assert generated_pool["source"] == "stock_pool"
+    assert generated_pool["month"] == "2026-05"
+    assert [row["symbol"] for row in WatchlistPoolStore(tmp_path).list_members(saved["generated_pool_key"])] == ["000001.SZ", "600000.SH"]
 
 
 def test_monthly_growth_strategy_exposes_editable_parameter_descriptors() -> None:
@@ -206,10 +210,10 @@ def test_monthly_growth_strategy_exposes_editable_parameter_descriptors() -> Non
     assert spec.parameters[0]["default"] == 0.15
 
 
-def test_request_carries_explicit_source_template_key() -> None:
-    request = StockPoolBuildRequest(month="2026-05", source_pool_key="month:2026-05")
+def test_request_uses_month_without_a_manual_source_template() -> None:
+    request = StockPoolBuildRequest(month="2026-05")
 
-    assert request.source_pool_key == "month:2026-05"
+    assert request.month == "2026-05"
 
 
 def test_service_rejects_unsupported_source_template(tmp_path) -> None:

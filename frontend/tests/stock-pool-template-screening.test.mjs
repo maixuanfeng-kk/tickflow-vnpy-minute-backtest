@@ -4,14 +4,13 @@ import test from 'node:test'
 
 const stockPoolsPage = await readFile(new URL('../src/pages/StockPools.tsx', import.meta.url), 'utf8')
 
-test('stock pool page limits screening to the May and June manual templates', () => {
-  assert.match(stockPoolsPage, /month:2026-05/)
-  assert.match(stockPoolsPage, /month:2026-06/)
-  assert.doesNotMatch(stockPoolsPage, /type="month"/)
+test('stock pool page screens the full market for a chosen month', () => {
+  assert.match(stockPoolsPage, /type="month"/)
+  assert.match(stockPoolsPage, /全市场/)
+  assert.doesNotMatch(stockPoolsPage, /SOURCE_TEMPLATES/)
 })
 
-test('stock pool page saves a screening snapshot without publishing to Watchlist', () => {
-  assert.match(stockPoolsPage, /保存筛选快照/)
-  assert.doesNotMatch(stockPoolsPage, /保存并发布/)
-  assert.doesNotMatch(stockPoolsPage, /invalidateQueries\(\{ queryKey: QK\.watchlistPools \}\)/)
+test('stock pool page refreshes generated pools after save', () => {
+  assert.match(stockPoolsPage, /保存并生成股票池/)
+  assert.match(stockPoolsPage, /invalidateQueries\(\{ queryKey: QK\.watchlistPools \}\)/)
 })
