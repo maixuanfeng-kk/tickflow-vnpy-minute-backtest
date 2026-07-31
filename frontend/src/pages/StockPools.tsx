@@ -7,32 +7,23 @@ import { toast } from '@/components/Toast'
 import { api, type StockPoolResult } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 
-const SOURCE_TEMPLATES = [
-  { poolKey: 'month:2026-05', month: '2026-05', label: '2026 年 5 月自选模板' },
-  { poolKey: 'month:2026-06', month: '2026-06', label: '2026 年 6 月自选模板' },
-] as const
-const DEFAULT_SOURCE_POOL_KEY = SOURCE_TEMPLATES[0].poolKey
-
 function statusText(status?: string) {
   return status === 'ready' ? '数据已就绪' : '数据尚未就绪'
 }
 
 export function StockPools() {
   const queryClient = useQueryClient()
-  const [sourcePoolKey, setSourcePoolKey] = useState<string>(DEFAULT_SOURCE_POOL_KEY)
+  const [month, setMonth] = useState('2026-05')
   const [strategyId, setStrategyId] = useState('monthly_growth_trend')
   const [result, setResult] = useState<StockPoolResult | null>(null)
   const [params, setParams] = useState<Record<string, number>>({})
-  const sourceTemplate = SOURCE_TEMPLATES.find(template => template.poolKey === sourcePoolKey) ?? SOURCE_TEMPLATES[0]
-  const month = sourceTemplate.month
-
   const strategies = useQuery({
     queryKey: QK.stockPoolStrategies,
     queryFn: api.stockPoolStrategies,
   })
   const readiness = useQuery({
-    queryKey: QK.stockPoolReadiness(strategyId, month, sourcePoolKey),
-    queryFn: () => api.stockPoolReadiness(strategyId, month, sourcePoolKey),
+    queryKey: QK.stockPoolReadiness(strategyId, month),
+    queryFn: () => api.stockPoolReadiness(strategyId, month),
   })
   const runs = useQuery({
     queryKey: QK.stockPoolRuns(strategyId),
@@ -42,8 +33,6 @@ export function StockPools() {
     queryKey: QK.watchlistPools,
     queryFn: api.watchlistPools,
   })
-  const sourcePool = watchlistPools.data?.pools.find(pool => pool.pool_key === sourcePoolKey)
-
   const activeStrategy = strategies.data?.strategies.find(item => item.id === strategyId)
   useEffect(() => {
     if (!activeStrategy) return
@@ -52,16 +41,17 @@ export function StockPools() {
   }, [activeStrategy])
 
   const preview = useMutation({
-    mutationFn: () => api.stockPoolPreview(strategyId, month, sourcePoolKey, params),
+    mutationFn: () => api.stockPoolPreview(strategyId, month, params),
     onSuccess: setResult,
     onError: () => toast('股票池预览失败，请检查数据状态。', 'error'),
   })
   const save = useMutation({
-    mutationFn: () => api.stockPoolSave(strategyId, month, sourcePoolKey, params),
+    mutationFn: () => api.stockPoolSave(strategyId, month, params),
     onSuccess: (saved) => {
       setResult(saved)
       queryClient.invalidateQueries({ queryKey: QK.stockPoolRuns(strategyId) })
-      toast('筛选快照已保存，自选模板未修改。', 'success')
+      queryClient.invalidateQueries({ queryKey: QK.watchlistPools })
+      toast('筛选结果已生成独立股票池，手工模板未修改。', 'success')
     },
     onError: () => toast('保存失败：请先确认数据已就绪并完成预览。', 'error'),
   })
@@ -104,19 +94,16 @@ export function StockPools() {
               </select>
             </label>
             <label className="block">
-              <span className="mb-1.5 block text-xs text-secondary">自选模板</span>
-              <select
-                value={sourcePoolKey}
+              <span className="mb-1.5 block text-xs text-secondary">股票池月份</span>
+              <input
+                type="month"
+                value={month}
                 onChange={event => {
-                  setSourcePoolKey(event.target.value)
+                  setMonth(event.target.value)
                   setResult(null)
                 }}
                 className="w-full rounded-btn border border-border bg-base px-3 py-2 text-sm outline-none focus:border-accent"
-              >
-                {SOURCE_TEMPLATES.map(template => (
-                  <option key={template.poolKey} value={template.poolKey}>{template.label}</option>
-                ))}
-              </select>
+              />
             </label>
             <button
               onClick={() => preview.mutate()}
@@ -128,7 +115,7 @@ export function StockPools() {
             </button>
           </div>
           <p className="mt-3 text-xs text-secondary">
-            只读来源：{sourceTemplate.label}，{sourcePool?.member_count ?? '—'} 只股票；筛选结果不会修改该自选模板。
+            候选范围：完整本地市场数据；保存后将在自选中生成 {month} 的独立条件选股池，不会修改任何手工模板。
           </p>
           {activeStrategy && (
             <>
@@ -176,7 +163,7 @@ export function StockPools() {
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <h2 className="text-sm font-medium">预览结果</h2>
-                  <p className="mt-1 text-xs text-secondary">{result.month} 股票池，共 {result.members.length} 只，来源 {result.source_pool_key}（{result.source_member_count} 只），时点 {result.as_of_date}</p>
+                  <p className="mt-1 text-xs text-secondary">{result.month} 股票池，共 {result.members.length} 只，候选范围全市场，时点 {result.as_of_date}</p>
                 </div>
                 <button
                   onClick={() => save.mutate()}
@@ -184,7 +171,7 @@ export function StockPools() {
                   className="inline-flex items-center gap-2 rounded-btn border border-accent/40 bg-accent/10 px-3 py-2 text-sm text-accent disabled:opacity-50"
                 >
                   <Save className="h-4 w-4" />
-                  保存筛选快照
+                  保存并生成股票池
                 </button>
               </div>
               <div className="mt-4 rounded-btn border border-border bg-base p-3">
@@ -244,7 +231,7 @@ export function StockPools() {
             <div className="mt-3 space-y-2">
               {runs.data?.runs.map(run => (
                 <div key={run.run_id} className="flex items-center justify-between rounded-btn bg-elevated/60 px-3 py-2 text-xs">
-                  <span>{run.month} · {run.source_pool_key ?? '来源模板未知'} · {run.member_count} 只 · 时点 {run.as_of_date ?? '—'}</span>
+                  <span>{run.month} · 全市场筛选 · {run.member_count} 只 · 时点 {run.as_of_date ?? '—'}</span>
                   <span className="font-mono text-muted">{run.run_id}</span>
                 </div>
               ))}

@@ -1453,7 +1453,7 @@ export function StrategyBacktest() {
             className="h-8 rounded-btn border border-border bg-surface px-2 text-xs outline-none focus:border-accent"
           >
             <option value="" disabled>选择月份</option>
-            {monthlyPools.map(pool => <option key={pool.pool_key} value={pool.pool_key}>{pool.month}</option>)}
+            {monthlyPools.map(pool => <option key={pool.pool_key} value={pool.pool_key}>{pool.label ?? pool.month}</option>)}
           </select>
           <span className="text-[11px] text-secondary">
             {selectedMonthlyMembers.isFetching ? '读取成员中...' : `${selectedMonthlyMembers.data?.symbols.length ?? selectedMonthlyPool?.member_count ?? 0} 只，启动时冻结成员`}

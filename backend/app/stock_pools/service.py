@@ -40,8 +40,9 @@ class StockPoolService:
         self.store = StockPoolStore(repo.store.data_dir)
         self.watchlist_store = WatchlistPoolStore(repo.store.data_dir)
 
-    def readiness(self, month: str, source_pool_key: str) -> dict[str, object]:
-        self._source_symbols(source_pool_key)
+    def readiness(self, month: str, source_pool_key: str | None = None) -> dict[str, object]:
+        if source_pool_key is not None:
+            self._source_symbols(source_pool_key)
         return self.adapter.readiness(month).to_dict()
 
     def build(
@@ -50,22 +51,22 @@ class StockPoolService:
         month: str,
         params: dict[str, object] | None = None,
         *,
-        source_pool_key: str,
+        source_pool_key: str | None = None,
     ) -> StockPoolBuildResult:
         strategy_spec = get_strategy(strategy_id)
         if strategy_spec is None:
             raise ValueError(f"不支持的股票池策略: {strategy_id}")
-        source_symbols = self._source_symbols(source_pool_key)
+        source_member_count = len(self._source_symbols(source_pool_key)) if source_pool_key is not None else 0
         readiness = self.adapter.readiness(month)
         if not readiness.ready:
             return StockPoolBuildResult(
-                "not_ready", strategy_id, month, source_pool_key, len(source_symbols), readiness.to_dict(),
+                "not_ready", strategy_id, month, source_pool_key or "full_market", source_member_count, readiness.to_dict(),
                 list(readiness.warnings), [], "", {}
             )
-        members = strategy_spec.strategy_class(params or {}).build(self.adapter.load(readiness, source_symbols))
+        members = strategy_spec.strategy_class(params or {}).build(self.adapter.load(readiness, None))
         records = self._records(members)
         return StockPoolBuildResult(
-            "ready", strategy_id, month, source_pool_key, len(source_symbols), readiness.to_dict(),
+            "ready", strategy_id, month, source_pool_key or "full_market", source_member_count, readiness.to_dict(),
             list(readiness.warnings), records,
             ",".join(row["symbol"] for row in records),
             {"selected_count": len(records), "condition_1_count": sum(bool(row["condition_1"]) for row in records),
@@ -78,7 +79,7 @@ class StockPoolService:
         month: str,
         params: dict[str, object] | None = None,
         *,
-        source_pool_key: str,
+        source_pool_key: str | None = None,
     ) -> dict[str, object]:
         result = self.build(strategy_id, month, params, source_pool_key=source_pool_key)
         if result.status != "ready":
@@ -96,10 +97,21 @@ class StockPoolService:
             "source_member_count": result.source_member_count,
         }
         saved = self.store.save(strategy_id=strategy_id, month=month, members=members, manifest=manifest)
+        generated_pool = self.watchlist_store.replace_generated(
+            strategy_id,
+            month,
+            result.members,
+            {
+                "run_id": saved["run_id"],
+                "as_of_date": result.readiness.get("as_of_date"),
+                "condition_summary": result.summary,
+            },
+        )
         return {
             **result.to_dict(),
             "run_id": saved["run_id"],
             "saved_at": saved["saved_at"],
+            "generated_pool_key": generated_pool["pool_key"],
         }
 
     def list_runs(self, strategy_id: str | None = None) -> list[dict[str, object]]:

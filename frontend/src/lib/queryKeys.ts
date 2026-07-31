@@ -47,7 +47,7 @@ export const QK = {
   backtestStatus:       ['backtest-status'] as const,
   strategyDetail:       (id: string) => ['strategy-detail', id] as const,
   stockPoolStrategies:  ['stock-pool-strategies'] as const,
-  stockPoolReadiness:   (strategyId: string, month: string, sourcePoolKey: string) => ['stock-pool-readiness', strategyId, month, sourcePoolKey] as const,
+  stockPoolReadiness:   (strategyId: string, month: string) => ['stock-pool-readiness', strategyId, month] as const,
   stockPoolRuns:        (strategyId?: string) => ['stock-pool-runs', strategyId ?? 'all'] as const,
 
   // Data / Pipeline
