@@ -1753,6 +1753,13 @@ export const api = {
     request<{ active_id: string | null; jobs: PipelineJobSummary[] }>(
       `/api/pipeline/jobs?limit=${limit}`,
     ),
+  financialImportStart: (sourceDir: string) =>
+    request<{ job_id: string; reused: boolean }>('/api/data/financial-import', {
+      method: 'POST',
+      body: JSON.stringify({ source_dir: sourceDir }),
+    }),
+  financialImportStatus: () =>
+    request<FinancialImportStatus>('/api/data/financial-import/status'),
 
   dataStatus: () => request<DataStatus>('/api/data/status'),
   dataClear: () => request<{ deleted_files: number }>('/api/data/clear', { method: 'POST' }),
@@ -2482,6 +2489,8 @@ export interface PipelineJob {
   finished_at: string | null
   duration_s: number | null
   result: {
+    type?: string
+    summary?: FinancialImportManifest
     universe_size: number
     daily_days: number
     adj_factor_symbols: number
@@ -2495,6 +2504,33 @@ export interface PipelineJob {
 }
 
 export type PipelineJobSummary = Omit<PipelineJob, 'log'>
+
+export interface FinancialImportManifest {
+  status: 'preview' | 'running' | 'succeeded' | 'failed'
+  dry_run: boolean
+  source_label: string
+  files_discovered: number
+  files_imported: number
+  rows_read: number
+  raw_batches: number
+  income_rows: number
+  skipped_files: { file: string; reason: string }[]
+  failed_files: { file: string; reason: string }[]
+  imported_at: string | null
+}
+
+export interface FinancialImportDataset {
+  rows: number
+  symbols: number
+  latest_report_date: string
+  latest_publish_date: string
+}
+
+export interface FinancialImportStatus {
+  manifest: FinancialImportManifest | null
+  dataset: FinancialImportDataset | null
+  job: PipelineJob | null
+}
 
 // ===== Data status =====
 interface TableStats {

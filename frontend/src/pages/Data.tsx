@@ -51,6 +51,7 @@ import { Skeleton } from '@/components/data/Skeleton'
 import { ExtDataStatCard } from '@/components/ext-data/ExtDataStatCard'
 import { CreateExtDialog } from '@/components/ext-data/CreateExtDialog'
 import { EditExtDialog } from '@/components/ext-data/EditExtDialog'
+import { FinancialImportPanel } from '@/components/data/FinancialImportPanel'
 
 export function Data() {
   const qc = useQueryClient()
@@ -273,7 +274,10 @@ export function Data() {
 
   useEffect(() => {
     if (!activeJobId && history.data?.active_id) {
-      setActiveJobId(history.data.active_id)
+      const activeJob = history.data.jobs.find(job => job.id === history.data?.active_id)
+      if (activeJob?.stage !== 'financial_import') {
+        setActiveJobId(history.data.active_id)
+      }
     }
   }, [history.data?.active_id])
 
@@ -869,6 +873,8 @@ export function Data() {
             ))}
           </div>
         </div>
+
+        <FinancialImportPanel />
 
         {/* 同步历史 */}
         <div>
