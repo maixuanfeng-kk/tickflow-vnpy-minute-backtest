@@ -46,3 +46,9 @@ Manual validation at `http://127.0.0.1:3020/data` confirmed that both card gear 
 ## Conflict record
 
 No merge conflicts occurred. The financial modal combines the new import control with the pre-existing turnover-rebuild control so both behaviors remain available.
+
+## Integration
+
+- Feature commit: `1a6dbd0 fix(data): move local imports to card settings`
+- Main merge commit: `fe7a10c merge: card settings import entrypoints`
+- The verification commands in this record were rerun from the merged `main` checkout before publication.
