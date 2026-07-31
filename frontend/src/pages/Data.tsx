@@ -52,6 +52,7 @@ import { ExtDataStatCard } from '@/components/ext-data/ExtDataStatCard'
 import { CreateExtDialog } from '@/components/ext-data/CreateExtDialog'
 import { EditExtDialog } from '@/components/ext-data/EditExtDialog'
 import { FinancialImportPanel } from '@/components/data/FinancialImportPanel'
+import { MinuteImportPanel } from '@/components/data/MinuteImportPanel'
 
 export function Data() {
   const qc = useQueryClient()
@@ -896,7 +897,13 @@ export function Data() {
           </div>
         </div>
 
-        <FinancialImportPanel />
+        <div>
+          <SectionTitle icon={HardDrive}>本地数据导入</SectionTitle>
+          <div className="mt-3 grid grid-cols-1 gap-4 xl:grid-cols-2">
+            <MinuteImportPanel />
+            <FinancialImportPanel />
+          </div>
+        </div>
 
         {/* 同步历史 */}
         <div>
