@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from datetime import date
-import re
 
 import polars as pl
 
@@ -18,18 +17,11 @@ class MonthlyGrowthTrendStrategy:
         self.ma_days = int(params.get("ma_days", 5))
         self.high_window = int(params.get("high_window", 200))
         self.high_days = int(params.get("high_days", 20))
-        self.listing_days_min = int(params.get("listing_days_min", 250))
         self.market_cap_min = float(params.get("market_cap_min", 10_000_000_000))
 
     def build(self, data: StockPoolInput) -> pl.DataFrame:
         financials = self._latest_financials(data.financials, data.as_of_date)
         financial_by_symbol = {row["symbol"]: row for row in financials.to_dicts()}
-        listing_by_symbol = {
-            row["symbol"]: row["listing_date"]
-            for row in data.instruments.to_dicts()
-            if row.get("listing_date") is not None
-        }
-        market_dates = sorted(set(data.daily["date"].to_list()))
         rows: list[dict[str, object]] = []
         for symbol_frame in data.daily.partition_by("symbol", maintain_order=False):
             if symbol_frame.height < self.high_window:
@@ -41,13 +33,6 @@ class MonthlyGrowthTrendStrategy:
             if ordered["date"][-1] != data.as_of_date:
                 continue
             stock_name = ordered["name"][-1]
-            is_st = self._is_st_name(stock_name)
-            if is_st:
-                continue
-            listing_date = listing_by_symbol.get(symbol)
-            listing_trading_days = sum(day >= listing_date for day in market_dates) if listing_date else 0
-            if listing_trading_days < self.listing_days_min:
-                continue
             closes = [float(value) for value in ordered["close"].to_list()]
             highs = [float(value) for value in ordered["high"].to_list()]
             market_cap = ordered["total_mv"][-1]
@@ -82,11 +67,8 @@ class MonthlyGrowthTrendStrategy:
                 "condition_1": condition_1,
                 "condition_2": condition_2,
                 "stock_name": stock_name,
-                "is_st": is_st,
                 "market_cap": float(market_cap),
                 "market_cap_passed": market_cap_passed,
-                "listing_date": listing_date,
-                "listing_trading_days": listing_trading_days,
                 "revenue_yoy": float(revenue_yoy) if revenue_yoy is not None else None,
                 "net_profit": float(net_profit) if net_profit is not None else None,
                 "ma60": round(recent_ma[-1], 6) if recent_ma else None,
@@ -99,9 +81,8 @@ class MonthlyGrowthTrendStrategy:
         schema = {
             "symbol": pl.Utf8, "pool_month": pl.Utf8, "as_of_date": pl.Date,
             "condition_1": pl.Boolean, "condition_2": pl.Boolean,
-            "stock_name": pl.Utf8, "is_st": pl.Boolean,
+            "stock_name": pl.Utf8,
             "market_cap": pl.Float64, "market_cap_passed": pl.Boolean,
-            "listing_date": pl.Date, "listing_trading_days": pl.Int64,
             "revenue_yoy": pl.Float64, "net_profit": pl.Float64,
             "ma60": pl.Float64, "close": pl.Float64, "high_200": pl.Float64,
             "high_200_trigger_date": pl.Utf8, "financial_report_date": pl.Date,
@@ -117,10 +98,3 @@ class MonthlyGrowthTrendStrategy:
         if eligible.is_empty():
             return eligible
         return eligible.sort(["symbol", "report_date", "publish_date"]).group_by("symbol", maintain_order=True).tail(1)
-
-    @staticmethod
-    def _is_st_name(name: object) -> bool:
-        if name is None:
-            return True
-        normalized = str(name).strip().upper().replace(" ", "")
-        return bool(re.match(r"^(?:\*ST|ST|S\*ST|SST)", normalized))

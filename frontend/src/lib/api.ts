@@ -904,6 +904,8 @@ export interface StockPoolResult {
   status: 'ready' | 'not_ready'
   strategy_id: string
   month: string
+  source_pool_key: string
+  source_member_count: number
   as_of_date?: string | null
   readiness: StockPoolReadiness
   code_string?: string
@@ -911,13 +913,14 @@ export interface StockPoolResult {
   warnings: string[]
   run_id?: string
   saved_at?: string
-  published_pool?: WatchlistPool
 }
 
 export interface StockPoolRun {
   run_id: string
   strategy_id: string
   month: string
+  source_pool_key?: string
+  source_member_count?: number
   as_of_date?: string | null
   member_count: number
   saved_at?: string
@@ -1735,12 +1738,12 @@ export const api = {
   vnpyStrategies: () => request<{ strategies: VnpyStrategy[] }>('/api/backtest/vnpy/strategies'),
 
   stockPoolStrategies: () => request<{ strategies: StockPoolStrategy[] }>('/api/stock-pools/strategies'),
-  stockPoolReadiness: (strategyId: string, month: string) =>
-    request<StockPoolReadiness>(`/api/stock-pools/readiness?strategy_id=${encodeURIComponent(strategyId)}&month=${encodeURIComponent(month)}`),
-  stockPoolPreview: (strategyId: string, month: string, params: Record<string, number>) =>
-    request<StockPoolResult>('/api/stock-pools/preview', { method: 'POST', body: JSON.stringify({ strategy_id: strategyId, month, params }) }),
-  stockPoolSave: (strategyId: string, month: string, params: Record<string, number>) =>
-    request<StockPoolResult>('/api/stock-pools/save', { method: 'POST', body: JSON.stringify({ strategy_id: strategyId, month, params }) }),
+  stockPoolReadiness: (strategyId: string, month: string, sourcePoolKey: string) =>
+    request<StockPoolReadiness>(`/api/stock-pools/readiness?strategy_id=${encodeURIComponent(strategyId)}&month=${encodeURIComponent(month)}&source_pool_key=${encodeURIComponent(sourcePoolKey)}`),
+  stockPoolPreview: (strategyId: string, month: string, sourcePoolKey: string, params: Record<string, number>) =>
+    request<StockPoolResult>('/api/stock-pools/preview', { method: 'POST', body: JSON.stringify({ strategy_id: strategyId, month, source_pool_key: sourcePoolKey, params }) }),
+  stockPoolSave: (strategyId: string, month: string, sourcePoolKey: string, params: Record<string, number>) =>
+    request<StockPoolResult>('/api/stock-pools/save', { method: 'POST', body: JSON.stringify({ strategy_id: strategyId, month, source_pool_key: sourcePoolKey, params }) }),
   stockPoolRuns: (strategyId?: string) =>
     request<{ runs: StockPoolRun[] }>(`/api/stock-pools/runs${strategyId ? `?strategy_id=${encodeURIComponent(strategyId)}` : ''}`),
   stockPoolRun: (runId: string) => request<StockPoolResult>(`/api/stock-pools/runs/${encodeURIComponent(runId)}`),
