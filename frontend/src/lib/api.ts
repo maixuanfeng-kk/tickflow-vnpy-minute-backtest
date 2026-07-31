@@ -1761,6 +1761,14 @@ export const api = {
   financialImportStatus: () =>
     request<FinancialImportStatus>('/api/data/financial-import/status'),
 
+  minuteImportStart: (sourceDir: string) =>
+    request<{ job_id: string; reused: boolean }>('/api/data/minute-import', {
+      method: 'POST',
+      body: JSON.stringify({ source_dir: sourceDir }),
+    }),
+  minuteImportStatus: () =>
+    request<MinuteImportStatus>('/api/data/minute-import/status'),
+
   dataStatus: () => request<DataStatus>('/api/data/status'),
   dataClear: () => request<{ deleted_files: number }>('/api/data/clear', { method: 'POST' }),
   refreshCache: () => request<{ ok: boolean }>('/api/data/refresh-cache', { method: 'POST' }),
@@ -2529,6 +2537,23 @@ export interface FinancialImportDataset {
 export interface FinancialImportStatus {
   manifest: FinancialImportManifest | null
   dataset: FinancialImportDataset | null
+  job: PipelineJob | null
+}
+
+export interface MinuteImportManifest {
+  status: 'preview' | 'running' | 'succeeded' | 'failed'
+  source_label: string
+  files_discovered: number
+  files_imported: number
+  rows_valid: number
+  rows_invalid: number
+  earliest_date: string | null
+  latest_date: string | null
+  failed_files: { file: string; reason: string }[]
+}
+
+export interface MinuteImportStatus {
+  manifest: MinuteImportManifest | null
   job: PipelineJob | null
 }
 
