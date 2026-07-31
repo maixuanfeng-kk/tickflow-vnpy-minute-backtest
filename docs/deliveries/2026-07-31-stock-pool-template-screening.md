@@ -6,6 +6,7 @@
   `2026-06` Watchlist templates, use historical market capitalization and
   disclosed financial data, and save an independent screening snapshot.
 - Branch: `feature/20260731-stock-pool-template-screening`.
+- Merge commit: `43306cf` (`merge(stock-pools): add manual template screening`).
 - Changed files and purpose:
   - `backend/app/stock_pools/data.py`: restricts loaded daily and financial
     records to the source-template symbols and identifies the professional
