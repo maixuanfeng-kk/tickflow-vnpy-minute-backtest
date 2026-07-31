@@ -7,7 +7,11 @@ import { toast } from '@/components/Toast'
 import { api, type StockPoolResult } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 
-const DEFAULT_MONTH = '2026-05'
+const SOURCE_TEMPLATES = [
+  { poolKey: 'month:2026-05', month: '2026-05', label: '2026 年 5 月自选模板' },
+  { poolKey: 'month:2026-06', month: '2026-06', label: '2026 年 6 月自选模板' },
+] as const
+const DEFAULT_SOURCE_POOL_KEY = SOURCE_TEMPLATES[0].poolKey
 
 function statusText(status?: string) {
   return status === 'ready' ? '数据已就绪' : '数据尚未就绪'
@@ -15,19 +19,20 @@ function statusText(status?: string) {
 
 export function StockPools() {
   const queryClient = useQueryClient()
-  const [month, setMonth] = useState(DEFAULT_MONTH)
+  const [sourcePoolKey, setSourcePoolKey] = useState<string>(DEFAULT_SOURCE_POOL_KEY)
   const [strategyId, setStrategyId] = useState('monthly_growth_trend')
   const [result, setResult] = useState<StockPoolResult | null>(null)
   const [params, setParams] = useState<Record<string, number>>({})
+  const sourceTemplate = SOURCE_TEMPLATES.find(template => template.poolKey === sourcePoolKey) ?? SOURCE_TEMPLATES[0]
+  const month = sourceTemplate.month
 
   const strategies = useQuery({
     queryKey: QK.stockPoolStrategies,
     queryFn: api.stockPoolStrategies,
   })
   const readiness = useQuery({
-    queryKey: QK.stockPoolReadiness(strategyId, month),
-    queryFn: () => api.stockPoolReadiness(strategyId, month),
-    enabled: /^\d{4}-\d{2}$/.test(month),
+    queryKey: QK.stockPoolReadiness(strategyId, month, sourcePoolKey),
+    queryFn: () => api.stockPoolReadiness(strategyId, month, sourcePoolKey),
   })
   const runs = useQuery({
     queryKey: QK.stockPoolRuns(strategyId),
@@ -37,6 +42,7 @@ export function StockPools() {
     queryKey: QK.watchlistPools,
     queryFn: api.watchlistPools,
   })
+  const sourcePool = watchlistPools.data?.pools.find(pool => pool.pool_key === sourcePoolKey)
 
   const activeStrategy = strategies.data?.strategies.find(item => item.id === strategyId)
   useEffect(() => {
@@ -46,31 +52,22 @@ export function StockPools() {
   }, [activeStrategy])
 
   const preview = useMutation({
-    mutationFn: () => api.stockPoolPreview(strategyId, month, params),
+    mutationFn: () => api.stockPoolPreview(strategyId, month, sourcePoolKey, params),
     onSuccess: setResult,
     onError: () => toast('股票池预览失败，请检查数据状态。', 'error'),
   })
   const save = useMutation({
-    mutationFn: () => api.stockPoolSave(strategyId, month, params),
+    mutationFn: () => api.stockPoolSave(strategyId, month, sourcePoolKey, params),
     onSuccess: (saved) => {
       setResult(saved)
       queryClient.invalidateQueries({ queryKey: QK.stockPoolRuns(strategyId) })
-      queryClient.invalidateQueries({ queryKey: ['watchlist'] })
-      queryClient.invalidateQueries({ queryKey: QK.watchlistPools })
-      queryClient.invalidateQueries({ queryKey: ['watchlist-enriched'] })
-      toast('股票池已保存并发布到对应月份自选池。', 'success')
+      toast('筛选快照已保存，自选模板未修改。', 'success')
     },
     onError: () => toast('保存失败：请先确认数据已就绪并完成预览。', 'error'),
   })
 
   const activeReadiness = result?.readiness ?? readiness.data
   const ready = activeReadiness?.status === 'ready'
-  const savePublishedPool = () => {
-    const existing = watchlistPools.data?.pools.find(pool => pool.month === month)
-    if (existing && !window.confirm(`${month} 已有 ${existing.member_count} 只股票。发布将更新该月份当前股票池，历史研究记录会保留。是否继续？`)) return
-    save.mutate()
-  }
-
   const copyCodeString = async () => {
     if (!result?.code_string) return
     try {
@@ -107,16 +104,19 @@ export function StockPools() {
               </select>
             </label>
             <label className="block">
-              <span className="mb-1.5 block text-xs text-secondary">股票池月份</span>
-              <input
-                type="month"
-                value={month}
+              <span className="mb-1.5 block text-xs text-secondary">自选模板</span>
+              <select
+                value={sourcePoolKey}
                 onChange={event => {
-                  setMonth(event.target.value)
+                  setSourcePoolKey(event.target.value)
                   setResult(null)
                 }}
                 className="w-full rounded-btn border border-border bg-base px-3 py-2 text-sm outline-none focus:border-accent"
-              />
+              >
+                {SOURCE_TEMPLATES.map(template => (
+                  <option key={template.poolKey} value={template.poolKey}>{template.label}</option>
+                ))}
+              </select>
             </label>
             <button
               onClick={() => preview.mutate()}
@@ -127,6 +127,9 @@ export function StockPools() {
               预览构建
             </button>
           </div>
+          <p className="mt-3 text-xs text-secondary">
+            只读来源：{sourceTemplate.label}，{sourcePool?.member_count ?? '—'} 只股票；筛选结果不会修改该自选模板。
+          </p>
           {activeStrategy && (
             <>
               <p className="mt-3 text-xs leading-relaxed text-secondary">{activeStrategy.description}</p>
@@ -161,7 +164,7 @@ export function StockPools() {
           {activeReadiness?.warnings.map(warning => <p key={warning} className="mt-2 text-xs text-warning">{warning}</p>)}
           {!ready && (
             <div className="mt-2 text-xs leading-relaxed text-secondary">
-              <p>正式构建需要目标月前一交易日、至少 250 个交易日日 K、股票上市日期，以及截至该日已公告的财报。</p>
+              <p>正式构建需要目标月前一交易日的专业日 K，以及截至该日已公告的财报。</p>
               {(activeReadiness?.missing ?? []).map(item => <p key={item} className="mt-1 text-warning">缺失：{item}</p>)}
             </div>
           )}
@@ -173,15 +176,15 @@ export function StockPools() {
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <h2 className="text-sm font-medium">预览结果</h2>
-                  <p className="mt-1 text-xs text-secondary">{result.month} 股票池，共 {result.members.length} 只，时点 {result.as_of_date}</p>
+                  <p className="mt-1 text-xs text-secondary">{result.month} 股票池，共 {result.members.length} 只，来源 {result.source_pool_key}（{result.source_member_count} 只），时点 {result.as_of_date}</p>
                 </div>
                 <button
-                  onClick={savePublishedPool}
+                  onClick={() => save.mutate()}
                   disabled={save.isPending}
                   className="inline-flex items-center gap-2 rounded-btn border border-accent/40 bg-accent/10 px-3 py-2 text-sm text-accent disabled:opacity-50"
                 >
                   <Save className="h-4 w-4" />
-                  保存并发布
+                  保存筛选快照
                 </button>
               </div>
               <div className="mt-4 rounded-btn border border-border bg-base p-3">
@@ -203,7 +206,6 @@ export function StockPools() {
                     <tr>
                       <th className="px-4 py-2.5 font-medium">代码</th>
                       <th className="px-4 py-2.5 font-medium">名称</th>
-                      <th className="px-4 py-2.5 font-medium">上市交易日</th>
                       <th className="px-4 py-2.5 font-medium">总市值</th>
                       <th className="px-4 py-2.5 font-medium">条件 1</th>
                       <th className="px-4 py-2.5 font-medium">条件 2</th>
@@ -217,7 +219,6 @@ export function StockPools() {
                       <tr key={member.symbol} className="border-t border-border/70">
                         <td className="px-4 py-2.5 font-mono">{member.symbol}</td>
                         <td className="px-4 py-2.5">{member.stock_name ?? '—'}</td>
-                        <td className="px-4 py-2.5">{member.listing_trading_days ?? '—'}</td>
                         <td className="px-4 py-2.5">{member.market_cap == null ? '—' : `${(member.market_cap / 100_000_000).toFixed(1)} 亿`}</td>
                         <td className="px-4 py-2.5">{member.condition_1 ? '命中' : '—'}</td>
                         <td className="px-4 py-2.5">{member.condition_2 ? '命中' : '—'}</td>
@@ -243,7 +244,7 @@ export function StockPools() {
             <div className="mt-3 space-y-2">
               {runs.data?.runs.map(run => (
                 <div key={run.run_id} className="flex items-center justify-between rounded-btn bg-elevated/60 px-3 py-2 text-xs">
-                  <span>{run.month} · {run.member_count} 只 · 时点 {run.as_of_date ?? '—'}</span>
+                  <span>{run.month} · {run.source_pool_key ?? '来源模板未知'} · {run.member_count} 只 · 时点 {run.as_of_date ?? '—'}</span>
                   <span className="font-mono text-muted">{run.run_id}</span>
                 </div>
               ))}

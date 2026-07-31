@@ -4,7 +4,9 @@ from datetime import date, timedelta
 from types import SimpleNamespace
 
 import polars as pl
+import pytest
 
+from app.api.stock_pools import StockPoolBuildRequest
 from app.stock_pools.base import StockPoolInput
 from app.stock_pools.data import DataReadiness, StockPoolDataAdapter
 from app.stock_pools.service import StockPoolService
@@ -88,7 +90,7 @@ def test_equal_to_prior_200_day_high_is_not_a_breakout() -> None:
     assert "000001.SZ" not in members["symbol"].to_list()
 
 
-def test_stock_listed_for_fewer_than_250_trading_days_is_excluded() -> None:
+def test_stock_listed_for_fewer_than_250_trading_days_is_not_excluded() -> None:
     source = _strategy_input()
     dates = source.daily.filter(pl.col("symbol") == "600000.SH").sort("date")["date"].to_list()
     instruments = source.instruments.with_columns(
@@ -97,10 +99,10 @@ def test_stock_listed_for_fewer_than_250_trading_days_is_excluded() -> None:
     members = MonthlyGrowthTrendStrategy({}).build(
         StockPoolInput(source.month, source.as_of_date, source.daily, source.financials, instruments)
     )
-    assert "600000.SH" not in members["symbol"].to_list()
+    assert "600000.SH" in members["symbol"].to_list()
 
 
-def test_st_name_at_as_of_date_is_excluded() -> None:
+def test_st_name_at_as_of_date_is_not_excluded() -> None:
     source = _strategy_input()
     daily = source.daily.with_columns(
         pl.when(pl.col("symbol") == "000001.SZ").then(pl.lit("*ST测试")).otherwise(pl.col("name")).alias("name")
@@ -108,7 +110,7 @@ def test_st_name_at_as_of_date_is_excluded() -> None:
     members = MonthlyGrowthTrendStrategy({}).build(
         StockPoolInput(source.month, source.as_of_date, daily, source.financials, source.instruments)
     )
-    assert "000001.SZ" not in members["symbol"].to_list()
+    assert "000001.SZ" in members["symbol"].to_list()
 
 
 def test_not_ready_does_not_create_formal_result(tmp_path) -> None:
@@ -117,36 +119,80 @@ def test_not_ready_does_not_create_formal_result(tmp_path) -> None:
 
     assert readiness.ready is False
     assert any("日K" in item for item in readiness.missing)
+    assert "kline_daily_xbx" in readiness.missing[0]
+    assert r"F:\quant\data\value\stock-trading-data-pro" in readiness.missing[0]
     assert not (tmp_path / "pools").exists()
 
 
-def test_manual_save_writes_members_and_manifest(tmp_path) -> None:
+def test_save_writes_research_snapshot(tmp_path) -> None:
     class ReadyAdapter:
         def readiness(self, month: str) -> DataReadiness:
             return DataReadiness(month, date(2026, 4, 30), True, (), ("市值条件未启用：缺少历史股本",), 200)
 
-        def load(self, readiness: DataReadiness) -> StockPoolInput:
+        def load(self, readiness: DataReadiness, symbols: set[str]) -> StockPoolInput:
             return _strategy_input()
 
+    watchlist_store = WatchlistPoolStore(tmp_path)
+    watchlist_store.create("2026-05")
+    watchlist_store.add("month:2026-05", "600000.SH")
+    watchlist_store.add("month:2026-05", "000001.SZ")
     service = StockPoolService(SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)))
     service.adapter = ReadyAdapter()
     service.store = StockPoolStore(tmp_path)
 
-    preview = service.build("monthly_growth_trend", "2026-05")
+    preview = service.build("monthly_growth_trend", "2026-05", source_pool_key="month:2026-05")
     assert preview.status == "ready"
     assert preview.code_string == "000001.SZ,600000.SH"
 
-    saved = service.save("monthly_growth_trend", "2026-05")
+    saved = service.save("monthly_growth_trend", "2026-05", source_pool_key="month:2026-05")
     run_dir = tmp_path / "pools" / "research" / "monthly_growth_trend" / "pool_month=2026-05" / f"run_id={saved['run_id']}"
     assert (run_dir / "members.parquet").exists()
     assert (run_dir / "manifest.json").exists()
     manifest = service.store.get_run(saved["run_id"])[0]
     assert manifest["data_coverage"]["daily_trading_days_before_as_of"] == 200
+    assert manifest["source_pool_key"] == "month:2026-05"
     assert service.list_runs("monthly_growth_trend")[0]["member_count"] == 2
-    published = WatchlistPoolStore(tmp_path).get_pool("month:2026-05")
-    assert published["source"] == "stock_pool_strategy"
-    assert published["source_run_id"] == saved["run_id"]
     assert [row["symbol"] for row in WatchlistPoolStore(tmp_path).list_members("month:2026-05")] == ["000001.SZ", "600000.SH"]
+
+
+def test_screening_is_limited_to_source_template_and_preserves_it(tmp_path) -> None:
+    class ReadyAdapter:
+        def readiness(self, month: str) -> DataReadiness:
+            return DataReadiness(month, date(2026, 4, 30), True, (), (), 200)
+
+        def load(self, readiness: DataReadiness, symbols: set[str] | None = None) -> StockPoolInput:
+            source = _strategy_input()
+            if symbols is None:
+                return source
+            return StockPoolInput(
+                source.month,
+                source.as_of_date,
+                source.daily.filter(pl.col("symbol").is_in(symbols)),
+                source.financials.filter(pl.col("symbol").is_in(symbols)),
+                source.instruments.filter(pl.col("symbol").is_in(symbols)),
+            )
+
+    watchlist_store = WatchlistPoolStore(tmp_path)
+    watchlist_store.create("2026-05")
+    watchlist_store.add("month:2026-05", "600000.SH")
+    watchlist_store.create("2026-06")
+    watchlist_store.add("month:2026-06", "000001.SZ")
+    members_path = tmp_path / "user_data" / "watchlist_pools" / "month=2026-05" / "members.parquet"
+    manifest_path = tmp_path / "user_data" / "watchlist_pools" / "month=2026-05" / "manifest.json"
+    original_members = members_path.read_bytes()
+    original_manifest = manifest_path.read_bytes()
+
+    service = StockPoolService(SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)))
+    service.adapter = ReadyAdapter()
+    service.store = StockPoolStore(tmp_path)
+
+    preview = service.build("monthly_growth_trend", "2026-05", source_pool_key="month:2026-05")
+
+    assert [member["symbol"] for member in preview.members] == ["600000.SH"]
+    saved = service.save("monthly_growth_trend", "2026-05", source_pool_key="month:2026-05")
+    assert saved["source_pool_key"] == "month:2026-05"
+    assert members_path.read_bytes() == original_members
+    assert manifest_path.read_bytes() == original_manifest
 
 
 def test_monthly_growth_strategy_exposes_editable_parameter_descriptors() -> None:
@@ -155,6 +201,19 @@ def test_monthly_growth_strategy_exposes_editable_parameter_descriptors() -> Non
     assert spec is not None
     assert [item["key"] for item in spec.parameters] == [
         "revenue_yoy_min", "ma_window", "ma_days", "high_window",
-        "high_days", "listing_days_min", "market_cap_min",
+        "high_days", "market_cap_min",
     ]
     assert spec.parameters[0]["default"] == 0.15
+
+
+def test_request_carries_explicit_source_template_key() -> None:
+    request = StockPoolBuildRequest(month="2026-05", source_pool_key="month:2026-05")
+
+    assert request.source_pool_key == "month:2026-05"
+
+
+def test_service_rejects_unsupported_source_template(tmp_path) -> None:
+    service = StockPoolService(SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)))
+
+    with pytest.raises(ValueError, match="2026-05 或 2026-06"):
+        service.build("monthly_growth_trend", "2026-07", source_pool_key="month:2026-07")
