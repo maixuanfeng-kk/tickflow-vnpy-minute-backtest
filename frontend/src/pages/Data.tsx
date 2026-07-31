@@ -523,7 +523,7 @@ export function Data() {
             localData={Boolean(s?.minute?.trading_days)}
             auto={minuteAuto}
             onShowFields={() => setSchemaTable('minute')}
-            onSettings={hasData ? () => setOpenSettings(v => v === 'minute' ? null : 'minute') : undefined}
+            onSettings={() => setOpenSettings(v => v === 'minute' ? null : 'minute')}
             settingsOpen={openSettings === 'minute'}
           />
         )
@@ -552,7 +552,7 @@ export function Data() {
             tierLabel={caps.data?.label}
             localData
             subLabel={dataset ? `财报 · ${dataset.symbols.toLocaleString()} 只股票` : '等待导入财务数据'}
-            onSettings={hasData ? () => setOpenSettings(v => v === 'financials' ? null : 'financials') : undefined}
+            onSettings={() => setOpenSettings(v => v === 'financials' ? null : 'financials')}
             settingsOpen={openSettings === 'financials'}
           />
         )
@@ -897,14 +897,6 @@ export function Data() {
           </div>
         </div>
 
-        <div>
-          <SectionTitle icon={HardDrive}>本地数据导入</SectionTitle>
-          <div className="mt-3 grid grid-cols-1 gap-4 xl:grid-cols-2">
-            <MinuteImportPanel />
-            <FinancialImportPanel />
-          </div>
-        </div>
-
         {/* 同步历史 */}
         <div>
           <SectionTitle icon={Clock}>同步历史</SectionTitle>
@@ -1008,13 +1000,16 @@ export function Data() {
 
       <AnimatePresence>
         {openSettings === 'financials' && (
-          <SettingsModal title="财务数据 · 换手率重算" onClose={() => setOpenSettings(null)}>
-            <EnrichedRebuildPanel
-              isRunning={!!activeJobId}
-              purpose="turnover"
-              historicalShareRows={s?.financials?.tables?.shares?.rows ?? 0}
-              onStart={(jobId) => { setActiveJobId(jobId); setOpenSettings(null) }}
-            />
+          <SettingsModal title="财务数据 · 本地导入与换手率重算" onClose={() => setOpenSettings(null)}>
+            <div className="space-y-4">
+              <FinancialImportPanel />
+              <EnrichedRebuildPanel
+                isRunning={!!activeJobId}
+                purpose="turnover"
+                historicalShareRows={s?.financials?.tables?.shares?.rows ?? 0}
+                onStart={(jobId) => { setActiveJobId(jobId); setOpenSettings(null) }}
+              />
+            </div>
           </SettingsModal>
         )}
       </AnimatePresence>
@@ -1140,8 +1135,11 @@ export function Data() {
 
       <AnimatePresence>
         {openSettings === 'minute' && (
-          <SettingsModal title="分钟 K · 同步设置" onClose={() => setOpenSettings(null)}>
-            <MinuteSyncConfig caps={caps.data} onJobStart={(jobId) => { setActiveJobId(jobId); setOpenSettings(null) }} />
+          <SettingsModal title="分钟 K · 本地导入与同步" onClose={() => setOpenSettings(null)}>
+            <div className="space-y-4">
+              <MinuteImportPanel />
+              <MinuteSyncConfig caps={caps.data} onJobStart={(jobId) => { setActiveJobId(jobId); setOpenSettings(null) }} />
+            </div>
           </SettingsModal>
         )}
       </AnimatePresence>
