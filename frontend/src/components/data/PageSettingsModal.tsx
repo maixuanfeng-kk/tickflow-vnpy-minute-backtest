@@ -18,6 +18,7 @@ import {
 import { CSS } from '@dnd-kit/utilities'
 import { Check, GripVertical } from 'lucide-react'
 import { storage } from '@/lib/storage'
+import { migrateLocalDataCardVisibility } from '@/lib/data-card-visibility'
 
 export type CardKey =
   | 'instruments' | 'daily' | 'adj_factor' | 'enriched'
@@ -41,14 +42,11 @@ export const DATA_CARD_DEFS: CardDef[] = [
   { key: 'enriched',    label: 'Enriched', desc: '技术指标计算结果',       defaultHiddenIfNoCap: false },
   { key: 'index',       label: '指数',     desc: '主要市场指数日K',        defaultHiddenIfNoCap: false },
   { key: 'etf',         label: 'ETF',      desc: '场内交易基金日K',         defaultHiddenIfNoCap: false, defaultHidden: true },
-  { key: 'minute',      label: '分钟 K',   desc: '分钟级K线(需 Pro+)',     defaultHiddenIfNoCap: true },
-  { key: 'financials',  label: '财务数据', desc: '财报数据(需 Expert)',    defaultHiddenIfNoCap: true },
+  { key: 'minute',      label: '分钟 K',   desc: '本地分钟级 K 线数据',    defaultHiddenIfNoCap: false },
+  { key: 'financials',  label: '财务数据', desc: '本地导入的财报数据',     defaultHiddenIfNoCap: false },
 ]
 
 const DEFAULT_ORDER = DATA_CARD_DEFS.map(d => d.key)
-/** 恢复默认时显示的卡片数量(按默认顺序取前 N 张) */
-const DEFAULT_VISIBLE_COUNT = 5
-
 const CAP_KEY_MAP: Partial<Record<CardKey, string>> = {
   adj_factor: 'adj_factor',
   minute: 'kline.minute.batch',
@@ -66,7 +64,13 @@ export function getCardVisibility(
   caps: Record<string, unknown> | undefined,
 ): Record<string, boolean> {
   const has = (capKey: string) => !capKey || !!caps?.[capKey]
-  const override = storage.dataCardVisible.get({})
+  const saved = storage.dataCardVisible.get({})
+  const version = storage.dataCardVisibilityVersion.get(0)
+  const override = migrateLocalDataCardVisibility(saved, version)
+  if (version < 2) {
+    storage.dataCardVisible.set(override)
+    storage.dataCardVisibilityVersion.set(2)
+  }
   const result: Record<string, boolean> = {}
   for (const def of DATA_CARD_DEFS) {
     if (def.key in override) {
@@ -122,8 +126,12 @@ export function PageSettingsModal({
     // 恢复默认: 默认顺序 + 仅勾选前 5 张卡片, 其余隐藏
     const defaultOrder = [...DEFAULT_ORDER]
     const defaultVisible: Record<string, boolean> = {}
-    defaultOrder.forEach((k, i) => { defaultVisible[k] = i < DEFAULT_VISIBLE_COUNT })
+    defaultOrder.forEach((k) => {
+      const def = DATA_CARD_DEFS.find(item => item.key === k)!
+      defaultVisible[k] = !def.defaultHidden && (!def.defaultHiddenIfNoCap || !!caps?.[CAP_KEY_MAP[k] ?? ''])
+    })
     storage.dataCardVisible.set(defaultVisible)
+    storage.dataCardVisibilityVersion.set(2)
     storage.dataCardOrder.set(defaultOrder)
     setVisible(defaultVisible)
     setOrder(defaultOrder)
