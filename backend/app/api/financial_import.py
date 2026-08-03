@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from app.api.data import invalidate_data_cache
 from app.services.local_financial_import import LocalFinancialCsvImporter
 from app.services.pipeline_jobs import (
-    LONG_JOB_TIMEOUT_S,
+    LOCAL_IMPORT_TIMEOUT_S,
     job_store,
     release_run_slot,
     try_acquire_run_slot,
@@ -122,7 +122,7 @@ async def start_import(payload: FinancialImportRequest, request: Request) -> dic
     if job_store.active_id():
         raise HTTPException(status_code=409, detail="已有数据任务正在运行, 请稍后再试")
 
-    job_id, is_new = job_store.create(timeout_s=LONG_JOB_TIMEOUT_S)
+    job_id, is_new = job_store.create(timeout_s=LOCAL_IMPORT_TIMEOUT_S)
     if not is_new:
         raise HTTPException(status_code=409, detail="已有数据任务正在运行, 请稍后再试")
     job_store.progress(job_id, "financial_import", 0, "等待开始", stage_pct=0)
