@@ -103,6 +103,26 @@ async def test_start_import_rejects_empty_and_missing_directory_before_creating_
 
 
 @pytest.mark.asyncio
+async def test_start_financial_import_uses_local_import_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = tmp_path / "source"
+    _write_xbx_csv(source)
+    store = JobStore(store_dir=tmp_path / "jobs")
+    monkeypatch.setattr(financial_import, "job_store", store)
+
+    async def no_background_import(*_args: object) -> None:
+        return None
+
+    monkeypatch.setattr(financial_import, "_run_import", no_background_import)
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(repo=SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path / "data"))))
+    )
+
+    await start_import(FinancialImportRequest(source_dir=str(source)), request)
+
+    assert store.get(store.active_id())["timeout_s"] == financial_import.LOCAL_IMPORT_TIMEOUT_S
+
+
+@pytest.mark.asyncio
 async def test_start_import_rejects_directory_without_csv(tmp_path: Path) -> None:
     source = tmp_path / "empty-source"
     source.mkdir()

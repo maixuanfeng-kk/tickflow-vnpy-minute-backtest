@@ -39,6 +39,7 @@ async def test_start_daily_pro_import_accepts_tushare_year_directory(tmp_path: P
 
     assert result["reused"] is False
     assert store.active_id()
+    assert store.get(store.active_id())["timeout_s"] == daily_pro_import.LOCAL_IMPORT_TIMEOUT_S
 
 
 @pytest.mark.asyncio

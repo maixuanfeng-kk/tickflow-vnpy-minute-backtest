@@ -34,6 +34,9 @@ JobStatus = Literal["pending", "running", "succeeded", "failed"]
 # 用 600s 会误杀正常任务并留下写盘僵尸线程。
 DEFAULT_JOB_TIMEOUT_S = 1200
 LONG_JOB_TIMEOUT_S = 1800
+# Local CSV imports can process tens of thousands of files while continuing
+# to report progress. They need a separate limit from minute-data jobs.
+LOCAL_IMPORT_TIMEOUT_S = 7200
 # 向后兼容: 旧调用方引用 STALE_JOB_TIMEOUT_S
 STALE_JOB_TIMEOUT_S = DEFAULT_JOB_TIMEOUT_S
 
