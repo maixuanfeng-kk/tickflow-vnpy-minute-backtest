@@ -5,7 +5,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from math import floor
-from typing import Mapping, Sequence
+from typing import Iterable, Mapping, Sequence
 
 from vnpy.trader.constant import Direction
 from vnpy.trader.object import BarData
@@ -95,22 +95,38 @@ class PortfolioRunResult:
 class DailyContextBuilder:
     """Build prior completed-day references from local minute bars only."""
 
-    def __init__(self) -> None:
+    def __init__(self, signal_projector=None) -> None:
         self._history: dict[str, list[dict]] = defaultdict(list)
+        self._signal_projector = signal_projector
 
-    def references(self) -> dict[str, DailyReference]:
+    def references(
+        self,
+        reference_day: date | None = None,
+        symbols: Iterable[str] | None = None,
+    ) -> dict[str, DailyReference]:
         result: dict[str, DailyReference] = {}
+        allowed = set(symbols) if symbols is not None else None
         for symbol, rows in self._history.items():
+            if allowed is not None and symbol not in allowed:
+                continue
             if not rows:
                 continue
             previous = rows[-1]
+            effective_reference_day = reference_day or previous["date"]
+
+            def adjusted(row: dict, field: str) -> float:
+                value = float(row[field])
+                if self._signal_projector is None:
+                    return value
+                return value * self._signal_projector.scale(symbol, row["date"], effective_reference_day)
+
             result[symbol] = DailyReference(
-                previous_open=previous["open"],
-                previous_close=previous["close"],
-                previous_high=previous["high"],
-                previous_low=previous["low"],
+                previous_open=adjusted(previous, "open"),
+                previous_close=adjusted(previous, "close"),
+                previous_high=adjusted(previous, "high"),
+                previous_low=adjusted(previous, "low"),
                 previous_volume=previous["volume"],
-                closes=tuple(row["close"] for row in rows[-5:]),
+                closes=tuple(adjusted(row, "close") for row in rows[-5:]),
                 previous_cumulative_volumes=previous["cumulative_volumes"],
             )
         return result
@@ -126,6 +142,7 @@ class DailyContextBuilder:
                 cumulative_volumes[bar.datetime.time()] = cumulative_volume
             self._history[symbol].append(
                 {
+                    "date": symbol_bars[0].datetime.date(),
                     "open": float(symbol_bars[0].open_price),
                     "high": max(float(bar.high_price) for bar in symbol_bars),
                     "low": min(float(bar.low_price) for bar in symbol_bars),

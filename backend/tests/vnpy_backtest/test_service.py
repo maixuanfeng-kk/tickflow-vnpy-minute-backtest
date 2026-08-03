@@ -37,6 +37,7 @@ def test_vnpy_service_replays_portfolio_minute_bars() -> None:
             symbols=("600000.SH",),
             start=date(2026, 1, 5),
             end=date(2026, 1, 5),
+            signal_price_basis="raw",
             params={},
         )
     )
@@ -47,8 +48,13 @@ def test_vnpy_service_replays_portfolio_minute_bars() -> None:
     assert result["stats"]["symbols_requested"] == 1
 
 
-def test_registry_exposes_opening_volume_portfolio_only() -> None:
-    assert [item.id for item in list_strategies()] == ["opening_volume_portfolio"]
+def test_registry_exposes_local_opening_breakout_variants() -> None:
+    assert [item.id for item in list_strategies()] == [
+        "opening_volume_portfolio",
+        "opening_breakout_condition_1",
+        "opening_breakout_condition_2",
+        "opening_breakout_condition_3",
+    ]
 
 
 def test_vnpy_service_keeps_native_style_execution_options() -> None:
@@ -63,6 +69,7 @@ def test_vnpy_service_keeps_native_style_execution_options() -> None:
             candidate_sort="volume_ratio",
             entry_fill="next_minute_open",
             exit_fill="next_minute_open",
+            signal_price_basis="raw",
         )
     )
 
@@ -86,6 +93,7 @@ def test_vnpy_service_returns_visible_opening_volume_risk_settings() -> None:
                 "trailing_take_profit_drawdown_pct": 0.02,
                 "max_hold_days": 3,
             },
+            signal_price_basis="raw",
         )
     )
 
@@ -99,6 +107,8 @@ def test_vnpy_service_returns_visible_opening_volume_risk_settings() -> None:
         "trailing_take_profit_activate": 0.08,
         "trailing_take_profit_drawdown": 0.02,
         "max_hold_days": 3,
+        "signal_price_basis": "raw",
+        "adjustment_factor_dataset": None,
     }
 
 
@@ -119,5 +129,6 @@ def test_vnpy_service_rejects_empty_repository_data() -> None:
                 symbols=("600000.SH",),
                 start=date(2026, 1, 5),
                 end=date(2026, 1, 5),
+                signal_price_basis="raw",
             )
         )
