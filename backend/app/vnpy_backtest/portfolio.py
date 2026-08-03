@@ -123,6 +123,7 @@ class DailyContextBuilder:
             result[symbol] = DailyReference(
                 previous_open=adjusted(previous, "open"),
                 previous_close=adjusted(previous, "close"),
+                raw_previous_close=float(previous["close"]),
                 previous_high=adjusted(previous, "high"),
                 previous_low=adjusted(previous, "low"),
                 previous_volume=previous["volume"],
@@ -582,11 +583,14 @@ class MultiSymbolNextBarOpenEngine:
         return floor((budget - self.min_commission) / effective / rule.lot_size) * rule.lot_size
 
     def _violates_limit(self, direction: Direction, price: float, reference: DailyReference | None, rule: AShareTradingRule) -> bool:
-        if not reference or not reference.previous_close or reference.previous_close <= 0:
+        previous_close = reference.raw_previous_close if reference else None
+        if previous_close is None and reference:
+            previous_close = reference.previous_close
+        if not previous_close or previous_close <= 0:
             return False
         if direction == Direction.LONG:
-            return price >= reference.previous_close * (1 + rule.price_limit_pct) - 1e-8
-        return price <= reference.previous_close * (1 - rule.price_limit_pct) + 1e-8
+            return price >= previous_close * (1 + rule.price_limit_pct) - 1e-8
+        return price <= previous_close * (1 - rule.price_limit_pct) + 1e-8
 
     def _available_cash(self) -> float:
         reserved = sum(order.budget for order in self.pending if order.direction == Direction.LONG)

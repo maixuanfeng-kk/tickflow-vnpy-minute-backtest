@@ -29,6 +29,7 @@ async def test_vnpy_stream_emits_progress_then_result(monkeypatch) -> None:
             assert config.max_sell_volume_ratio == 0.5
             assert config.candidate_sort == "score"
             assert config.force_close_at_end is False
+            assert config.signal_price_basis == "raw"
             return {"run_id": "run-1", "stats": {}, "trades": []}
 
     async def not_disconnected():
@@ -50,6 +51,7 @@ async def test_vnpy_stream_emits_progress_then_result(monkeypatch) -> None:
         max_sell_volume_ratio=0.5,
         candidate_sort="score",
         force_close_at_end=False,
+        signal_price_basis="raw",
     )
     chunks = []
     async for chunk in response.body_iterator:

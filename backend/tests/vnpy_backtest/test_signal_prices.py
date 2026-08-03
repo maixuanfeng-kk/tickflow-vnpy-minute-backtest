@@ -1,4 +1,5 @@
-from datetime import date
+from datetime import date, datetime
+from types import SimpleNamespace
 
 import polars as pl
 import pytest
@@ -6,6 +7,7 @@ import pytest
 from app.data_providers.normalizer import normalize_daily
 from app.services.kline_sync import _normalize_daily
 from app.services.local_adj_factor import LocalAdjFactorBuilder, LocalAdjustmentDataError
+from app.vnpy_backtest.portfolio import DailyContextBuilder
 from app.vnpy_backtest.signal_prices import MinuteSignalPriceProjector
 
 
@@ -49,6 +51,16 @@ def test_builds_event_factors_from_standard_pre_close_and_projects_qfq(tmp_path)
     assert projector.scale("600000.SH", date(2026, 1, 5), date(2026, 1, 7)) == pytest.approx(0.9)
     assert projector.scale("600000.SH", date(2026, 1, 7), date(2026, 1, 7)) == 1.0
     assert projector.has_event_while_held("600000.SH", date(2026, 1, 5), date(2026, 1, 7))
+
+    bar = SimpleNamespace(
+        datetime=datetime(2026, 1, 5, 9, 30), open_price=10.0, high_price=10.0,
+        low_price=10.0, close_price=10.0, volume=100.0,
+    )
+    context = DailyContextBuilder(projector)
+    context.add_day({"600000.SH": [bar]})
+    reference = context.references(date(2026, 1, 7))["600000.SH"]
+    assert reference.previous_close == pytest.approx(9.0)
+    assert reference.raw_previous_close == 10.0
 
 
 def test_factor_builder_rejects_missing_pre_close_after_first_day(tmp_path) -> None:

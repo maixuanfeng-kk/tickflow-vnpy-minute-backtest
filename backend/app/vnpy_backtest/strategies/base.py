@@ -51,6 +51,8 @@ class StrategySpec:
 class DailyReference:
     previous_open: float | None = None
     previous_close: float | None = None
+    # Execution rules, such as price limits, must use the unadjusted close.
+    raw_previous_close: float | None = None
     previous_high: float | None = None
     previous_low: float | None = None
     previous_volume: float | None = None
