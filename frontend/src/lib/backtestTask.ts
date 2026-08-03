@@ -185,6 +185,7 @@ export function startBacktest(params: {
   minute_fill?: boolean
   max_buy_volume_ratio?: number | null
   max_sell_volume_ratio?: number | null
+  signal_price_basis?: 'qfq' | 'raw'
   engine?: 'matrix' | 'vnpy'
 }): void {
   // 取消之前的任务状态
@@ -200,7 +201,7 @@ export function startBacktest(params: {
   const isVnpy = params.engine === 'vnpy'
   const symbols = params.symbols?.filter(Boolean) ?? []
   if (isVnpy && (symbols.length < 1 || symbols.length > 1000)) {
-    current = { ...current, isPending: false, error: 'vn.py 分钟回测仅支持单只股票', reconnecting: false }
+    current = { ...current, isPending: false, error: 'vn.py 分钟回测支持 1–1000 只股票', reconnecting: false }
     emit()
     return
   }
@@ -231,6 +232,7 @@ export function startBacktest(params: {
     minute_fill: params.minute_fill,
     max_buy_volume_ratio: params.max_buy_volume_ratio,
     max_sell_volume_ratio: params.max_sell_volume_ratio,
+    signal_price_basis: params.signal_price_basis,
     engine: params.engine,
   })
 

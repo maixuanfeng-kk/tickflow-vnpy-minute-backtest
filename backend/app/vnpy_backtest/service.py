@@ -14,6 +14,7 @@ from vnpy.trader.constant import Direction
 
 from app.vnpy_backtest.local_data import bars_from_minute_frame
 from app.vnpy_backtest.portfolio import DailyContextBuilder, MultiSymbolNextBarOpenEngine
+from app.vnpy_backtest.signal_prices import MinuteSignalPriceProjector
 from app.vnpy_backtest.strategies.base import StrategySpec
 from app.vnpy_backtest.strategies.registry import get_strategy
 
@@ -38,6 +39,7 @@ class VnpyMinuteBacktestConfig:
     entry_fill: str = "next_minute_open"
     exit_fill: str = "next_minute_open"
     force_close_at_end: bool = True
+    signal_price_basis: str = "qfq"
     params: dict[str, Any] = field(default_factory=dict)
     is_cancelled: Callable[[], bool] | None = None
     on_progress: Callable[[int, int, date, float], None] | None = None
@@ -77,6 +79,7 @@ class VnpyMinuteBacktestService:
             "entry_fill": config.entry_fill,
             "exit_fill": config.exit_fill,
             "force_close_at_end": config.force_close_at_end,
+            "signal_price_basis": config.signal_price_basis,
             "commission_rate": config.commission_pct,
             "stamp_tax_rate": config.stamp_tax_pct,
             "slippage_rate": config.slippage_bps / 10_000,
@@ -105,12 +108,21 @@ class VnpyMinuteBacktestService:
             instrument_limit_pcts=instrument_limit_pcts,
         )
         strategy = spec.strategy_class(dict(config.params))
-        daily_context = DailyContextBuilder()
         days_seen = 0
         # Build completed-day context before the requested window as well.  The
         # opening-breakout strategy needs yesterday's same-minute cumulative
         # volume and four prior daily closes on the first requested trade day.
         warmup_start = config.start - timedelta(days=20)
+        if config.signal_price_basis == "raw":
+            signal_projector = MinuteSignalPriceProjector("raw", {}, {})
+        else:
+            signal_projector = MinuteSignalPriceProjector.load(
+                self.repo.store.data_dir,
+                list(symbols),
+                config.end,
+                config.signal_price_basis,
+            )
+        daily_context = DailyContextBuilder(signal_projector)
         try:
             trading_days = self.repo.minute_trading_days(config.start, config.end)
             total_days = len(trading_days)
@@ -129,7 +141,7 @@ class VnpyMinuteBacktestService:
             if trading_day < config.start:
                 daily_context.add_day(bars_by_symbol)
                 continue
-            references = daily_context.references()
+            references = daily_context.references(trading_day, symbols=bars_by_symbol)
             engine.run_day(
                 bars_by_symbol,
                 strategy,
@@ -196,6 +208,8 @@ class VnpyMinuteBacktestService:
                 "trailing_take_profit_activate": config.params.get("trailing_take_profit_activate_pct"),
                 "trailing_take_profit_drawdown": config.params.get("trailing_take_profit_drawdown_pct"),
                 "max_hold_days": config.params.get("max_hold_days"),
+                "signal_price_basis": config.signal_price_basis,
+                "adjustment_factor_dataset": "adj_factor" if config.signal_price_basis == "qfq" else None,
             },
         }
 

@@ -17,7 +17,7 @@ import { BUILTIN_COLUMNS } from '@/lib/watchlist-columns'
 import { cnSignal } from '@/lib/signals'
 import { SignalPicker } from '@/components/screener/SignalPicker'
 import { startBacktest, stopBacktest, tryReconnect, useBacktestTask } from '@/lib/backtestTask'
-import { participationRatio, resolveOpeningVolumePool } from '@/lib/openingVolumeExecution'
+import { participationRatio } from '@/lib/openingVolumeExecution'
 import { useDataStatus, useCapabilities } from '@/lib/useSharedQueries'
 import { EmptyState } from '@/components/EmptyState'
 import { WarmupBadge } from '@/components/WarmupBadge'
@@ -907,11 +907,6 @@ export function StrategyBacktest() {
   const [symbols, setSymbols] = useState(saved?.symbols ?? '')
   const [universeSource, setUniverseSource] = useState<'market' | 'manual' | 'monthly_pool'>(saved?.universeSource ?? (saved?.symbols ? 'manual' : 'market'))
   const [poolKey, setPoolKey] = useState<string | null>(saved?.poolKey ?? null)
-  const openingVolumeWatchlist = useQuery({
-    queryKey: QK.watchlist(),
-    queryFn: () => api.watchlistList(),
-    staleTime: 30_000,
-  })
   const watchlistPools = useQuery({
     queryKey: QK.watchlistPools,
     queryFn: api.watchlistPools,
@@ -951,6 +946,7 @@ export function StrategyBacktest() {
   const [simMode, setSimMode] = useState<'position' | 'full'>(saved?.mode ?? 'position')
   const [holdingDays, setHoldingDays] = useState(saved?.holdingDays ?? '5')
   const [highGranularity, setHighGranularity] = useState(saved?.minuteFill ?? false)
+  const [signalPriceBasis, setSignalPriceBasis] = useState<'qfq' | 'raw'>('qfq')
   const [settingsOpen, setSettingsOpen] = useState(false)
   // 分钟K成交价细化: 不改变信号日或成交日, 需 Pro+ 分钟K能力
   const { data: caps } = useCapabilities()
@@ -984,6 +980,11 @@ export function StrategyBacktest() {
     queryKey: QK.screenerStrategies(assetType, true),
     queryFn: () => api.screenerStrategies(assetType, true),
   })
+  const vnpyStrategies = useQuery({
+    queryKey: QK.vnpyStrategies,
+    queryFn: api.vnpyStrategies,
+  })
+  const vnpyStrategyList = useMemo(() => vnpyStrategies.data?.strategies ?? [], [vnpyStrategies.data])
   const strategyList = useMemo(() => strategies.data?.presets ?? [], [strategies.data])
   const filteredStrategyList = useMemo(() => (
     strategyGroup === 'all' ? strategyList : strategyList.filter(st => st.source === strategyGroup)
@@ -993,20 +994,22 @@ export function StrategyBacktest() {
   // 拉新代码后会失效,导致 strategyGet 一直 404/加载中)。列表就绪后若失效,
   // 连带清除其专属的 params/overrides/result(这些是该策略的运行配置/产物,
   // 策略失效后留着会造成"孤儿"状态:界面显示旧回测结果却无对应策略)。
+  const selectedVnpyStrategy = vnpyStrategyList.find(strategy => strategy.id === selectedStrategy) ?? null
+
   useEffect(() => {
-    if (strategies.isLoading || strategyList.length === 0) return
-    if (selectedStrategy && !strategyList.some(st => st.id === selectedStrategy)) {
+    if (strategies.isLoading || vnpyStrategies.isLoading || strategyList.length === 0) return
+    if (selectedStrategy && !strategyList.some(st => st.id === selectedStrategy) && !vnpyStrategyList.some(st => st.id === selectedStrategy)) {
       setSelectedStrategy(null)
       setStrategyParams({})
       setOverrides({})
       setResult(null)
     }
-  }, [strategies.isLoading, strategyList, selectedStrategy])
+  }, [strategies.isLoading, vnpyStrategies.isLoading, strategyList, selectedStrategy, vnpyStrategyList])
 
   const strategyDetail = useQuery({
     queryKey: QK.strategyDetail(selectedStrategy ?? ''),
     queryFn: () => api.strategyGet(selectedStrategy!),
-    enabled: !!selectedStrategy,
+    enabled: !!selectedStrategy && !selectedVnpyStrategy,
   })
 
   const backtestTask = useBacktestTask()
@@ -1083,6 +1086,51 @@ export function StrategyBacktest() {
   const handleRun = async () => {
     const detail = strategyDetail.data
     if (!selectedStrategy) return
+    const requestOverrides = detail
+      ? normalizeStrategyOverrides(detail, overrides)
+      : overrides
+    if (vnpyStrategyList.some(strategy => strategy.id === selectedStrategy)) {
+      const poolSymbols = symbols.split(/[\s,]+/).map(symbol => symbol.trim()).filter(Boolean)
+      if (poolSymbols.length === 0) {
+        toast('请输入至少一只用于 vn.py 回测的股票代码。', 'error')
+        return
+      }
+      startBacktest({
+        strategy_id: selectedStrategy,
+        symbols: poolSymbols,
+        start: start || null,
+        end: end || undefined,
+        entry_fill: 'next_minute_open',
+        exit_fill: 'next_minute_open',
+        candidate_sort: candidateSort,
+        force_close_at_end: forceCloseAtEnd,
+        commission_pct: Number(fees) / 10000,
+        stamp_tax_pct: Number(stampTax) / 1000,
+        slippage_bps: Number(slippage),
+        max_positions: Number(maxPositions),
+        initial_capital: Number(initialCapital),
+        position_sizing: 'equal',
+        max_buy_volume_ratio: participationRatio(maxBuyVolumeRatio),
+        max_sell_volume_ratio: participationRatio(maxSellVolumeRatio),
+        signal_price_basis: signalPriceBasis,
+        params: {
+          ...strategyParams,
+          basic_filter: requestOverrides.basic_filter,
+          scoring: requestOverrides.scoring,
+          score_min: requestOverrides.score_min,
+          score_max: requestOverrides.score_max,
+          max_hold_days: requestOverrides.max_hold_days,
+          take_profit_pct: requestOverrides.take_profit,
+          trailing_stop_pct: requestOverrides.trailing_stop,
+          trailing_take_profit_activate_pct: requestOverrides.trailing_take_profit_activate,
+          trailing_take_profit_drawdown_pct: requestOverrides.trailing_take_profit_drawdown,
+          cash_reserve_ratio: 1 - Number(maxExposure) / 100,
+          min_commission: 5,
+        },
+        engine: 'vnpy',
+      })
+      return
+    }
     let frozenPoolSymbols: string[] | null = null
     if (universeSource === 'monthly_pool') {
       if (!poolKey) {
@@ -1105,49 +1153,6 @@ export function StrategyBacktest() {
         return
       }
       setSymbols(frozenPoolSymbols.join(','))
-    }
-    const requestOverrides = detail
-      ? normalizeStrategyOverrides(detail, overrides)
-      : overrides
-    if (strategyDetail.data?.id === 'opening_volume_portfolio') {
-      const poolSymbols = frozenPoolSymbols ?? resolveOpeningVolumePool(
-        symbols,
-        (openingVolumeWatchlist.data?.symbols ?? []).map(item => item.symbol),
-      )
-      startBacktest({
-        strategy_id: 'opening_volume_portfolio',
-        symbols: poolSymbols,
-        start: start || null,
-        end: end || undefined,
-        entry_fill: 'next_minute_open',
-        exit_fill: 'next_minute_open',
-        candidate_sort: candidateSort,
-        force_close_at_end: forceCloseAtEnd,
-        commission_pct: Number(fees) / 10000,
-        stamp_tax_pct: Number(stampTax) / 1000,
-        slippage_bps: Number(slippage),
-        max_positions: Number(maxPositions),
-        initial_capital: Number(initialCapital),
-        position_sizing: 'equal',
-        max_buy_volume_ratio: participationRatio(maxBuyVolumeRatio),
-        max_sell_volume_ratio: participationRatio(maxSellVolumeRatio),
-        params: {
-          ...strategyParams,
-          basic_filter: requestOverrides.basic_filter,
-          scoring: requestOverrides.scoring,
-          score_min: requestOverrides.score_min,
-          score_max: requestOverrides.score_max,
-          max_hold_days: requestOverrides.max_hold_days,
-          take_profit_pct: requestOverrides.take_profit,
-          trailing_stop_pct: requestOverrides.trailing_stop,
-          trailing_take_profit_activate_pct: requestOverrides.trailing_take_profit_activate,
-          trailing_take_profit_drawdown_pct: requestOverrides.trailing_take_profit_drawdown,
-          cash_reserve_ratio: 1 - Number(maxExposure) / 100,
-          min_commission: 5,
-        },
-        engine: 'vnpy',
-      })
-      return
     }
     startBacktest({
       strategy_id: highGranularity ? 'minute_double_ma_volume' : selectedStrategy,
@@ -1175,7 +1180,7 @@ export function StrategyBacktest() {
   }
   const selectStrategy = (strategyId: string) => {
     setSelectedStrategy(strategyId)
-    if (strategyId === 'opening_volume_portfolio') {
+    if (vnpyStrategyList.some(strategy => strategy.id === strategyId)) {
       setHighGranularity(false)
       setSimMode('position')
       setInitialCapital(OPENING_VOLUME_DEFAULTS.initialCapital)
@@ -1324,7 +1329,7 @@ export function StrategyBacktest() {
   }, [result?.trades])
 
   const detail = strategyDetail.data
-  const openingVolumeStrategy = detail?.id === 'opening_volume_portfolio'
+  const openingVolumeStrategy = selectedVnpyStrategy !== null
   const matrixStrategy = detail?.execution_backend === 'matrix_native'
   const visibleAdvancedTabs = useMemo(
     () => openingVolumeStrategy
@@ -1409,11 +1414,11 @@ export function StrategyBacktest() {
         maxHoldDaysValue !== '' ? `最长 ${maxHoldDaysValue}天` : '不限持仓',
       ].join(' · ')
     : '选择策略后可调整参数 / 过滤 / 买卖触发器 / 评分 / 风控'
-  const selectedStrategyName = detail?.name ?? strategyList.find(st => st.id === selectedStrategy)?.name ?? '未选择策略'
+  const selectedStrategyName = selectedVnpyStrategy?.name ?? detail?.name ?? strategyList.find(st => st.id === selectedStrategy)?.name ?? '未选择策略'
   const selectedStrategySource = detail?.source ?? strategyList.find(st => st.id === selectedStrategy)?.source
-  const stockPoolCount = symbols.split(',').map(s => s.trim()).filter(Boolean).length
+  const stockPoolCount = symbols.split(/[\s,]+/).map(symbol => symbol.trim()).filter(Boolean).length
   const stockPoolSummary = openingVolumeStrategy
-    ? stockPoolCount > 0 ? `股票池 自选股子集 ${stockPoolCount} 只` : '股票池 TickFlow 自选股'
+    ? stockPoolCount > 0 ? `股票池 已输入 ${stockPoolCount} 只` : '请输入回测股票代码'
     : stockPoolCount > 0 ? `股票池 已限定 ${stockPoolCount} 只` : '股票池 全市场'
   const chooseMonthlyPool = (nextPoolKey: string) => {
     setPoolKey(nextPoolKey || null)
@@ -1427,7 +1432,7 @@ export function StrategyBacktest() {
           onClick={() => { setUniverseSource('market'); setSymbols('') }}
           className={`px-3 text-xs transition-colors ${universeSource === 'market' ? 'bg-accent/10 text-accent' : 'text-muted hover:text-foreground'}`}
         >
-          {openingVolumeStrategy ? '全部自选' : '全市场'}
+          {openingVolumeStrategy ? '手工股票池' : '全市场'}
         </button>
         <button
           type="button"
@@ -1562,7 +1567,7 @@ export function StrategyBacktest() {
             {!strategies.isLoading && filteredStrategyList.length === 0 && !['all', 'custom'].includes(strategyGroup) && (
               <span className="text-xs text-muted px-2 py-1">当前分组暂无策略</span>
             )}
-            {filteredStrategyList.map(st => (
+            {[...filteredStrategyList, ...vnpyStrategyList].map(st => (
               <button
                 key={st.id}
                 onClick={() => selectStrategy(st.id)}
@@ -1573,7 +1578,7 @@ export function StrategyBacktest() {
                   }`}
               >
                 <span className="font-medium">{st.name}</span>
-                {st.source && st.source !== 'builtin' && (
+                {'source' in st && st.source && st.source !== 'builtin' && (
                   <span className={`ml-1 text-[8px] px-1 py-px rounded border ${BADGE_CLS_MAP[st.source] ?? ''}`}>
                     {SRC_MAP[st.source] ?? ''}
                   </span>
@@ -1590,8 +1595,8 @@ export function StrategyBacktest() {
 
         <button
           type="button"
-          onClick={() => detail && setSettingsOpen(true)}
-          disabled={!detail || strategyDetail.isLoading}
+          onClick={() => (openingVolumeStrategy || detail) && setSettingsOpen(true)}
+          disabled={(!detail && !openingVolumeStrategy) || strategyDetail.isLoading}
           className="group w-full rounded-btn border border-border bg-surface px-3 py-2.5 text-left transition-colors hover:border-accent/40 hover:bg-elevated/70 disabled:cursor-not-allowed disabled:opacity-55"
         >
           <span className="flex items-center gap-2 text-xs font-semibold text-foreground">
@@ -1608,7 +1613,7 @@ export function StrategyBacktest() {
             )}
           </span>
           <span className="mt-1 block text-[10px] font-medium text-secondary">{stockPoolSummary}</span>
-          <span className="mt-1 block text-[10px] leading-4 text-muted">{advancedSummary}</span>
+          <span className="mt-1 block text-[10px] leading-4 text-muted">{openingVolumeStrategy ? selectedVnpyStrategy?.description : advancedSummary}</span>
         </button>
 
         <div className="rounded-btn border border-border bg-surface p-2.5">
@@ -1720,6 +1725,17 @@ export function StrategyBacktest() {
             </div>
           )}
         </div>
+
+        {openingVolumeStrategy && (
+          <div className="rounded-btn border border-border bg-surface p-2.5">
+            <label className="mb-1.5 block text-xs font-medium text-secondary">信号价格口径</label>
+            <select value={signalPriceBasis} onChange={event => setSignalPriceBasis(event.target.value as 'qfq' | 'raw')} className={INPUT_CLS}>
+              <option value="qfq">前复权（默认，缺因子时严格报错）</option>
+              <option value="raw">原始价格</option>
+            </select>
+            <p className="mt-1.5 text-[10px] leading-4 text-muted">撮合始终使用原始分钟行情；前复权只用于策略信号和动态均线。</p>
+          </div>
+        )}
 
         <div className="grid grid-cols-2 gap-2">
           <div>
@@ -2544,17 +2560,15 @@ export function StrategyBacktest() {
                         <span className="text-[11px] text-muted">资产类型</span>
                         <span className="rounded-btn border border-accent/40 bg-accent/10 px-3 py-1.5 text-accent">股票</span>
                       </div>
-                      {universeSelector}
-                      {universeSource === 'manual' && (
-                        <StockPoolPicker
-                          value={symbols}
-                          onChange={(next) => { setUniverseSource('manual'); setSymbols(next) }}
-                          assetType="stock"
-                          emptyLabel="全部自选股"
-                          emptyDescription="默认使用全部 TickFlow 自选股。"
-                        />
-                      )}
-                      <div className="text-[11px] leading-5 text-muted">月份股票池会在启动回测时重新读取并冻结实际提交的股票代码。</div>
+                      <label className="mt-3 block text-[11px] text-secondary">股票池（1–1000 只，逗号或换行分隔）</label>
+                      <textarea
+                        value={symbols}
+                        onChange={(event) => { setUniverseSource('manual'); setSymbols(event.target.value) }}
+                        placeholder="例如：600000.SH, 000001.SZ"
+                        rows={7}
+                        className="mt-1.5 w-full resize-y rounded-btn border border-border bg-canvas px-2.5 py-2 font-mono text-xs text-foreground outline-none transition-colors placeholder:text-muted focus:border-accent/60"
+                      />
+                      <div className="text-[11px] leading-5 text-muted">vn.py 回测仅使用这里手工输入并冻结的股票代码；不会读取月度股票池或服务器自选股。</div>
                     </>
                   ) : (
                     <>
@@ -2592,7 +2606,14 @@ export function StrategyBacktest() {
               {settingsTab === 'params' && (
                 openingVolumeStrategy ? (
                   <OpeningVolumeParamsEditor
-                    definitions={detail.params}
+                    definitions={selectedVnpyStrategy?.parameters.map(param => ({
+                      id: param.name,
+                      label: param.label,
+                      default: param.default,
+                      type: param.kind === 'time' ? 'time' : param.kind === 'int' ? 'int' : 'float',
+                      min: param.minimum,
+                      max: param.maximum,
+                    })) ?? []}
                     values={strategyParams}
                     hideRiskFields
                     onChange={(id, value) => setStrategyParams(current => ({ ...current, [id]: value }))}

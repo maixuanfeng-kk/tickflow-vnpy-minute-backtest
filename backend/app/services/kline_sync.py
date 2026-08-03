@@ -41,7 +41,7 @@ def _atomic_write_parquet(df: pl.DataFrame, out) -> None:
 
 # 标准列(无论 SDK 返回什么形状,我们把它规范成这套)
 CANONICAL_DAILY_COLS = [
-    "symbol", "date", "open", "high", "low", "close", "volume", "amount",
+    "symbol", "date", "open", "high", "low", "close", "pre_close", "volume", "amount",
 ]
 
 
@@ -72,7 +72,7 @@ def _normalize_daily(df_in, default_symbol: str | None = None) -> pl.DataFrame:
     if "date" in df.columns and df.schema["date"] != pl.Date:
         df = df.with_columns(pl.col("date").cast(pl.Date, strict=False))
 
-    for col in ("open", "high", "low", "close"):
+    for col in ("open", "high", "low", "close", "pre_close"):
         if col in df.columns:
             df = df.with_columns(pl.col(col).cast(pl.Float64, strict=False))
     for col in ("volume", "amount"):

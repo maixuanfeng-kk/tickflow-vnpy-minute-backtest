@@ -8,17 +8,18 @@ from typing import Mapping, Sequence
 from vnpy.trader.constant import Direction
 from vnpy.trader.object import BarData
 
-from app.backtest.opening_volume_shared import evaluate_opening_volume_entry
 from app.vnpy_backtest.strategies.base import OrderIntent, PortfolioContext
 
 
 class OpeningBreakoutPoolStrategy:
     """Signal-only implementation of the user's opening-breakout rules."""
 
+    VOLUME_MULTIPLE = 1.5
+
     def __init__(self, params: Mapping[str, object]) -> None:
         self.params = dict(params)
         self.buy_start = time.fromisoformat(str(self.params.get("scan_start_time", self.params.get("buy_start", "09:30"))))
-        self.buy_end = time.fromisoformat(str(self.params.get("scan_end_time", self.params.get("buy_end", "09:59"))))
+        self.buy_end = time.fromisoformat(str(self.params.get("scan_end_time", self.params.get("buy_end", "10:00"))))
         self.stop_loss = abs(float(self.params.get("stop_loss_pct", self.params.get("stop_loss", 0.02))))
         self.take_profit = self._positive_param("take_profit_pct")
         self.trailing_stop = self._positive_param("trailing_stop_pct")
@@ -29,6 +30,7 @@ class OpeningBreakoutPoolStrategy:
         self._session_date: date | None = None
         self._today_cumulative_volume: dict[str, float] = defaultdict(float)
         self._today_cumulative_amount: dict[str, float] = defaultdict(float)
+        self._today_high: dict[str, float] = {}
 
     def on_minute(
         self,
@@ -39,6 +41,12 @@ class OpeningBreakoutPoolStrategy:
             self._session_date = context.timestamp.date()
             self._today_cumulative_volume.clear()
             self._today_cumulative_amount.clear()
+            self._today_high.clear()
+
+        for symbol, bar in bars.items():
+            high_price = float(bar.high_price)
+            if high_price > 0:
+                self._today_high[symbol] = max(self._today_high.get(symbol, 0.0), high_price)
 
         if context.timestamp.time() <= self.buy_end:
             for symbol, bar in bars.items():
@@ -85,35 +93,85 @@ class OpeningBreakoutPoolStrategy:
         if previous_same_time_volume is None or previous_same_time_volume <= 0:
             return None
         previous_gain = self._previous_day_gain(reference)
-        if previous_gain is None or reference.previous_open is None or reference.previous_high is None:
-            return None
-        decision = evaluate_opening_volume_entry(
-            previous_open=float(reference.previous_open),
-            previous_close=float(reference.previous_close),
-            previous_high=float(reference.previous_high),
-            previous_change_pct=previous_gain,
-            today_close=price,
-            minute_high=float(bar.high_price),
-            today_return=price / float(reference.previous_close) - 1,
-            volume_ratio=current_volume / float(previous_same_time_volume),
-            params=self.params,
+        pre_previous_gain = self._pre_previous_day_gain(reference)
+        volume_ratio = current_volume / float(previous_same_time_volume)
+        today_gain = price / float(reference.previous_close) - 1
+        conditions = self._entry_conditions(
+            symbol=symbol,
+            reference=reference,
+            volume_ratio=volume_ratio,
+            previous_gain=previous_gain,
+            pre_previous_gain=pre_previous_gain,
+            today_gain=today_gain,
         )
-        if decision is None:
+        if not conditions:
             return None
         return {
-            "matched_conditions": list(decision.matched_reasons),
-            "primary_reason": decision.primary_reason,
+            "matched_conditions": [self._condition_label(item) for item in conditions],
+            "matched_condition_ids": conditions,
+            "primary_reason": conditions[0],
             "signal_price": round(price, 6),
-            "volume_ratio": current_volume / float(previous_same_time_volume),
-            "today_return": price / float(reference.previous_close) - 1,
+            "volume_ratio": volume_ratio,
+            "today_return": today_gain,
             "previous_return": previous_gain,
         }
+
+    def _entry_conditions(
+        self,
+        *,
+        symbol: str,
+        reference,
+        volume_ratio: float,
+        previous_gain: float | None,
+        pre_previous_gain: float | None,
+        today_gain: float,
+    ) -> list[str]:
+        has_volume_surge = volume_ratio >= self.VOLUME_MULTIPLE
+        condition_1 = bool(
+            reference.previous_high is not None
+            and reference.previous_open is not None
+            and reference.previous_close < reference.previous_open
+            and has_volume_surge
+            and self._today_high.get(symbol, 0.0) > float(reference.previous_high)
+        )
+        condition_2 = bool(
+            pre_previous_gain is not None
+            and previous_gain is not None
+            and today_gain > 0.03
+            and previous_gain < 0.05
+            and pre_previous_gain < 0.05
+            and has_volume_surge
+        )
+        condition_3 = bool(previous_gain is not None and 0 < previous_gain < 0.03 and has_volume_surge)
+        return [
+            condition
+            for condition, passed in (
+                ("condition_1", condition_1),
+                ("condition_2", condition_2),
+                ("condition_3", condition_3),
+            )
+            if passed
+        ]
+
+    @staticmethod
+    def _condition_label(condition: str) -> str:
+        return {
+            "condition_1": "条件 1：前日阴线、同期累计量达 1.5 倍且盘中突破昨日高点",
+            "condition_2": "条件 2：当日涨幅大于 3%、前两日涨幅小于 5%且同期累计量达 1.5 倍",
+            "condition_3": "条件 3：前日上涨小于 3%且同期累计量达 1.5 倍",
+        }[condition]
 
     @staticmethod
     def _previous_day_gain(reference) -> float | None:
         if len(reference.closes) < 2 or reference.closes[-2] <= 0 or reference.previous_close is None:
             return None
         return reference.previous_close / reference.closes[-2] - 1
+
+    @staticmethod
+    def _pre_previous_day_gain(reference) -> float | None:
+        if len(reference.closes) < 3 or reference.closes[-3] <= 0 or reference.closes[-2] <= 0:
+            return None
+        return reference.closes[-2] / reference.closes[-3] - 1
 
     def _passes_basic_filter(self, symbol: str, bar: BarData, context: PortfolioContext) -> bool:
         basic_filter = self.params.get("basic_filter")

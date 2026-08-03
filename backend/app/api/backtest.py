@@ -514,6 +514,7 @@ async def vnpy_stream(
     symbols: str,
     start: str,
     end: str,
+    strategy_id: str = "opening_volume_portfolio",
     initial_capital: float = 1_000_000.0,
     commission_pct: float = 0.0002,
     stamp_tax_pct: float = 0.001,
@@ -526,6 +527,7 @@ async def vnpy_stream(
     entry_fill: str = "next_minute_open",
     exit_fill: str = "next_minute_open",
     force_close_at_end: bool = True,
+    signal_price_basis: str = "qfq",
     params: str | None = None,
 ):
     """Run a registered vn.py portfolio strategy over local minute Parquet data."""
@@ -539,8 +541,15 @@ async def vnpy_stream(
     if end_date < start_date:
         raise HTTPException(status_code=400, detail="end date must not precede start date")
     selected_symbols = tuple(dict.fromkeys(item.strip().upper() for item in symbols.split(",") if item.strip()))
-    if not 1 <= len(selected_symbols) <= 1000:
-        raise HTTPException(status_code=400, detail="vn.py 股票池必须包含 1–1000 只股票")
+    from app.vnpy_backtest.strategies.registry import get_strategy
+    strategy_spec = get_strategy(strategy_id)
+    if strategy_spec is None:
+        raise HTTPException(status_code=400, detail=f"不支持的 vn.py 策略: {strategy_id}")
+    if not strategy_spec.min_symbols <= len(selected_symbols) <= strategy_spec.max_symbols:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{strategy_spec.name} 支持 {strategy_spec.min_symbols}–{strategy_spec.max_symbols} 只股票",
+        )
     if max_positions <= 0:
         raise HTTPException(status_code=400, detail="max_positions must be positive")
     for label, ratio in (("max_buy_volume_ratio", max_buy_volume_ratio), ("max_sell_volume_ratio", max_sell_volume_ratio)):
@@ -554,8 +563,10 @@ async def vnpy_stream(
         raise HTTPException(status_code=400, detail="invalid candidate_sort")
     if entry_fill != "next_minute_open" or exit_fill != "next_minute_open":
         raise HTTPException(status_code=400, detail="vn.py minute execution uses next_minute_open")
+    if signal_price_basis not in {"qfq", "raw"}:
+        raise HTTPException(status_code=400, detail="signal_price_basis must be qfq or raw")
 
-    raw = f"vnpy|opening_volume_portfolio|{selected_symbols}|{start}|{end}|{initial_capital}|{commission_pct}|{stamp_tax_pct}|{slippage_bps}|{max_positions}|{position_sizing}|{max_buy_volume_ratio}|{max_sell_volume_ratio}|{candidate_sort}|{force_close_at_end}|{params}"
+    raw = f"vnpy|{strategy_id}|{selected_symbols}|{start}|{end}|{initial_capital}|{commission_pct}|{stamp_tax_pct}|{slippage_bps}|{max_positions}|{position_sizing}|{max_buy_volume_ratio}|{max_sell_volume_ratio}|{candidate_sort}|{force_close_at_end}|{signal_price_basis}|{params}"
     job_key = f"vnpy:{hashlib.md5(raw.encode()).hexdigest()[:12]}"
     _cleanup_stale_jobs()
     with _jobs_lock:
@@ -575,7 +586,7 @@ async def vnpy_stream(
         else:
             config = VnpyMinuteBacktestConfig(
                 symbols=selected_symbols,
-                strategy_id="opening_volume_portfolio",
+                strategy_id=strategy_id,
                 start=start_date,
                 end=end_date,
                 initial_capital=initial_capital,
@@ -590,6 +601,7 @@ async def vnpy_stream(
                 entry_fill=entry_fill,
                 exit_fill=exit_fill,
                 force_close_at_end=force_close_at_end,
+                signal_price_basis=signal_price_basis,
                 params=strategy_params,
                 is_cancelled=job.cancel_event.is_set,
                 on_progress=lambda current, total, trading_day, equity: job.progress.append({
@@ -667,13 +679,13 @@ async def strategy_cancel(request: Request):
         normalized_sell_ratio = None if sell_ratio in {"", "0"} else float(sell_ratio)
         force_close_at_end = _get("force_close_at_end", "true").lower() == "true"
         raw = (
-            f"vnpy|opening_volume_portfolio|"
+            f"vnpy|{_get('strategy_id', 'opening_volume_portfolio')}|"
             f"{tuple(dict.fromkeys(item.strip().upper() for item in _get('symbols').split(',') if item.strip()))}|"
             f"{_get('start')}|{_get('end')}|{float(_get('initial_capital', '1000000'))}|"
             f"{float(_get('commission_pct', '0.0002'))}|{float(_get('stamp_tax_pct', '0.001'))}|"
             f"{float(_get('slippage_bps', '5'))}|{int(_get('max_positions', '10'))}|"
             f"{_get('position_sizing', 'equal')}|{normalized_buy_ratio}|{normalized_sell_ratio}|"
-            f"{_get('candidate_sort', 'volume_ratio')}|{force_close_at_end}|{_get('params')}"
+            f"{_get('candidate_sort', 'volume_ratio')}|{force_close_at_end}|{_get('signal_price_basis', 'qfq')}|{_get('params')}"
         )
         job_key = f"vnpy:{hashlib.md5(raw.encode()).hexdigest()[:12]}"
     else:

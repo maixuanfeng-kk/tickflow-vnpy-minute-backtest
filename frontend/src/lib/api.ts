@@ -852,7 +852,7 @@ export interface VnpyStrategy {
   description: string
   min_symbols: number
   max_symbols: number
-  parameters: { id: string; label: string; default: number | string | boolean; kind?: string; minimum?: number; maximum?: number }[]
+  parameters: { name: string; label: string; default: number | string | boolean; kind?: string; minimum?: number; maximum?: number }[]
 }
 
 export interface StockPoolStrategy {
