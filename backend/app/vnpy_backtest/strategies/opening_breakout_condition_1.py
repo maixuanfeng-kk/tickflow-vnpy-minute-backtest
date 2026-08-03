@@ -19,10 +19,11 @@ class OpeningBreakoutCondition1Strategy(OpeningBreakoutPoolStrategy):
         context: PortfolioContext,
     ) -> dict[str, object] | None:
         diagnostic = super()._buy_diagnostic(symbol, bar, context)
-        if not diagnostic or diagnostic.get("primary_reason") != "previous_bearish_breakout":
+        if not diagnostic or "condition_1" not in diagnostic.get("matched_condition_ids", []):
             return None
         return {
-            "matched_conditions": ["previous_bearish_breakout"],
-            "primary_reason": "previous_bearish_breakout",
-            "signal_price": diagnostic["signal_price"],
+            **diagnostic,
+            "matched_conditions": [self._condition_label("condition_1")],
+            "matched_condition_ids": ["condition_1"],
+            "primary_reason": "condition_1",
         }
