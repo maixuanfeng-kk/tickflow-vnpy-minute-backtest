@@ -25,10 +25,11 @@ cd backend
 python -m pytest tests/vnpy_backtest/test_signal_prices.py tests/vnpy_backtest/test_service.py tests/vnpy_backtest/test_portfolio_framework.py tests/vnpy_backtest/test_api.py -q
 
 cd ..\frontend
-pnpm build
+.\node_modules\.bin\tsc.cmd --noEmit --noUnusedLocals false --noUnusedParameters false -p tsconfig.json
+.\node_modules\.bin\vite.cmd build
 ```
 
-后端结果为 `38 passed`，仅有仓储中既存的 Polars `streaming` 弃用警告。前端类型检查与 Vite 生产构建均通过；Vite 仅报告既有的大包体积提示。测试覆盖日线 `pre_close` 保留、因子生成与缺失严格失败、qfq 投影、三条件边界、条件 1 不依赖前前日、策略注册、SSE 任务参数及取消任务键。
+后端结果为 `38 passed`，仅有仓储中既存的 Polars `streaming` 弃用警告。前端类型检查与 Vite 生产构建均通过；Vite 仅报告既有的大包体积提示。此验证环境未安装 `pnpm`；默认 `tsc -b` 还会因未改动的 `frontend/src/pages/StockPools.tsx` 未使用局部变量失败，故验证仅关闭未使用声明检查，保留所有类型检查。测试覆盖日线 `pre_close` 保留、因子生成与缺失严格失败、qfq 投影、三条件边界、条件 1 不依赖前前日、策略注册、SSE 任务参数及取消任务键。
 
 本次从最新远端 `main` 的干净克隆开始，未出现合并冲突；共享接口通过在现有路由与回测页中新增 vn.py 命名空间字段的方式保留原有行为。
 
