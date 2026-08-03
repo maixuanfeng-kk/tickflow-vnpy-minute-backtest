@@ -21,6 +21,7 @@ class DataReadiness:
     daily_trading_days: int = 0
     daily_imported_at: str | None = None
     financial_imported_at: str | None = None
+    daily_dataset: str = "kline_daily_xbx"
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -31,7 +32,7 @@ class DataReadiness:
             "missing": list(self.missing),
             "warnings": list(self.warnings),
             "coverage": {
-                "daily_dataset": "kline_daily_xbx",
+                "daily_dataset": self.daily_dataset,
                 "daily_trading_days_before_as_of": self.daily_trading_days,
                 "market_cap_unit": "CNY",
                 "daily_imported_at": self.daily_imported_at,
@@ -52,14 +53,14 @@ class StockPoolDataAdapter:
             first_of_month = date(year, month_number, 1)
         except ValueError:
             return DataReadiness(month, None, False, ("月份格式必须为 YYYY-MM",), ())
-        daily_path = self.data_dir / "kline_daily_xbx"
+        daily_dataset, daily_path = self._daily_dataset()
         income_path = self.data_dir / "financials" / "income" / "part.parquet"
         if not daily_path.exists() or not any(daily_path.rglob("*.parquet")):
             return DataReadiness(
                 month,
                 None,
                 False,
-                ("缺少专业日K数据 (kline_daily_xbx); 请从 F:\\quant\\data\\value\\stock-trading-data-pro 导入",),
+                ("缺少专业日K数据；请导入 XBX 日K或 F:\\quant\\tushare\\A股日K",),
                 (),
             )
         daily_scan = pl.scan_parquet(str(daily_path / "**" / "*.parquet"))
@@ -67,7 +68,7 @@ class StockPoolDataAdapter:
             daily_columns = set(daily_scan.collect_schema().names())
         except Exception:  # noqa: BLE001
             return DataReadiness(month, None, False, ("无法读取专业日K Parquet 数据",), ())
-        required_daily = {"symbol", "name", "date", "high", "close", "total_mv"}
+        required_daily = {"symbol", "date", "high", "close", "total_mv"}
         if not required_daily.issubset(daily_columns):
             missing_columns = ", ".join(sorted(required_daily - daily_columns))
             return DataReadiness(month, None, False, (f"专业日K缺少字段: {missing_columns}",), ())
@@ -115,17 +116,27 @@ class StockPoolDataAdapter:
                 missing.append("无法读取标准化财务利润表数据")
         return DataReadiness(
             month, as_of_date, not missing, tuple(missing), (), daily_days,
-            self._manifest_value("local_daily_xbx_import.json", "imported_at"),
+            self._manifest_value(
+                "local_daily_xbx_import.json" if daily_dataset == "kline_daily_xbx" else "local_daily_pro_import.json",
+                "imported_at",
+            ),
             self._manifest_value("local_financial_import.json", "imported_at"),
+            daily_dataset,
         )
 
     def load(self, readiness: DataReadiness, symbols: set[str] | None = None) -> StockPoolInput:
         if not readiness.ready or readiness.as_of_date is None:
             raise ValueError("数据尚未就绪")
-        daily_path = self.data_dir / "kline_daily_xbx" / "**" / "*.parquet"
+        _, daily_root = self._daily_dataset()
+        daily_path = daily_root / "**" / "*.parquet"
+        daily_scan = pl.scan_parquet(str(daily_path))
+        columns = set(daily_scan.collect_schema().names())
+        name = pl.col("name").cast(pl.Utf8) if "name" in columns else pl.col("symbol").cast(pl.Utf8)
         daily_scan = (
-            pl.scan_parquet(str(daily_path))
-            .select("symbol", "name", "date", "high", "close", "total_mv")
+            daily_scan
+            .select(
+                pl.col("symbol").cast(pl.Utf8), name.alias("name"), "date", "high", "close", "total_mv",
+            )
             .with_columns(pl.col("date").cast(pl.Date))
             .filter(pl.col("date") <= readiness.as_of_date)
         )
@@ -188,3 +199,12 @@ class StockPoolDataAdapter:
             return json.loads(path.read_text(encoding="utf-8")).get(key)
         except (OSError, json.JSONDecodeError):
             return None
+
+    def _daily_dataset(self) -> tuple[str, Path]:
+        pro = self.data_dir / "kline_daily_pro"
+        if pro.exists() and any(pro.rglob("*.parquet")):
+            return "kline_daily_pro", pro
+        xbx = self.data_dir / "kline_daily_xbx"
+        if xbx.exists() and any(xbx.rglob("*.parquet")):
+            return "kline_daily_xbx", xbx
+        return "kline_daily_pro", pro

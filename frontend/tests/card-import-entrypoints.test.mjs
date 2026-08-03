@@ -4,6 +4,13 @@ import test from 'node:test'
 
 const dataPage = await readFile(new URL('../src/pages/Data.tsx', import.meta.url), 'utf8')
 
+test('daily K settings modal includes the local import entrypoint', () => {
+  assert.match(
+    dataPage,
+    /\{openSettings === 'daily' && \((?:(?!<\/SettingsModal>)[\s\S])*?<DailyProImportPanel \/>/,
+  )
+})
+
 test('minute K settings modal includes the local import entrypoint', () => {
   assert.match(
     dataPage,

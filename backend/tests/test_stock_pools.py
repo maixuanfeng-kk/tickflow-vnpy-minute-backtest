@@ -119,9 +119,56 @@ def test_not_ready_does_not_create_formal_result(tmp_path) -> None:
 
     assert readiness.ready is False
     assert any("日K" in item for item in readiness.missing)
-    assert "kline_daily_xbx" in readiness.missing[0]
-    assert r"F:\quant\data\value\stock-trading-data-pro" in readiness.missing[0]
+    assert "XBX" in readiness.missing[0]
+    assert r"F:\quant\tushare\A股日K" in readiness.missing[0]
     assert not (tmp_path / "pools").exists()
+
+
+def test_adapter_reads_tushare_daily_pro_dataset_for_monthly_pool(tmp_path) -> None:
+    daily_dir = tmp_path / "kline_daily_pro"
+    for trade_date, close in ((date(2026, 4, 30), 10.0), (date(2026, 5, 5), 11.0)):
+        output = daily_dir / f"date={trade_date}" / "part.parquet"
+        output.parent.mkdir(parents=True)
+        pl.DataFrame({
+            "symbol": ["000001.SZ"], "date": [trade_date], "high": [close],
+            "close": [close], "total_mv": [10_000_000_001.0],
+        }).write_parquet(output)
+    income_dir = tmp_path / "financials" / "income"
+    income_dir.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["000001.SZ", "000001.SZ"],
+        "period_end": [date(2025, 3, 31), date(2026, 3, 31)],
+        "announce_date": [date(2025, 4, 25), date(2026, 5, 2)],
+        "revenue": [100.0, 120.0], "net_income": [1.0, 2.0],
+    }).write_parquet(income_dir / "part.parquet")
+
+    adapter = StockPoolDataAdapter(tmp_path)
+    readiness = adapter.readiness("2026-05")
+
+    assert readiness.ready is True
+    assert readiness.as_of_date == date(2026, 4, 30)
+    assert readiness.to_dict()["coverage"]["daily_dataset"] == "kline_daily_pro"
+    assert adapter.load(readiness).daily.to_dicts() == [{
+        "symbol": "000001.SZ", "name": "000001.SZ", "date": date(2026, 4, 30),
+        "high": 10.0, "close": 10.0, "total_mv": 10_000_000_001.0,
+    }]
+
+
+def test_adapter_prefers_tushare_daily_pro_when_both_daily_datasets_exist(tmp_path) -> None:
+    for dataset, close in (("kline_daily_xbx", 10.0), ("kline_daily_pro", 11.0)):
+        output = tmp_path / dataset / "date=2026-04-30" / "part.parquet"
+        output.parent.mkdir(parents=True)
+        frame = {
+            "symbol": ["000001.SZ"], "date": [date(2026, 4, 30)], "high": [close],
+            "close": [close], "total_mv": [10_000_000_001.0],
+        }
+        if dataset == "kline_daily_xbx":
+            frame["name"] = ["XBX"]
+        pl.DataFrame(frame).write_parquet(output)
+
+    dataset, _ = StockPoolDataAdapter(tmp_path)._daily_dataset()
+
+    assert dataset == "kline_daily_pro"
 
 
 def test_save_writes_research_snapshot(tmp_path) -> None:
