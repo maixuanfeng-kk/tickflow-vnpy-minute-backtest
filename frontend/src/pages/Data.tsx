@@ -52,6 +52,7 @@ import { ExtDataStatCard } from '@/components/ext-data/ExtDataStatCard'
 import { CreateExtDialog } from '@/components/ext-data/CreateExtDialog'
 import { EditExtDialog } from '@/components/ext-data/EditExtDialog'
 import { FinancialImportPanel } from '@/components/data/FinancialImportPanel'
+import { DailyProImportPanel } from '@/components/data/DailyProImportPanel'
 import { MinuteImportPanel } from '@/components/data/MinuteImportPanel'
 
 export function Data() {
@@ -994,6 +995,14 @@ export function Data() {
               isRunning={!!activeJobId}
               onStart={(jobId) => { setActiveJobId(jobId); setOpenSettings(null) }}
             />
+          </SettingsModal>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {openSettings === 'daily' && (
+          <SettingsModal title="日 K · 本地导入与同步" onClose={() => setOpenSettings(null)}>
+            <DailyProImportPanel />
           </SettingsModal>
         )}
       </AnimatePresence>

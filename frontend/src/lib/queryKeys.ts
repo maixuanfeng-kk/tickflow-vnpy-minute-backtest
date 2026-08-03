@@ -53,6 +53,7 @@ export const QK = {
 
   // Data / Pipeline
   dataStatus:           ['data-status'] as const,
+  dailyProImportStatus: ['daily-pro-import-status'] as const,
   financialImportStatus: ['financial-import-status'] as const,
   minuteImportStatus:   ['minute-import-status'] as const,
   pipelineJobs:         ['pipeline-jobs'] as const,

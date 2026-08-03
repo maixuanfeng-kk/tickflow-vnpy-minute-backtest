@@ -1758,6 +1758,13 @@ export const api = {
     request<{ active_id: string | null; jobs: PipelineJobSummary[] }>(
       `/api/pipeline/jobs?limit=${limit}`,
     ),
+  dailyProImportStart: (sourceDir: string) =>
+    request<{ job_id: string; reused: boolean }>('/api/data/daily-pro-import', {
+      method: 'POST',
+      body: JSON.stringify({ source_dir: sourceDir }),
+    }),
+  dailyProImportStatus: () =>
+    request<DailyProImportStatus>('/api/data/daily-pro-import/status'),
   financialImportStart: (sourceDir: string) =>
     request<{ job_id: string; reused: boolean }>('/api/data/financial-import', {
       method: 'POST',
@@ -2517,6 +2524,23 @@ export interface PipelineJob {
 }
 
 export type PipelineJobSummary = Omit<PipelineJob, 'log'>
+
+export interface DailyProImportManifest {
+  status: 'preview' | 'running' | 'succeeded' | 'failed'
+  source_label: string
+  files_discovered: number
+  files_imported: number
+  rows_valid: number
+  rows_invalid: number
+  earliest_date: string | null
+  latest_date: string | null
+  failed_files: { file: string; reason: string }[]
+}
+
+export interface DailyProImportStatus {
+  manifest: DailyProImportManifest | null
+  job: PipelineJob | null
+}
 
 export interface FinancialImportManifest {
   status: 'preview' | 'running' | 'succeeded' | 'failed'
