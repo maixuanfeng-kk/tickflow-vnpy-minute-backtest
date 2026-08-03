@@ -25,6 +25,10 @@ async def test_start_daily_pro_import_accepts_tushare_year_directory(tmp_path: P
     _write_tushare_daily_csv(source / "2026" / "000001_SZ.csv")
     store = JobStore(store_dir=tmp_path / "jobs")
     monkeypatch.setattr(daily_pro_import, "job_store", store)
+    async def no_background_import(*_args: object) -> None:
+        return None
+
+    monkeypatch.setattr(daily_pro_import, "_run_import", no_background_import)
     request = SimpleNamespace(
         app=SimpleNamespace(state=SimpleNamespace(repo=SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path / "data"))))
     )
