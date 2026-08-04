@@ -1,1 +1,1 @@
-"""Helper entry points bundled with the TickFlow backend."""
+"""Administrative command-line entry points for TickFlow."""

@@ -110,22 +110,10 @@ class LocalFinancialCsvImporter:
         except Exception as exc:  # noqa: BLE001
             self._record(summary.failed_files, str(path.relative_to(source_dir)), f"CSV 读取失败: {exc}")
             return None
-        is_xbx = {"stock_code", "report_date", "publish_date", "statement_format"}.issubset(raw.columns)
-        is_tushare = {"ts_code", "end_date"}.issubset(raw.columns) and bool({"inc_f_ann_date", "inc_ann_date"} & set(raw.columns))
-        if not (is_xbx or is_tushare):
-            try:
-                raw = pl.read_csv(
-                    path, infer_schema_length=500, null_values=["", "None", "nan"],
-                    truncate_ragged_lines=True, encoding="utf8",
-                )
-            except Exception as exc:  # noqa: BLE001
-                self._record(summary.failed_files, str(path.relative_to(source_dir)), f"CSV 读取失败: {exc}")
-                return None
-            is_tushare = {"ts_code", "end_date"}.issubset(raw.columns) and bool(
-                {"inc_f_ann_date", "inc_ann_date"} & set(raw.columns)
-            )
-        if not (is_xbx or is_tushare):
-            self._record(summary.failed_files, str(path.relative_to(source_dir)), "不是支持的 XBX 或 Tushare 财报格式")
+        required = {"stock_code", "report_date", "publish_date", "statement_format"}
+        missing = required - set(raw.columns)
+        if missing:
+            self._record(summary.failed_files, str(path.relative_to(source_dir)), f"缺少字段: {', '.join(sorted(missing))}")
             return None
         summary.rows_read += raw.height
         summary.files_imported += 1
@@ -142,9 +130,6 @@ class LocalFinancialCsvImporter:
 
     @staticmethod
     def _income_projection(raw: pl.DataFrame) -> pl.DataFrame:
-        if "ts_code" in raw.columns:
-            return LocalFinancialCsvImporter._tushare_income_projection(raw)
-
         def col_or_null(name: str) -> pl.Expr:
             return pl.col(name).cast(pl.Float64, strict=False) if name in raw.columns else pl.lit(None, dtype=pl.Float64)
 
@@ -179,38 +164,6 @@ class LocalFinancialCsvImporter:
             pl.col("source_file").cast(pl.Utf8).alias("source_file"),
         ).filter(
             pl.col("symbol").is_not_null() & pl.col("period_end").is_not_null() & pl.col("announce_date").is_not_null()
-        )
-
-    @staticmethod
-    def _tushare_income_projection(raw: pl.DataFrame) -> pl.DataFrame:
-        def col_or_null(name: str) -> pl.Expr:
-            return pl.col(name).cast(pl.Float64, strict=False) if name in raw.columns else pl.lit(None, dtype=pl.Float64)
-
-        def date_column(name: str) -> pl.Expr:
-            value = pl.col(name).cast(pl.Utf8).str.strip_chars()
-            return pl.coalesce([
-                value.str.strptime(pl.Date, "%Y%m%d", strict=False),
-                value.str.strptime(pl.Date, "%Y-%m-%d", strict=False),
-            ])
-
-        announce_dates = [date_column(name) for name in ("inc_f_ann_date", "inc_ann_date") if name in raw.columns]
-        revenue = col_or_null("inc_revenue")
-        revenue_fallback = col_or_null("inc_total_revenue")
-        return raw.select(
-            pl.col("ts_code").cast(pl.Utf8).str.strip_chars().str.to_uppercase().alias("symbol"),
-            date_column("end_date").alias("period_end"),
-            pl.coalesce(announce_dates).alias("announce_date"),
-            pl.coalesce([revenue, revenue_fallback]).alias("revenue"),
-            pl.when(revenue.is_not_null()).then(pl.lit("inc_revenue"))
-            .when(revenue_fallback.is_not_null()).then(pl.lit("inc_total_revenue"))
-            .otherwise(pl.lit(None, dtype=pl.Utf8)).alias("revenue_source"),
-            pl.coalesce([col_or_null("inc_n_income"), col_or_null("inc_n_income_attr_p")]).alias("net_income"),
-            pl.lit("tushare_income").alias("statement_format"),
-            pl.col("source_file").cast(pl.Utf8).alias("source_file"),
-        ).filter(
-            pl.col("symbol").str.contains(r"^\d{6}\.(SH|SZ|BJ)$")
-            & pl.col("period_end").is_not_null()
-            & pl.col("announce_date").is_not_null()
         )
 
     def _publish(self, stage_root: Path) -> int:

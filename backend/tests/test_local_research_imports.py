@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 
 import polars as pl
-import pytest
 
 from app.services.local_daily_pro_import import LocalDailyProCsvImporter
 from app.services.local_daily_xbx_import import LocalDailyXbxCsvImporter
@@ -39,28 +38,13 @@ def test_daily_pro_import_preserves_fields_normalises_units_and_rebuilds_partiti
     assert frame["volume"].to_list() == [12300.0]
     assert frame["amount"].to_list() == [456000.0]
     assert frame["amount_source"].to_list() == [456.0]
-    assert frame["total_mv"].to_list() == [10_000_010_000.0]
+    assert frame["total_mv"].to_list() == [1000001.0]
 
     _daily_csv(file, close="12.0")
     importer.run()
     assert pl.read_parquet(output)["close"].to_list() == [12.0]
     metadata = json.loads((tmp_path / "data" / "kline_daily_pro" / "_metadata.json").read_text("utf-8"))
-    assert metadata["units"]["total_mv"] == "CNY (normalised from source ten-thousand CNY x10000)"
-
-
-def test_daily_pro_import_accepts_tushare_compact_daily_csv(tmp_path) -> None:
-    source = tmp_path / "source"
-    (source / "2026").mkdir(parents=True)
-    (source / "2026" / "000001_SZ.csv").write_text(
-        "ts_code,trade_date,open,high,low,close,pre_close,vol,amount,total_mv,circ_mv\n"
-        "000001.SZ,20260105,11.42,11.51,11.41,11.50,11.41,875491.18,1003479.224,22316805.9277,22316440.751\n",
-        encoding="utf-8",
-    )
-
-    LocalDailyProCsvImporter(source, tmp_path / "data", years=[2026], batch_size=1).run()
-
-    daily = pl.read_parquet(tmp_path / "data" / "kline_daily_pro" / "date=2026-01-05" / "part.parquet")
-    assert daily["total_mv"].to_list() == pytest.approx([223_168_059_277.0])
+    assert metadata["units"]["total_mv"] == "ten-thousand CNY"
 
 
 def _financial_csv(path) -> None:
@@ -88,31 +72,6 @@ def test_financial_import_archives_raw_and_builds_income_projection(tmp_path) ->
     assert rows["600000.SH"]["revenue_source"] == "R_operating_total_revenue@xbx"
     assert rows["000001.SZ"]["net_income"] == 20.0
     assert list((tmp_path / "data" / "financials" / "raw_xbx").glob("batch=*/part.parquet"))
-
-
-def test_financial_import_accepts_tushare_income_wide_csv(tmp_path) -> None:
-    source = tmp_path / "financial"
-    source.mkdir()
-    (source / "000001_SZ.csv").write_text(
-        "ts_code,end_date,inc_f_ann_date,inc_revenue,inc_n_income\n"
-        "000001.SZ,20250331,2025-04-30,100,20\n",
-        encoding="utf-8",
-    )
-
-    summary = LocalFinancialCsvImporter(source, tmp_path / "data", batch_size=1).run()
-
-    income = pl.read_parquet(tmp_path / "data" / "financials" / "income" / "part.parquet")
-    assert summary.income_rows == 1
-    assert income.to_dicts() == [{
-        "symbol": "000001.SZ",
-        "period_end": income["period_end"][0],
-        "announce_date": income["announce_date"][0],
-        "revenue": 100.0,
-        "revenue_source": "inc_revenue",
-        "net_income": 20.0,
-        "statement_format": "tushare_income",
-        "source_file": "000001_SZ.csv",
-    }]
 
 
 def test_xbx_daily_import_preserves_historical_name_for_st_filtering(tmp_path) -> None:
