@@ -29,10 +29,6 @@ export function StockPools() {
     queryKey: QK.stockPoolRuns(strategyId),
     queryFn: () => api.stockPoolRuns(strategyId),
   })
-  const watchlistPools = useQuery({
-    queryKey: QK.watchlistPools,
-    queryFn: api.watchlistPools,
-  })
   const activeStrategy = strategies.data?.strategies.find(item => item.id === strategyId)
   useEffect(() => {
     if (!activeStrategy) return

@@ -2,7 +2,7 @@ import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Trash2, RefreshCw, Star, X, Search, LayoutGrid, List, Settings2, Plus, Check, Filter, Eye, EyeOff, Minus, ChevronsUp, Clock, RotateCcw, ImagePlus, ArchiveRestore } from 'lucide-react'
+import { Trash2, RefreshCw, Star, X, Search, LayoutGrid, List, Settings2, Plus, Check, Filter, Eye, EyeOff, Minus, ChevronsUp, Clock, RotateCcw, ImagePlus, ArchiveRestore, Download } from 'lucide-react'
 import { api, type KlineRow, type MinuteKlineRow } from '@/lib/api'
 import { toast } from '@/components/Toast'
 import { QK } from '@/lib/queryKeys'
@@ -35,6 +35,7 @@ import {
   saveColumnConfig,
   buildExtColumnsParam,
 } from '@/lib/watchlist-columns'
+import { buildWatchlistCsv, getWatchlistExportFilename } from '@/lib/watchlist-export'
 
 // ===== 板块标识（筛选/卡片用） =====
 // 注: boardTag（创/科/北 标签）已移至共享 @/components/stock-table/primitives
@@ -729,6 +730,27 @@ export function Watchlist() {
     enabled: activePoolKey !== null,
   })
 
+  const activePool = useMemo(
+    () => (pools.data?.pools ?? []).find(pool => pool.pool_key === selectedPoolKey),
+    [pools.data?.pools, selectedPoolKey],
+  )
+  const exportPoolLabel = isAllView ? '全部' : activePool?.label ?? activePool?.month ?? '未分组'
+  const exportWatchlist = useCallback(() => {
+    const entries = list.data?.symbols ?? []
+    if (entries.length === 0) return
+
+    const blob = new Blob([buildWatchlistCsv(entries)], { type: 'text/csv;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = getWatchlistExportFilename(exportPoolLabel)
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    URL.revokeObjectURL(url)
+    toast(`已导出 ${entries.length} 只股票`, 'success')
+  }, [exportPoolLabel, list.data?.symbols])
+
   // enriched 数据 — 传入 ext_columns 参数
   const enriched = useQuery({
     queryKey: QK.watchlistEnriched(extColumnsParam, selectedPoolKey, activeView),
@@ -1083,6 +1105,15 @@ export function Watchlist() {
               title="导入自选"
             >
               <ImagePlus className="h-4 w-4" />
+            </button>
+            <button
+              onClick={exportWatchlist}
+              disabled={(list.data?.symbols.length ?? 0) === 0}
+              className="inline-flex items-center justify-center h-8 w-8 rounded-btn bg-elevated hover:bg-elevated/80 text-secondary hover:text-foreground transition-colors duration-150 ease-smooth disabled:opacity-50"
+              title={`导出${isAllView ? '全部自选股' : '当前股票池'} CSV`}
+              aria-label={`导出${isAllView ? '全部自选股' : '当前股票池'} CSV`}
+            >
+              <Download className="h-4 w-4" />
             </button>
             <div className="w-px h-5 bg-border" />
             {/* 视图 */}
