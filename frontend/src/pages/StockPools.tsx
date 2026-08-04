@@ -17,6 +17,7 @@ export function StockPools() {
   const [strategyId, setStrategyId] = useState('monthly_growth_trend')
   const [result, setResult] = useState<StockPoolResult | null>(null)
   const [params, setParams] = useState<Record<string, number>>({})
+  const [selectedMonthlyPoolKey, setSelectedMonthlyPoolKey] = useState<string | null>(null)
   const strategies = useQuery({
     queryKey: QK.stockPoolStrategies,
     queryFn: api.stockPoolStrategies,
@@ -28,6 +29,15 @@ export function StockPools() {
   const runs = useQuery({
     queryKey: QK.stockPoolRuns(strategyId),
     queryFn: () => api.stockPoolRuns(strategyId),
+  })
+  const monthlyPools = useQuery({
+    queryKey: QK.watchlistPools,
+    queryFn: api.watchlistPools,
+  })
+  const selectedMonthlyPool = useQuery({
+    queryKey: QK.watchlist(selectedMonthlyPoolKey ?? ''),
+    queryFn: () => api.watchlistList(selectedMonthlyPoolKey ?? undefined),
+    enabled: selectedMonthlyPoolKey !== null,
   })
   const activeStrategy = strategies.data?.strategies.find(item => item.id === strategyId)
   useEffect(() => {
@@ -231,6 +241,41 @@ export function StockPools() {
                   <span className="font-mono text-muted">{run.run_id}</span>
                 </div>
               ))}
+            </div>
+          )}
+        </section>
+
+        <section className="rounded-card border border-border bg-surface p-4">
+          <h2 className="text-sm font-medium">月度自选池</h2>
+          {(monthlyPools.data?.pools ?? []).length === 0 ? (
+            <p className="mt-2 text-xs text-secondary">保存筛选结果后，这里会显示对应月份的独立股票池。</p>
+          ) : (
+            <div className="mt-3 grid gap-2 md:grid-cols-2">
+              {(monthlyPools.data?.pools ?? []).map(pool => (
+                <button
+                  key={pool.pool_key}
+                  type="button"
+                  onClick={() => setSelectedMonthlyPoolKey(pool.pool_key)}
+                  className="rounded-btn border border-border/70 bg-elevated/50 px-3 py-2 text-left text-xs transition-colors hover:border-accent/50"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-medium text-foreground">{pool.label ?? pool.month ?? pool.pool_key}</span>
+                    <span className="font-mono text-muted">{pool.member_count} 只</span>
+                  </div>
+                  <div className="mt-1 text-muted">{pool.source === 'stock_pool' ? '策略生成池' : '手工月度池'} · {pool.updated_at ?? '—'}</div>
+                </button>
+              ))}
+            </div>
+          )}
+          {selectedMonthlyPoolKey && (
+            <div className="mt-3 rounded-btn border border-accent/30 bg-accent/[0.04] p-3 text-xs">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-medium text-foreground">{selectedMonthlyPoolKey}</span>
+                <span className="text-muted">{selectedMonthlyPool.data?.symbols.length ?? 0} 只</span>
+              </div>
+              <p className="mt-2 break-all font-mono text-[11px] text-secondary">
+                {(selectedMonthlyPool.data?.symbols ?? []).map(member => member.symbol).join(',') || '加载中或该池为空'}
+              </p>
             </div>
           )}
         </section>
