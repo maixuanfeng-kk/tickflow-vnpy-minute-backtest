@@ -11,21 +11,18 @@ from app.stock_pools.store import StockPoolStore
 from app.services.watchlist_pools import WatchlistPoolStore, normalize_symbol
 
 
-SUPPORTED_SOURCE_POOL_KEYS = frozenset({"month:2026-05", "month:2026-06"})
-
-
 @dataclass
 class StockPoolBuildResult:
     status: str
     strategy_id: str
     month: str
-    source_pool_key: str
-    source_member_count: int
     readiness: dict[str, object]
     warnings: list[str]
     members: list[dict]
+    member_count: int
     code_string: str
     summary: dict[str, object]
+    params: dict[str, object]
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -40,48 +37,28 @@ class StockPoolService:
         self.store = StockPoolStore(repo.store.data_dir)
         self.watchlist_store = WatchlistPoolStore(repo.store.data_dir)
 
-    def readiness(self, month: str, source_pool_key: str | None = None) -> dict[str, object]:
-        if source_pool_key is not None:
-            self._source_symbols(source_pool_key)
+    def readiness(self, month: str) -> dict[str, object]:
         return self.adapter.readiness(month).to_dict()
 
-    def build(
-        self,
-        strategy_id: str,
-        month: str,
-        params: dict[str, object] | None = None,
-        *,
-        source_pool_key: str | None = None,
-    ) -> StockPoolBuildResult:
+    def build(self, strategy_id: str, month: str, params: dict[str, object] | None = None) -> StockPoolBuildResult:
         strategy_spec = get_strategy(strategy_id)
         if strategy_spec is None:
             raise ValueError(f"不支持的股票池策略: {strategy_id}")
-        source_member_count = len(self._source_symbols(source_pool_key)) if source_pool_key is not None else 0
+        resolved_params = strategy_spec.resolve_params(params)
         readiness = self.adapter.readiness(month)
         if not readiness.ready:
-            return StockPoolBuildResult(
-                "not_ready", strategy_id, month, source_pool_key or "full_market", source_member_count, readiness.to_dict(),
-                list(readiness.warnings), [], "", {}
-            )
-        members = strategy_spec.strategy_class(params or {}).build(self.adapter.load(readiness, None))
-        records = self._records(members)
+            return StockPoolBuildResult("not_ready", strategy_id, month, readiness.to_dict(), list(readiness.warnings), [], 0, "", {}, resolved_params)
+        members = strategy_spec.strategy_class(resolved_params).build(self.adapter.load(readiness))
+        records = self._canonical_records(self._records(members))
         return StockPoolBuildResult(
-            "ready", strategy_id, month, source_pool_key or "full_market", source_member_count, readiness.to_dict(),
-            list(readiness.warnings), records,
-            ",".join(row["symbol"] for row in records),
+            "ready", strategy_id, month, readiness.to_dict(), list(readiness.warnings), records,
+            len(records), ",".join(row["symbol"] for row in records),
             {"selected_count": len(records), "condition_1_count": sum(bool(row["condition_1"]) for row in records),
-             "condition_2_count": sum(bool(row["condition_2"]) for row in records)},
+             "condition_2_count": sum(bool(row["condition_2"]) for row in records)}, resolved_params,
         )
 
-    def save(
-        self,
-        strategy_id: str,
-        month: str,
-        params: dict[str, object] | None = None,
-        *,
-        source_pool_key: str | None = None,
-    ) -> dict[str, object]:
-        result = self.build(strategy_id, month, params, source_pool_key=source_pool_key)
+    def save(self, strategy_id: str, month: str, params: dict[str, object] | None = None) -> dict[str, object]:
+        result = self.build(strategy_id, month, params)
         if result.status != "ready":
             raise RuntimeError("数据尚未就绪，不能保存股票池")
         members = pl.DataFrame(result.members)
@@ -89,12 +66,16 @@ class StockPoolService:
             "as_of_date": result.readiness.get("as_of_date"),
             "readiness": result.readiness,
             "data_coverage": result.readiness.get("coverage", {}),
+            "price_basis": {
+                "signals": "qfq",
+                "adjustment_factor_dataset": "adj_factor_tushare",
+                "reference_date": result.readiness.get("as_of_date"),
+            },
             "warnings": result.warnings,
             "summary": result.summary,
+            "member_count": result.member_count,
             "strategy_version": get_strategy(strategy_id).version,
-            "params": params or {},
-            "source_pool_key": result.source_pool_key,
-            "source_member_count": result.source_member_count,
+            "params": result.params,
         }
         saved = self.store.save(strategy_id=strategy_id, month=month, members=members, manifest=manifest)
         generated_pool = self.watchlist_store.replace_generated(
@@ -126,8 +107,6 @@ class StockPoolService:
                 "as_of_date": item.get("as_of_date"),
                 "member_count": item.get("summary", {}).get("selected_count", 0),
                 "saved_at": item.get("saved_at"),
-                "source_pool_key": item.get("source_pool_key"),
-                "source_member_count": item.get("source_member_count"),
                 "warnings": item.get("warnings", []),
             }
             for item in runs
@@ -138,19 +117,19 @@ class StockPoolService:
         if loaded is None:
             return None
         manifest, members = loaded
-        records = self._records(members)
+        records = self._canonical_records(self._records(members))
         return {
             "status": "ready",
             "run_id": manifest.get("run_id"),
             "saved_at": manifest.get("saved_at"),
             "strategy_id": manifest.get("strategy_id"),
             "month": manifest.get("month"),
-            "source_pool_key": manifest.get("source_pool_key"),
-            "source_member_count": manifest.get("source_member_count"),
             "as_of_date": manifest.get("as_of_date"),
             "readiness": manifest.get("readiness", {}),
             "warnings": manifest.get("warnings", []),
             "summary": manifest.get("summary", {}),
+            "member_count": len(records),
+            "params": manifest.get("params", {}),
             "members": records,
             "code_string": ",".join(row["symbol"] for row in records),
         }
@@ -162,13 +141,15 @@ class StockPoolService:
             records.append({key: value.isoformat() if hasattr(value, "isoformat") else value for key, value in row.items()})
         return records
 
-    def _source_symbols(self, source_pool_key: str) -> set[str]:
-        if source_pool_key not in SUPPORTED_SOURCE_POOL_KEYS:
-            raise ValueError("仅支持使用 2026-05 或 2026-06 的手工自选模板")
-        pool = self.watchlist_store.get_pool(source_pool_key)
-        if pool is None or pool.get("source") != "manual":
-            raise ValueError("选定的自选模板不存在或不是手工模板")
-        return {
-            normalize_symbol(str(row.get("symbol", "")))
-            for row in self.watchlist_store.list_members(source_pool_key)
-        } - {""}
+    @staticmethod
+    def _canonical_records(records: list[dict]) -> list[dict]:
+        """Return the final display/save list using one normalized symbol per stock."""
+        canonical: list[dict] = []
+        seen: set[str] = set()
+        for row in records:
+            symbol = normalize_symbol(str(row.get("symbol", "")))
+            if not symbol or symbol in seen:
+                continue
+            seen.add(symbol)
+            canonical.append({**row, "symbol": symbol})
+        return canonical

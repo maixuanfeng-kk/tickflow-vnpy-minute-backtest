@@ -1322,6 +1322,13 @@ class KlineRepository:
         """
         if not symbols:
             return pl.DataFrame()
+        # Local minute imports are date-partitioned.  Prefer the exact
+        # partition for a one-day request so portfolio replay does not depend
+        # on repository initialisation details or scan unrelated parquet data.
+        if asset_type == "stock" and start == end:
+            partition = self._read_minute_partition(symbols, start)
+            if partition is not None:
+                return partition
         try:
             lf = pl.scan_parquet(self._minute_glob_for(asset_type))
             available = set(lf.collect_schema().names())

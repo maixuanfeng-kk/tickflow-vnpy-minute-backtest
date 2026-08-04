@@ -1,10 +1,10 @@
 from datetime import date, datetime, timedelta
+from types import SimpleNamespace
 
 import polars as pl
 import pytest
 
 from app.vnpy_backtest.service import VnpyMinuteBacktestConfig, VnpyMinuteBacktestService
-from app.vnpy_backtest.strategies.registry import list_strategies
 
 
 class _Repo:
@@ -44,72 +44,8 @@ def test_vnpy_service_replays_portfolio_minute_bars() -> None:
 
     assert result["config"]["engine"] == "vnpy"
     assert result["config"]["frequency"] == "1m"
-    assert result["strategy_info"]["id"] == "opening_volume_portfolio"
+    assert result["strategy_info"]["id"] == "opening_breakout_pool"
     assert result["stats"]["symbols_requested"] == 1
-
-
-def test_registry_exposes_local_opening_breakout_variants() -> None:
-    assert [item.id for item in list_strategies()] == [
-        "opening_volume_portfolio",
-        "opening_breakout_condition_1",
-        "opening_breakout_condition_2",
-        "opening_breakout_condition_3",
-    ]
-
-
-def test_vnpy_service_keeps_native_style_execution_options() -> None:
-    result = VnpyMinuteBacktestService(_Repo()).run(
-        VnpyMinuteBacktestConfig(
-            symbols=("600000.SH",),
-            start=date(2026, 1, 5),
-            end=date(2026, 1, 5),
-            max_buy_volume_ratio=1.0,
-            max_sell_volume_ratio=0.5,
-            force_close_at_end=True,
-            candidate_sort="volume_ratio",
-            entry_fill="next_minute_open",
-            exit_fill="next_minute_open",
-            signal_price_basis="raw",
-        )
-    )
-
-    assert result["config"]["max_buy_volume_ratio"] == 1.0
-    assert result["config"]["max_sell_volume_ratio"] == 0.5
-    assert result["config"]["force_close_at_end"] is True
-    assert result["config"]["candidate_sort"] == "volume_ratio"
-
-
-def test_vnpy_service_returns_visible_opening_volume_risk_settings() -> None:
-    result = VnpyMinuteBacktestService(_Repo()).run(
-        VnpyMinuteBacktestConfig(
-            symbols=("600000.SH",),
-            start=date(2026, 1, 5),
-            end=date(2026, 1, 5),
-            params={
-                "stop_loss_pct": 0.02,
-                "take_profit_pct": 0.05,
-                "trailing_stop_pct": 0.03,
-                "trailing_take_profit_activate_pct": 0.08,
-                "trailing_take_profit_drawdown_pct": 0.02,
-                "max_hold_days": 3,
-            },
-            signal_price_basis="raw",
-        )
-    )
-
-    assert result["strategy_info"] == {
-        "id": "opening_volume_portfolio",
-        "name": "开盘突破股票池（vn.py）",
-        "source": "vnpy",
-        "stop_loss": 0.02,
-        "take_profit": 0.05,
-        "trailing_stop": 0.03,
-        "trailing_take_profit_activate": 0.08,
-        "trailing_take_profit_drawdown": 0.02,
-        "max_hold_days": 3,
-        "signal_price_basis": "raw",
-        "adjustment_factor_dataset": None,
-    }
 
 
 def test_vnpy_service_rejects_empty_repository_data() -> None:
@@ -123,7 +59,7 @@ def test_vnpy_service_rejects_empty_repository_data() -> None:
         def get_instruments(self):
             return pl.DataFrame()
 
-    with pytest.raises(ValueError, match="标准数据源.*可用日期范围"):
+    with pytest.raises(ValueError, match="没有本地分钟 K"):
         VnpyMinuteBacktestService(EmptyRepo()).run(
             VnpyMinuteBacktestConfig(
                 symbols=("600000.SH",),
@@ -132,3 +68,44 @@ def test_vnpy_service_rejects_empty_repository_data() -> None:
                 signal_price_basis="raw",
             )
         )
+
+
+def test_instrument_absolute_limit_prices_are_not_used_as_historical_percentages() -> None:
+    class MetadataRepo:
+        def get_instruments(self):
+            return pl.DataFrame({
+                "symbol": ["002938.SZ"],
+                "name": ["鹏鼎控股"],
+                "tick_size": [0.01],
+                "limit_up": [92.36],
+                "limit_down": [75.56],
+            })
+
+    names, tick_sizes = VnpyMinuteBacktestService(MetadataRepo())._instrument_metadata(
+        ("002938.SZ",),
+    )
+    assert names == {"002938.SZ": "鹏鼎控股"}
+    assert tick_sizes == {"002938.SZ": 0.01}
+
+
+def test_daily_limit_metadata_uses_historical_raw_pre_close(tmp_path) -> None:
+    part = tmp_path / "kline_daily_xbx" / "date=2026-05-22"
+    part.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["002938.SZ"],
+        "date": [date(2026, 5, 22)],
+        "pre_close": [94.48],
+        "name": ["鹏鼎控股"],
+    }).write_parquet(part / "part.parquet")
+    repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
+
+    metadata = VnpyMinuteBacktestService(repo)._daily_limit_metadata(
+        ("002938.SZ",),
+        date(2026, 5, 22),
+        date(2026, 5, 22),
+    )
+    assert metadata == {
+        date(2026, 5, 22): {
+            "002938.SZ": {"pre_close": 94.48, "price_limit_pct": 0.10},
+        },
+    }

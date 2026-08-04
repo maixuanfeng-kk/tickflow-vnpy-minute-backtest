@@ -514,13 +514,14 @@ async def vnpy_stream(
     symbols: str,
     start: str,
     end: str,
-    strategy_id: str = "opening_volume_portfolio",
+    strategy_id: str = "opening_breakout_pool",
     initial_capital: float = 1_000_000.0,
     commission_pct: float = 0.0002,
     stamp_tax_pct: float = 0.001,
     slippage_bps: float = 5.0,
     max_positions: int = 10,
     position_sizing: str = "equal",
+    volume_limit_enabled: bool = True,
     max_buy_volume_ratio: float | None = 1.0,
     max_sell_volume_ratio: float | None = 1.0,
     candidate_sort: str = "volume_ratio",
@@ -557,6 +558,14 @@ async def vnpy_stream(
             raise HTTPException(status_code=400, detail=f"{label} must be non-negative")
     max_buy_volume_ratio = None if max_buy_volume_ratio == 0 else max_buy_volume_ratio
     max_sell_volume_ratio = None if max_sell_volume_ratio == 0 else max_sell_volume_ratio
+    # The local portfolio engine has one symmetric participation limit.  Keep
+    # the older split-ratio query arguments readable, but prefer the explicit
+    # local UI switch and its 10% default.
+    if not volume_limit_enabled:
+        max_volume_ratio = None
+    else:
+        explicit_ratios = [ratio for ratio in (max_buy_volume_ratio, max_sell_volume_ratio) if ratio not in (None, 1.0)]
+        max_volume_ratio = min(explicit_ratios) if explicit_ratios else 0.10
     if position_sizing not in {"equal", "score_weight"}:
         raise HTTPException(status_code=400, detail="position_sizing must be equal or score_weight")
     if candidate_sort not in {"score", "volume_ratio", "watchlist_order"}:
@@ -566,7 +575,7 @@ async def vnpy_stream(
     if signal_price_basis not in {"qfq", "raw"}:
         raise HTTPException(status_code=400, detail="signal_price_basis must be qfq or raw")
 
-    raw = f"vnpy|{strategy_id}|{selected_symbols}|{start}|{end}|{initial_capital}|{commission_pct}|{stamp_tax_pct}|{slippage_bps}|{max_positions}|{position_sizing}|{max_buy_volume_ratio}|{max_sell_volume_ratio}|{candidate_sort}|{force_close_at_end}|{signal_price_basis}|{params}"
+    raw = f"vnpy|{strategy_id}|{selected_symbols}|{start}|{end}|{initial_capital}|{commission_pct}|{stamp_tax_pct}|{slippage_bps}|{max_positions}|{position_sizing}|{max_volume_ratio}|{candidate_sort}|{force_close_at_end}|{signal_price_basis}|{params}"
     job_key = f"vnpy:{hashlib.md5(raw.encode()).hexdigest()[:12]}"
     _cleanup_stale_jobs()
     with _jobs_lock:
@@ -595,12 +604,7 @@ async def vnpy_stream(
                 slippage_bps=slippage_bps,
                 max_positions=max_positions,
                 position_sizing=position_sizing,
-                max_buy_volume_ratio=max_buy_volume_ratio,
-                max_sell_volume_ratio=max_sell_volume_ratio,
-                candidate_sort=candidate_sort,
-                entry_fill=entry_fill,
-                exit_fill=exit_fill,
-                force_close_at_end=force_close_at_end,
+                max_volume_ratio=max_volume_ratio,
                 signal_price_basis=signal_price_basis,
                 params=strategy_params,
                 is_cancelled=job.cancel_event.is_set,

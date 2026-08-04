@@ -51,11 +51,14 @@ class StrategySpec:
 class DailyReference:
     previous_open: float | None = None
     previous_close: float | None = None
-    # Execution rules, such as price limits, must use the unadjusted close.
-    raw_previous_close: float | None = None
     previous_high: float | None = None
     previous_low: float | None = None
     previous_volume: float | None = None
+    raw_previous_close: float | None = None
+    # Execution-only raw price inputs. Signal fields above may be projected
+    # to qfq and must not be reused to calculate exchange price limits.
+    limit_reference_price: float | None = None
+    price_limit_pct: float | None = None
     closes: tuple[float, ...] = ()
     # Cumulative volume at each minute of the previous completed trading day.
     previous_cumulative_volumes: Mapping[time, float] = field(default_factory=dict)
@@ -67,8 +70,6 @@ class PortfolioPositionView:
     volume: int
     average_cost: float
     entry_date: date | None
-    high_water_price: float | None = None
-    entry_trading_day_index: int | None = None
 
 
 @dataclass(frozen=True)
@@ -78,8 +79,6 @@ class PortfolioContext:
     reserved_cash: float
     positions: Mapping[str, PortfolioPositionView]
     daily_references: Mapping[str, DailyReference]
-    instrument_names: Mapping[str, str] = field(default_factory=dict)
-    trading_day_index: int = 0
 
     @property
     def available_cash(self) -> float:

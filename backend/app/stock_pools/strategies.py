@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import date
+import re
 
 import polars as pl
 
@@ -17,11 +18,20 @@ class MonthlyGrowthTrendStrategy:
         self.ma_days = int(params.get("ma_days", 5))
         self.high_window = int(params.get("high_window", 200))
         self.high_days = int(params.get("high_days", 20))
+        self.listing_days_min = int(params.get("listing_days_min", 250))
         self.market_cap_min = float(params.get("market_cap_min", 10_000_000_000))
+        self.ma60_basis = "static_as_of"
+        self.high_200_basis = "static_as_of_touch"
 
     def build(self, data: StockPoolInput) -> pl.DataFrame:
         financials = self._latest_financials(data.financials, data.as_of_date)
         financial_by_symbol = {row["symbol"]: row for row in financials.to_dicts()}
+        listing_by_symbol = {
+            row["symbol"]: row["listing_date"]
+            for row in data.instruments.to_dicts()
+            if row.get("listing_date") is not None
+        }
+        market_dates = sorted(set(data.daily["date"].to_list()))
         rows: list[dict[str, object]] = []
         for symbol_frame in data.daily.partition_by("symbol", maintain_order=False):
             if symbol_frame.height < self.high_window:
@@ -33,25 +43,30 @@ class MonthlyGrowthTrendStrategy:
             if ordered["date"][-1] != data.as_of_date:
                 continue
             stock_name = ordered["name"][-1]
+            is_st = bool(ordered["is_st"][-1]) if "is_st" in ordered.columns else self._is_st_name(stock_name)
+            if is_st:
+                continue
+            listing_date = listing_by_symbol.get(symbol)
+            listing_trading_days = sum(day >= listing_date for day in market_dates) if listing_date else 0
+            if listing_trading_days < self.listing_days_min:
+                continue
             closes = [float(value) for value in ordered["close"].to_list()]
             highs = [float(value) for value in ordered["high"].to_list()]
             market_cap = ordered["total_mv"][-1]
             latest = financial_by_symbol.get(symbol)
             if latest is None or market_cap is None:
                 continue
-            trailing_ma = [sum(closes[index - self.ma_window + 1:index + 1]) / self.ma_window
-                           for index in range(self.ma_window - 1, len(closes))]
             recent_close = closes[-self.ma_days:]
-            recent_ma = trailing_ma[-self.ma_days:]
-            above_ma = len(recent_ma) == self.ma_days and all(price > ma for price, ma in zip(recent_close, recent_ma))
-            # A breakout must be strictly above the *previous* 200 sessions.
-            # The current bar is deliberately excluded from the reference window:
-            # equality with an old high is a retest, not a new high.
-            prior_highs = [max(highs[index - self.high_window:index])
-                           for index in range(self.high_window, len(highs))]
-            trigger_indices = [index for index, prior_high in zip(range(self.high_window, len(highs)), prior_highs)
-                               if highs[index] > prior_high]
-            recent_trigger_indices = [index for index in trigger_indices if index >= len(highs) - self.high_days]
+            static_ma = sum(closes[-self.ma_window:]) / self.ma_window
+            static_above_ma = len(recent_close) == self.ma_days and all(price > static_ma for price in recent_close)
+            above_ma = static_above_ma
+
+            # Static mode: compare the most recent 20 sessions with the single
+            # 200-session high known at the monthly as-of date. A touch counts.
+            static_high_200 = max(highs[-self.high_window:])
+            static_trigger_indices = [index for index in range(len(highs) - self.high_days, len(highs))
+                                      if highs[index] >= static_high_200]
+            recent_trigger_indices = static_trigger_indices
             revenue_yoy = latest.get("revenue_yoy")
             net_profit = latest.get("net_profit")
             market_cap_passed = float(market_cap) > self.market_cap_min
@@ -60,6 +75,8 @@ class MonthlyGrowthTrendStrategy:
             if not (condition_1 or condition_2):
                 continue
             trigger_date = ordered["date"][recent_trigger_indices[-1]].isoformat() if recent_trigger_indices else None
+            trigger_price = highs[recent_trigger_indices[-1]] if recent_trigger_indices else None
+            high_200_reference = static_high_200 if recent_trigger_indices else None
             rows.append({
                 "symbol": symbol,
                 "pool_month": data.month,
@@ -67,25 +84,33 @@ class MonthlyGrowthTrendStrategy:
                 "condition_1": condition_1,
                 "condition_2": condition_2,
                 "stock_name": stock_name,
+                "is_st": is_st,
                 "market_cap": float(market_cap),
                 "market_cap_passed": market_cap_passed,
+                "listing_date": listing_date,
+                "listing_trading_days": listing_trading_days,
                 "revenue_yoy": float(revenue_yoy) if revenue_yoy is not None else None,
                 "net_profit": float(net_profit) if net_profit is not None else None,
-                "ma60": round(recent_ma[-1], 6) if recent_ma else None,
+                "ma60_basis": self.ma60_basis,
+                "high_200_basis": self.high_200_basis,
+                "ma60": round(static_ma, 6),
                 "close": round(closes[-1], 6),
-                "high_200": round(prior_highs[-1], 6) if prior_highs else None,
+                "high_200": round(high_200_reference, 6) if high_200_reference is not None else None,
                 "high_200_trigger_date": trigger_date,
+                "high_200_trigger_price": round(trigger_price, 6) if trigger_price is not None else None,
                 "financial_report_date": latest.get("report_date"),
                 "financial_publish_date": latest.get("publish_date"),
             })
         schema = {
             "symbol": pl.Utf8, "pool_month": pl.Utf8, "as_of_date": pl.Date,
             "condition_1": pl.Boolean, "condition_2": pl.Boolean,
-            "stock_name": pl.Utf8,
+            "stock_name": pl.Utf8, "is_st": pl.Boolean,
             "market_cap": pl.Float64, "market_cap_passed": pl.Boolean,
+            "listing_date": pl.Date, "listing_trading_days": pl.Int64,
             "revenue_yoy": pl.Float64, "net_profit": pl.Float64,
+            "ma60_basis": pl.Utf8, "high_200_basis": pl.Utf8,
             "ma60": pl.Float64, "close": pl.Float64, "high_200": pl.Float64,
-            "high_200_trigger_date": pl.Utf8, "financial_report_date": pl.Date,
+            "high_200_trigger_date": pl.Utf8, "high_200_trigger_price": pl.Float64, "financial_report_date": pl.Date,
             "financial_publish_date": pl.Date,
         }
         return pl.DataFrame(rows, schema=schema).sort("symbol")
@@ -98,3 +123,10 @@ class MonthlyGrowthTrendStrategy:
         if eligible.is_empty():
             return eligible
         return eligible.sort(["symbol", "report_date", "publish_date"]).group_by("symbol", maintain_order=True).tail(1)
+
+    @staticmethod
+    def _is_st_name(name: object) -> bool:
+        if name is None:
+            return False
+        normalized = str(name).strip().upper().replace(" ", "")
+        return bool(re.match(r"^(?:\*ST|ST|S\*ST|SST)", normalized))

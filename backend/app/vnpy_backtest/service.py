@@ -13,6 +13,7 @@ import polars as pl
 from vnpy.trader.constant import Direction
 
 from app.vnpy_backtest.local_data import bars_from_minute_frame
+from app.vnpy_backtest.market_rules import rule_for_symbol
 from app.vnpy_backtest.portfolio import DailyContextBuilder, MultiSymbolNextBarOpenEngine
 from app.vnpy_backtest.signal_prices import MinuteSignalPriceProjector
 from app.vnpy_backtest.strategies.base import StrategySpec
@@ -24,21 +25,15 @@ class VnpyMinuteBacktestConfig:
     start: date
     end: date
     symbols: tuple[str, ...] = ()
-    strategy_id: str = "opening_volume_portfolio"
+    strategy_id: str = "opening_breakout_pool"
     initial_capital: float = 100_000.0
     commission_pct: float = 0.0002
     stamp_tax_pct: float = 0.001
     slippage_bps: float = 5.0
     lot_size: int = 100
-    max_volume_ratio: float | None = None
-    max_buy_volume_ratio: float | None = 1.0
-    max_sell_volume_ratio: float | None = 1.0
+    max_volume_ratio: float | None = 0.10
     max_positions: int = 10
     position_sizing: str = "equal"
-    candidate_sort: str = "volume_ratio"
-    entry_fill: str = "next_minute_open"
-    exit_fill: str = "next_minute_open"
-    force_close_at_end: bool = True
     signal_price_basis: str = "qfq"
     params: dict[str, Any] = field(default_factory=dict)
     is_cancelled: Callable[[], bool] | None = None
@@ -71,14 +66,9 @@ class VnpyMinuteBacktestService:
             **config.params,
             "initial_cash": config.initial_capital,
             "default_lot_size": config.lot_size,
-            "max_buy_volume_ratio": config.max_buy_volume_ratio,
-            "max_sell_volume_ratio": config.max_sell_volume_ratio,
+            "max_volume_ratio": config.max_volume_ratio,
             "max_positions": config.max_positions,
             "position_sizing": config.position_sizing,
-            "candidate_sort": config.candidate_sort,
-            "entry_fill": config.entry_fill,
-            "exit_fill": config.exit_fill,
-            "force_close_at_end": config.force_close_at_end,
             "signal_price_basis": config.signal_price_basis,
             "commission_rate": config.commission_pct,
             "stamp_tax_rate": config.stamp_tax_pct,
@@ -86,7 +76,7 @@ class VnpyMinuteBacktestService:
         }
 
     def _run_portfolio(self, config: VnpyMinuteBacktestConfig, spec: StrategySpec, symbols: tuple[str, ...]) -> dict:
-        instrument_names, instrument_limit_pcts = self._instrument_metadata(symbols)
+        instrument_names, instrument_tick_sizes = self._instrument_metadata(symbols)
         engine = MultiSymbolNextBarOpenEngine(
             initial_cash=config.initial_capital,
             commission_rate=config.commission_pct,
@@ -94,24 +84,13 @@ class VnpyMinuteBacktestService:
             slippage_rate=config.slippage_bps / 10_000,
             min_commission=float(config.params.get("min_commission", 5.0)),
             max_volume_ratio=config.max_volume_ratio,
-            max_buy_volume_ratio=config.max_buy_volume_ratio,
-            max_sell_volume_ratio=config.max_sell_volume_ratio,
             max_positions=config.max_positions,
             position_sizing=config.position_sizing,
             reserve_ratio=float(config.params.get("cash_reserve_ratio", 0.03)),
-            candidate_sort=config.candidate_sort,
-            score_weights=config.params.get("scoring", {}),
-            score_min=config.params.get("score_min"),
-            score_max=config.params.get("score_max"),
-            watchlist_order=list(symbols),
             instrument_names=instrument_names,
-            instrument_limit_pcts=instrument_limit_pcts,
+            instrument_tick_sizes=instrument_tick_sizes,
         )
         strategy = spec.strategy_class(dict(config.params))
-        days_seen = 0
-        # Build completed-day context before the requested window as well.  The
-        # opening-breakout strategy needs yesterday's same-minute cumulative
-        # volume and four prior daily closes on the first requested trade day.
         warmup_start = config.start - timedelta(days=20)
         if config.signal_price_basis == "raw":
             signal_projector = MinuteSignalPriceProjector("raw", {}, {})
@@ -119,47 +98,60 @@ class VnpyMinuteBacktestService:
             signal_projector = MinuteSignalPriceProjector.load(
                 self.repo.store.data_dir,
                 list(symbols),
+                warmup_start,
                 config.end,
                 config.signal_price_basis,
+                factor_dataset="adj_factor_tushare",
             )
         daily_context = DailyContextBuilder(signal_projector)
+        daily_limit_metadata = self._daily_limit_metadata(symbols, config.start, config.end)
+        days_seen = 0
+        # Partitions exist for every market trading day, even when none of the
+        # selected securities traded.  Keep that calendar separate from the
+        # iterator below, which intentionally omits empty selected-symbol
+        # frames.  This lets the result distinguish a temporary suspension
+        # from a market closure.
         try:
-            trading_days = self.repo.minute_trading_days(config.start, config.end)
-            total_days = len(trading_days)
+            market_days = self._tushare_minute_trading_days(warmup_start, config.end)
         except AttributeError:
-            trading_days = []
+            market_days = []
+        active_symbols_by_day: dict[date, set[str]] = defaultdict(set)
+        # Build completed-day context before the requested window as well.  The
+        # opening-breakout strategy needs yesterday's same-minute cumulative
+        # volume and four prior daily closes on the first requested trade day.
+        try:
+            total_days = len(self._tushare_minute_trading_days(config.start, config.end))
+        except AttributeError:
             total_days = max((config.end - config.start).days + 1, 1)
-        final_trading_day = trading_days[-1] if trading_days else config.end
-        final_bars_by_symbol = None
-        final_references = None
-        for trading_day, frame in self.repo.iter_minute_days(list(symbols), warmup_start, config.end):
+        for trading_day, frame in self._iter_tushare_minute_days(list(symbols), warmup_start, config.end):
             if config.is_cancelled and config.is_cancelled():
                 raise RuntimeError("回测已取消")
-            bars_by_symbol = self._bars_by_symbol(frame, symbols)
+            bars_by_symbol = self._active_bars_by_symbol(self._bars_by_symbol(frame, symbols))
             if not bars_by_symbol:
                 continue
+            active_symbols_by_day[trading_day] = set(bars_by_symbol)
             if trading_day < config.start:
                 daily_context.add_day(bars_by_symbol)
                 continue
-            references = daily_context.references(trading_day, symbols=bars_by_symbol)
+            # Do not create a reference (and therefore do not request a qfq
+            # factor) for a suspended security. Some local vendors represent a
+            # suspension with a full day of zero-volume minute bars.
             engine.run_day(
                 bars_by_symbol,
                 strategy,
-                references,
-                allow_entries=not (config.force_close_at_end and trading_day == final_trading_day),
+                daily_context.references(
+                    trading_day,
+                    symbols=bars_by_symbol,
+                    execution_metadata=daily_limit_metadata.get(trading_day, {}),
+                ),
             )
-            if trading_day == final_trading_day:
-                final_bars_by_symbol = bars_by_symbol
-                final_references = references
             daily_context.add_day(bars_by_symbol)
             days_seen += 1
             if config.on_progress:
                 current_equity = engine.equity_curve[-1]["value"] if engine.equity_curve else config.initial_capital
                 config.on_progress(days_seen, max(total_days, 1), trading_day, current_equity)
         if days_seen == 0:
-            raise ValueError(self._no_minute_data_message())
-        if config.force_close_at_end and final_bars_by_symbol is not None:
-            engine.force_close_at_end(final_bars_by_symbol, final_references or {})
+            raise ValueError("所选日期范围内没有本地分钟 K 数据")
         result = engine.result()
         end_balance = result.equity_curve[-1]["value"] if result.equity_curve else config.initial_capital
         timeline = self._timeline_indexes(result.equity_curve)
@@ -177,6 +169,13 @@ class VnpyMinuteBacktestService:
         daily_ledger = self._daily_ledger(
             result.fills, completed_trades, result.equity_curve, instrument_names, config.initial_capital,
         )
+        suspensions = self._suspension_periods(
+            symbols, market_days, active_symbols_by_day, config.start, config.end,
+        )
+        warnings = [
+            *self._suspension_warnings(suspensions),
+            *self._corporate_action_warnings(result.fills, signal_projector, config.end),
+        ]
         return {
             "run_id": uuid4().hex,
             "config": self._result_config(config, spec, list(symbols), self._settings(config)),
@@ -198,20 +197,84 @@ class VnpyMinuteBacktestService:
             "positions": positions,
             "signal_diagnostics": [self._portfolio_signal_to_dict(signal, instrument_names) for signal in result.signals],
             "rejections": [item.__dict__ for item in result.rejections],
-            "strategy_info": {
-                "id": spec.id,
-                "name": spec.name,
-                "source": "vnpy",
-                "stop_loss": config.params.get("stop_loss_pct"),
-                "take_profit": config.params.get("take_profit_pct"),
-                "trailing_stop": config.params.get("trailing_stop_pct"),
-                "trailing_take_profit_activate": config.params.get("trailing_take_profit_activate_pct"),
-                "trailing_take_profit_drawdown": config.params.get("trailing_take_profit_drawdown_pct"),
-                "max_hold_days": config.params.get("max_hold_days"),
-                "signal_price_basis": config.signal_price_basis,
-                "adjustment_factor_dataset": "adj_factor" if config.signal_price_basis == "qfq" else None,
-            },
+            "suspensions": suspensions,
+            "warnings": warnings,
+            "strategy_info": {"id": spec.id, "name": spec.name, "source": "vnpy", "signal_price_basis": config.signal_price_basis,
+                              "adjustment_factor_dataset": "adj_factor_tushare" if config.signal_price_basis == "qfq" else None},
         }
+
+    @staticmethod
+    def _suspension_periods(
+        symbols: tuple[str, ...],
+        market_days: list[date],
+        active_symbols_by_day: dict[date, set[str]],
+        start: date,
+        end: date,
+    ) -> list[dict[str, object]]:
+        """Identify no-bar intervals bounded by actual trading for one symbol.
+
+        The local store has no separate exchange suspension feed.  Therefore
+        we call an interval a suspension only when the market was open and the
+        security has minute bars both before and after it.  This is the safest
+        classification available from local data; unbounded missing history is
+        not silently labelled as a suspension.
+        """
+        days = sorted(day for day in market_days if day <= end)
+        output: list[dict[str, object]] = []
+        for symbol in symbols:
+            active_indexes = [index for index, day in enumerate(days) if symbol in active_symbols_by_day.get(day, set())]
+            if len(active_indexes) < 2:
+                continue
+            first, last = active_indexes[0], active_indexes[-1]
+            missing = [
+                index for index in range(first + 1, last)
+                if start <= days[index] <= end and symbol not in active_symbols_by_day.get(days[index], set())
+            ]
+            if not missing:
+                continue
+            group: list[int] = []
+            for index in [*missing, None]:
+                if index is not None and (not group or index == group[-1] + 1):
+                    group.append(index)
+                    continue
+                output.append({
+                    "symbol": symbol,
+                    "status": "suspended",
+                    "start_date": days[group[0]].isoformat(),
+                    "end_date": days[group[-1]].isoformat(),
+                    "trading_days": len(group),
+                })
+                group = []
+                if index is not None:
+                    group.append(index)
+        return output
+
+    @staticmethod
+    def _suspension_warnings(suspensions: list[dict[str, object]]) -> list[str]:
+        return [
+            f"{item['symbol']} 于 {item['start_date']} 至 {item['end_date']} 无分钟行情，按停牌处理（{item['trading_days']} 个交易日）。"
+            for item in suspensions
+        ]
+
+    @staticmethod
+    def _corporate_action_warnings(fills, projector: MinuteSignalPriceProjector, end: date) -> list[str]:
+        """Factors identify price events, but cannot reconstruct cash/stock actions."""
+        if projector.basis != "qfq":
+            return []
+        open_days: dict[str, date] = {}
+        warnings: set[str] = set()
+        for fill in sorted(fills, key=lambda item: item.datetime):
+            day = fill.datetime.date()
+            if fill.direction == Direction.LONG:
+                open_days.setdefault(fill.symbol, day)
+            elif fill.symbol in open_days:
+                if projector.has_event_while_held(fill.symbol, open_days[fill.symbol], day):
+                    warnings.add("部分持仓跨越除权日：信号已前复权，账户未处理现金分红、送配或配股。")
+                open_days.pop(fill.symbol, None)
+        for symbol, entry_day in open_days.items():
+            if projector.has_event_while_held(symbol, entry_day, end):
+                warnings.add("部分持仓跨越除权日：信号已前复权，账户未处理现金分红、送配或配股。")
+        return sorted(warnings)
 
     def _bars_by_symbol(self, frame: pl.DataFrame, symbols: tuple[str, ...]) -> dict[str, list]:
         wanted = set(symbols)
@@ -224,53 +287,144 @@ class VnpyMinuteBacktestService:
                 result[symbol] = bars_from_minute_frame(symbol, sub)
         return result
 
-    def _no_minute_data_message(self) -> str:
-        earliest = latest = None
-        try:
-            earliest = self.repo.earliest_minute_date()
-            latest = self.repo.latest_minute_date_global()
-        except AttributeError:
-            pass
-        available = f"{earliest} 至 {latest}" if earliest and latest else "未检测到可用分区"
-        return (
-            "所选日期范围内没有本地分钟 K 数据。"
-            "标准数据源：kline_minute/date=YYYY-MM-DD/part.parquet；"
-            f"可用日期范围：{available}。"
-        )
+    @staticmethod
+    def _active_bars_by_symbol(bars_by_symbol: dict[str, list]) -> dict[str, list]:
+        """Exclude all-zero-volume minute series used by vendors for suspensions."""
+        return {
+            symbol: bars
+            for symbol, bars in bars_by_symbol.items()
+            if any(float(bar.volume) > 0 for bar in bars)
+        }
+
+    def _tushare_minute_trading_days(self, start: date, end: date) -> list[date]:
+        if end < start:
+            return []
+        store = getattr(self.repo, "store", None)
+        if store is None:
+            return self.repo.minute_trading_days(start, end)
+        root = store.data_dir / "kline_minute_tushare"
+        if not root.exists():
+            return self.repo.minute_trading_days(start, end)
+        days: list[date] = []
+        for directory in root.glob("date=*") if root.exists() else []:
+            if not directory.is_dir() or not (directory / "part.parquet").exists():
+                continue
+            try:
+                value = date.fromisoformat(directory.name.removeprefix("date="))
+            except ValueError:
+                continue
+            if start <= value <= end:
+                days.append(value)
+        return sorted(days)
+
+    def _iter_tushare_minute_days(self, symbols: list[str], start: date, end: date):
+        store = getattr(self.repo, "store", None)
+        if store is None:
+            yield from self.repo.iter_minute_days(symbols, start, end)
+            return
+        root = store.data_dir / "kline_minute_tushare"
+        if not root.exists():
+            yield from self.repo.iter_minute_days(symbols, start, end)
+            return
+        for trading_day in self._tushare_minute_trading_days(start, end):
+            part = root / f"date={trading_day.isoformat()}" / "part.parquet"
+            frame = (
+                pl.scan_parquet(str(part))
+                .filter(pl.col("symbol").is_in(symbols))
+                .select("symbol", "datetime", "open", "high", "low", "close", "volume", "amount")
+                .sort(["symbol", "datetime"])
+                .collect()
+            )
+            if not frame.is_empty():
+                yield trading_day, frame
 
     def _instrument_metadata(self, symbols: tuple[str, ...]) -> tuple[dict[str, str], dict[str, float]]:
         """Read optional security metadata without ever falling back to an online source."""
         try:
             df = self.repo.get_instruments().filter(pl.col("symbol").is_in(symbols))
             names: dict[str, str] = {}
-            limit_pcts: dict[str, float] = {}
+            tick_sizes: dict[str, float] = {}
             for row in df.to_dicts():
                 symbol = row["symbol"]
                 names[symbol] = row.get("name") or ""
-                raw_limit = row.get("limit_up")
-                if raw_limit is None:
+                raw_tick = row.get("tick_size")
+                if raw_tick is None:
                     continue
                 try:
-                    limit_pct = float(raw_limit)
+                    tick_size = float(raw_tick)
                 except (TypeError, ValueError):
                     continue
-                # TickFlow's security table documents this as a percentage.  Accept
-                # both 10 and 0.10 so older local tables work too.
-                if limit_pct > 1:
-                    limit_pct /= 100
-                if 0 < limit_pct <= 1:
-                    limit_pcts[symbol] = limit_pct
-            return names, limit_pcts
+                if tick_size > 0:
+                    tick_sizes[symbol] = tick_size
+            return names, tick_sizes
         except Exception:  # noqa: BLE001
             return {}, {}
 
+    def _daily_limit_metadata(
+        self,
+        symbols: tuple[str, ...],
+        start: date,
+        end: date,
+    ) -> dict[date, dict[str, dict[str, object]]]:
+        """Load historical raw pre-close and point-in-time price-limit ratios.
+
+        The instrument snapshot's ``limit_up`` and ``limit_down`` fields are
+        absolute prices for its own as-of date.  They are deliberately excluded
+        from historical execution rules.
+        """
+        try:
+            source = self.repo.store.data_dir / "kline_daily_tushare"
+            if not source.exists():
+                source = self.repo.store.data_dir / "kline_daily_xbx"
+            if not source.exists():
+                return {}
+            scan = pl.scan_parquet(str(source / "**" / "*.parquet"))
+            columns = set(scan.collect_schema().names())
+            if not {"symbol", "date", "pre_close"}.issubset(columns):
+                return {}
+            name_expr = pl.col("name").cast(pl.Utf8) if "name" in columns else pl.lit("")
+            rows = (
+                scan.filter(
+                    pl.col("symbol").is_in(list(symbols))
+                    & (pl.col("date") >= start)
+                    & (pl.col("date") <= end)
+                )
+                .select(
+                    pl.col("symbol").cast(pl.Utf8),
+                    pl.col("date").cast(pl.Date),
+                    pl.col("pre_close").cast(pl.Float64),
+                    name_expr.alias("name"),
+                )
+                .collect()
+            )
+        except Exception:  # noqa: BLE001
+            return {}
+
+        result: dict[date, dict[str, dict[str, object]]] = defaultdict(dict)
+        for row in rows.iter_rows(named=True):
+            symbol = str(row["symbol"])
+            trading_day = row["date"]
+            name = str(row.get("name") or "")
+            rule = rule_for_symbol(symbol, name=name, trading_day=trading_day)
+            result[trading_day][symbol] = {
+                "pre_close": row["pre_close"],
+                "price_limit_pct": rule.price_limit_pct,
+            }
+        return dict(result)
+
     @staticmethod
     def _portfolio_fill_to_trade(fill, instrument_names: dict[str, str] | None = None) -> dict:
+        gross_value = fill.price * fill.volume
+        cash_value = (
+            gross_value + fill.commission
+            if fill.direction == Direction.LONG
+            else gross_value - fill.commission - fill.stamp_tax
+        )
         return {"symbol": fill.symbol, "name": (instrument_names or {}).get(fill.symbol) or None, "entry_date": fill.datetime.isoformat(sep=" "),
                 "exit_date": None, "entry_datetime": fill.datetime.isoformat(sep=" "), "exit_datetime": None,
                 "entry_price": fill.price, "exit_price": None, "pnl_pct": None, "pnl_amount": None,
                 "duration": 0, "duration_minutes": 0, "exit_reason": fill.reason, "shares": fill.volume,
-                "lots": None, "position_pct": fill.entry_position_pct, "entry_value": fill.price * fill.volume + fill.commission, "exit_value": None,
+                "lots": None, "position_pct": fill.entry_position_pct, "entry_value": cash_value, "exit_value": None,
                 "direction": VnpyMinuteBacktestService._direction_code(fill.direction), "commission": fill.commission, "stamp_tax": fill.stamp_tax,
                 "slippage": fill.slippage, "signal_id": fill.signal_id,
                 "portfolio_equity_before": fill.portfolio_equity_before}
@@ -492,8 +646,4 @@ class VnpyMinuteBacktestService:
     @staticmethod
     def _result_config(config: VnpyMinuteBacktestConfig, spec: StrategySpec, symbols: list[str], settings: dict) -> dict:
         return {"engine": "vnpy", "frequency": "1m", "strategy_id": spec.id, "symbols": symbols,
-                "start": str(config.start), "end": str(config.end), "initial_capital": config.initial_capital,
-                "max_positions": config.max_positions, "max_buy_volume_ratio": config.max_buy_volume_ratio,
-                "max_sell_volume_ratio": config.max_sell_volume_ratio, "candidate_sort": config.candidate_sort,
-                "entry_fill": config.entry_fill, "exit_fill": config.exit_fill,
-                "force_close_at_end": config.force_close_at_end, "params": settings}
+                "start": str(config.start), "end": str(config.end), "initial_capital": config.initial_capital, "params": settings}

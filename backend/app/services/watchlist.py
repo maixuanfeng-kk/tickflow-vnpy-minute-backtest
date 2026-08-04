@@ -11,10 +11,10 @@ from pathlib import Path
 import polars as pl
 
 from app.config import settings
-from app.services.watchlist_pools import WatchlistPoolStore
 from app.tickflow.capabilities import Cap, CapabilitySet
 from app.tickflow.client import get_client
 from app.tickflow.rate_limits import chunked, resolve_limit
+from app.services.watchlist_pools import WatchlistPoolStore
 
 logger = logging.getLogger(__name__)
 
@@ -25,76 +25,108 @@ def _path() -> Path:
     return p
 
 
-def _store() -> WatchlistPoolStore:
-    store = WatchlistPoolStore(settings.data_dir)
-    store.migrate_legacy("2026-01")
-    return store
+def _pool_store() -> WatchlistPoolStore:
+    return WatchlistPoolStore(settings.data_dir)
 
 
-def list_pools() -> list[dict]:
-    return _store().list_pools()
+def list_pools() -> list[dict[str, object]]:
+    return _pool_store().list_pools()
 
 
-def create_pool(month: str) -> dict:
-    return _store().create(month)
+def get_pool(pool_key: str) -> dict[str, object] | None:
+    return _pool_store().get_pool(pool_key)
 
 
-def get_pool(pool_key: str) -> dict | None:
-    return _store().get_pool(pool_key)
-
-
-def legacy_migration_status(month: str = "2026-01") -> dict:
-    """返回旧自选文件到指定月份池的迁移状态，供前端明确展示。"""
-    store = WatchlistPoolStore(settings.data_dir)
-    legacy = settings.data_dir / "user_data" / "watchlist.parquet"
-    legacy_count = pl.read_parquet(legacy).height if legacy.exists() else 0
-    target_count = len(store.list_members(f"month:{month}"))
-    return {
-        "legacy_count": legacy_count,
-        "target_month": month,
-        "target_count": target_count,
-        "migrated": store.get_pool(f"month:{month}") is not None,
-    }
-
-
-def migrate_legacy_watchlist(month: str = "2026-01") -> dict:
-    """手动执行一次旧自选迁移，保留原始 Parquet 文件。"""
-    store = WatchlistPoolStore(settings.data_dir)
-    migrated_count = store.migrate_legacy(month)
-    return {
-        "migrated_count": migrated_count,
-        "pool": store.get_pool(f"month:{month}"),
-    }
+def create_pool(month: str) -> dict[str, object]:
+    return _pool_store().create(month)
 
 
 def list_symbols(pool_key: str | None = None, *, aggregate: bool = False) -> list[dict]:
-    store = _store()
-    return store.aggregate() if aggregate else store.list_members(pool_key)
+    """Read the legacy list by default; named pools are explicitly opt-in."""
+    if aggregate:
+        return _pool_store().aggregate()
+    if pool_key is not None:
+        return _pool_store().list_members(pool_key)
+    p = _path()
+    if not p.exists():
+        return []
+    df = pl.read_parquet(p)
+    if df.is_empty():
+        return []
+    return df.to_dicts()
 
 
 def add(symbol: str, note: str = "", pool_key: str | None = None) -> list[dict]:
-    store = _store()
-    resolved = pool_key or store.default_pool_key()
-    return store.add(resolved, symbol, note)
+    if pool_key is not None:
+        return _pool_store().add(pool_key, symbol, note)
+    p = _path()
+    if p.exists():
+        df = pl.read_parquet(p)
+        # 已存在则先移除，后面重新插入到最前面
+        if symbol in df["symbol"].to_list():
+            df = df.filter(pl.col("symbol") != symbol)
+    else:
+        df = pl.DataFrame(schema={"symbol": pl.Utf8, "added_at": pl.Utf8, "note": pl.Utf8})
+
+    new_row = pl.DataFrame({
+        "symbol": [symbol],
+        "added_at": [datetime.utcnow().isoformat(timespec="seconds")],
+        "note": [note],
+    })
+    out = pl.concat([new_row, df], how="diagonal_relaxed")
+    out.write_parquet(p)
+    return out.to_dicts()
 
 
 def remove(symbol: str, pool_key: str | None = None) -> list[dict]:
-    store = _store()
-    resolved = pool_key or store.default_pool_key()
-    return store.remove(resolved, symbol)
+    if pool_key is not None:
+        store = _pool_store()
+        if store.get_pool(pool_key) is None:
+            raise KeyError(pool_key)
+        return store.remove(pool_key, symbol)
+    p = _path()
+    if not p.exists():
+        return []
+    df = pl.read_parquet(p)
+    df = df.filter(pl.col("symbol") != symbol)
+    df.write_parquet(p)
+    return df.to_dicts()
 
 
 def move_to_top(symbol: str, pool_key: str | None = None) -> list[dict]:
-    store = _store()
-    resolved = pool_key or store.default_pool_key()
-    return store.move_to_top(resolved, symbol)
+    if pool_key is not None:
+        store = _pool_store()
+        if store.get_pool(pool_key) is None:
+            raise KeyError(pool_key)
+        return store.move_to_top(pool_key, symbol)
+    p = _path()
+    if not p.exists():
+        return []
+    df = pl.read_parquet(p)
+    if df.is_empty() or symbol not in df["symbol"].to_list():
+        return df.to_dicts()
+    target = df.filter(pl.col("symbol") == symbol)
+    rest = df.filter(pl.col("symbol") != symbol)
+    out = pl.concat([target, rest], how="diagonal_relaxed")
+    out.write_parquet(p)
+    return out.to_dicts()
 
 
 def clear(pool_key: str | None = None) -> int:
-    """清空自选列表。返回移除的数量。"""
-    store = _store()
-    resolved = pool_key or store.default_pool_key()
-    return store.clear(resolved)
+    """Clear a named pool when requested; otherwise preserve legacy behavior."""
+    if pool_key is not None:
+        store = _pool_store()
+        if store.get_pool(pool_key) is None:
+            raise KeyError(pool_key)
+        return store.clear(pool_key)
+    p = _path()
+    if not p.exists():
+        return 0
+    df = pl.read_parquet(p)
+    count = df.height
+    if count > 0:
+        pl.DataFrame(schema={"symbol": pl.Utf8, "added_at": pl.Utf8, "note": pl.Utf8}).write_parquet(p)
+    return count
 
 
 def fetch_quotes(symbols: list[str], capset: CapabilitySet, timeout_s: float = 8.0) -> list[dict]:
