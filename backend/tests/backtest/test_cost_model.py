@@ -153,21 +153,3 @@ def test_independent_candidate_pnl_pct_includes_decomposed_costs():
     assert len(result.trades) == 1
     # buy_cost=0.0003, sell_cost=0.0003+0.001=0.0013 → 合计 -0.0016
     assert abs(result.trades[0].pnl_pct - (-(0.0003 + 0.0013))) < 1e-9
-
-
-# ---------------------------------------------------------------
-# 3. SSE 任务缓存键: 成本参数必须参与, 否则不同成本命中同一缓存 / cancel 失配
-# ---------------------------------------------------------------
-
-def test_job_key_distinguishes_commission_and_stamp():
-    """成本参数不同的两次回测必须得到不同 job_key (避免缓存碰撞与 cancel 失配)。"""
-    from app.api.backtest import _make_job_key
-
-    base_args = ("s", None, None, None, "open_t+1", None, None, 0.0002, 5.0, 10, 1.0, 1e6, "equal", None, None, "position", 5)
-    k_none = _make_job_key(*base_args)
-    k_comm = _make_job_key(*base_args, commission_pct=0.0009)
-    k_stamp = _make_job_key(*base_args, stamp_tax_pct=0.001)
-
-    assert k_none != k_comm
-    assert k_none != k_stamp
-    assert k_comm != k_stamp

@@ -185,6 +185,7 @@ export function startBacktest(params: {
   minute_fill?: boolean
   max_buy_volume_ratio?: number | null
   max_sell_volume_ratio?: number | null
+  volume_limit_enabled?: boolean
   signal_price_basis?: 'qfq' | 'raw'
   engine?: 'matrix' | 'vnpy'
 }): void {
@@ -232,6 +233,7 @@ export function startBacktest(params: {
     minute_fill: params.minute_fill,
     max_buy_volume_ratio: params.max_buy_volume_ratio,
     max_sell_volume_ratio: params.max_sell_volume_ratio,
+    volume_limit_enabled: params.volume_limit_enabled,
     signal_price_basis: params.signal_price_basis,
     engine: params.engine,
   })

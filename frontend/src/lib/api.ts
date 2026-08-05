@@ -714,60 +714,12 @@ export interface LimitLadderResult {
   sealed_counts_down?: { real: number; fake: number; pending: number }
 }
 
-// ===== Backtest =====
-export interface BacktestResult {
-  run_id: string
-  config: any
-  stats: Record<string, any>
-  equity_curve: { date: string; value: number }[]
-  trades: any[]
-  per_symbol_stats: { symbol: string; total_return: number }[]
-}
-
-// ===== Factor Backtest =====
-export interface FactorColumn {
-  id: string
-  label: string
-  group: string
-  desc: string
-}
-
-export interface GroupStat {
-  group: number
-  label: string
-  total_return: number
-  annual_return: number
-  max_drawdown: number
-  sharpe: number
-  win_rate: number
-}
-
-export interface FactorBacktestResult {
-  run_id: string
-  config: Record<string, any>
-  ic_mean: number | null
-  ic_std: number | null
-  ir: number | null
-  ic_win_rate: number | null
-  ic_series: { date: string; ic: number }[]
-  group_stats: GroupStat[]
-  group_nav: Record<string, any>[]
-  long_short_stats: Record<string, any>
-  long_short_nav: { date: string; value: number }[]
-  elapsed_ms: number
-  n_symbols: number
-  n_dates: number
-  error: string | null
-}
-
 // ===== Strategy Backtest =====
 export interface StrategyBacktestTrade {
   symbol: string
   name?: string
-  entry_date?: string
-  exit_date?: string
-  entry_datetime?: string
-  exit_datetime?: string
+  entry_date: string
+  exit_date: string
   entry_price: number
   exit_price: number
   pnl_pct: number
@@ -779,30 +731,63 @@ export interface StrategyBacktestTrade {
   entry_value?: number
   exit_value?: number
   pnl_amount?: number
-  max_floating_gain_pct?: number
-  max_floating_loss_pct?: number
   entry_score?: number | null
   entry_signal_date?: string | null
   exit_signal_date?: string | null
   blocked_exit_days?: number
-  entry_signal_id?: string | null
-  exit_signal_id?: string | null
+  duration_minutes?: number
+  entry_datetime?: string
+  exit_datetime?: string | null
+  direction?: string
+  commission?: number
+  stamp_tax?: number
+  slippage?: number
+  signal_id?: number | null
+  portfolio_equity_before?: number | null
 }
 
-export interface StrategyBacktestOpenPosition {
+export interface VnpyDailyLedgerRow {
+  date: string
+  buy_count: number
+  sell_count: number
+  buy_amount: number
+  sell_amount: number
+  commission: number
+  stamp_tax: number
+  slippage: number
+  realized_pnl: number
+  end_equity?: number
+  daily_return?: number | null
+  fills: StrategyBacktestTrade[]
+}
+
+export interface VnpySignalDiagnostic {
+  id: number
   symbol: string
-  name?: string
-  entry_date: string
-  entry_datetime: string
-  entry_price: number
-  shares: number
-  mark_date: string
-  mark_datetime: string
+  name?: string | null
+  direction: string
+  timestamp: string
+  reason: string
+  conditions: string[]
+  status: 'triggered' | 'queued' | 'filled' | 'rejected'
+  due_at?: string | null
+  fill_datetime?: string | null
+  rejection_reason?: string | null
+}
+
+export interface VnpyOpenPosition {
+  symbol: string
+  name?: string | null
+  volume: number
+  average_cost: number
   mark_price: number
   market_value: number
-  unrealized_pnl_amount: number
-  unrealized_pnl_pct: number
-  exit_block_reason?: string | null
+  unrealized_pnl: number
+  unrealized_pnl_pct?: number | null
+  position_pct?: number | null
+  entry_date?: string | null
+  holding_days: number
+  holding_minutes: number
 }
 
 export interface StrategyBacktestResult {
@@ -813,8 +798,6 @@ export interface StrategyBacktestResult {
   drawdown_curve: { date: string; value: number }[]
   benchmark_curve?: { date: string; value: number; close?: number; name?: string; symbol?: string }[]
   trades: StrategyBacktestTrade[]
-  open_positions?: StrategyBacktestOpenPosition[]
-  execution?: Record<string, number>
   per_symbol_stats: {
     symbol: string
     name?: string
@@ -823,9 +806,16 @@ export interface StrategyBacktestResult {
     win_rate: number
     best: number
     worst: number
-    max_floating_gain_pct?: number
-    max_floating_loss_pct?: number
+    realized_pnl?: number
+    open_volume?: number
+    open_market_value?: number
+    avg_holding_days?: number | null
+    avg_holding_minutes?: number | null
   }[]
+  daily_ledger?: VnpyDailyLedgerRow[]
+  positions?: VnpyOpenPosition[]
+  signal_diagnostics?: VnpySignalDiagnostic[]
+  warnings?: string[]
   strategy_info: {
     id: string
     name: string
@@ -849,10 +839,18 @@ export interface StrategyBacktestResult {
 export interface VnpyStrategy {
   id: string
   name: string
-  description: string
+  kind: 'portfolio'
   min_symbols: number
   max_symbols: number
-  parameters: { name: string; label: string; default: number | string | boolean; kind?: string; minimum?: number; maximum?: number }[]
+  description: string
+  parameters: Array<{
+    name: string
+    label: string
+    default: unknown
+    kind: string
+    minimum?: number | null
+    maximum?: number | null
+  }>
 }
 
 export interface StockPoolStrategy {
@@ -1673,69 +1671,6 @@ export const api = {
       `/api/screener/limit-ladder${qs ? `?${qs}` : ''}`,
     )
   },
-
-  backtestStatus: () => request<{ available: boolean }>('/api/backtest/status'),
-
-  backtestRun: (payload: {
-    symbols: string[]
-    entries: string[]
-    exits: string[]
-    start?: string
-    end?: string
-    stop_loss_pct?: number
-    max_hold_days?: number
-    matching?: 'close_t' | 'open_t+1'
-    asset_type?: 'stock' | 'etf'
-  }) =>
-    request<BacktestResult>('/api/backtest/run', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    }),
-
-  factorColumns: () =>
-    request<{ columns: FactorColumn[] }>('/api/backtest/factor/columns'),
-
-  factorRun: (payload: {
-    factor_name: string
-    symbols?: string[] | null
-    start?: string | null
-    end?: string | null
-    n_groups?: number
-    rebalance?: 'daily' | 'weekly' | 'monthly'
-    weight?: 'equal' | 'factor_weight'
-    fees_pct?: number
-    slippage_bps?: number
-    asset_type?: 'stock' | 'etf'
-  }) =>
-    request<FactorBacktestResult>('/api/backtest/factor/run', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    }),
-
-  strategyBacktestRun: (payload: {
-    strategy_id: string
-    symbols?: string[] | null
-    start?: string | null
-    end?: string | null
-    params?: Record<string, any> | null
-    overrides?: Record<string, any> | null
-    matching?: 'close_t' | 'open_t+1'
-    entry_fill?: 'close_t' | 'open_t+1' | null
-    exit_fill?: 'close_t' | 'open_t+1' | 'signal_next_minute' | null
-    fees_pct?: number
-    commission_pct?: number
-    stamp_tax_pct?: number
-    slippage_bps?: number
-    max_positions?: number
-    initial_capital?: number
-    position_sizing?: 'equal' | 'score_weight'
-    asset_type?: 'stock' | 'etf'
-    minute_fill?: boolean
-  }) =>
-    request<StrategyBacktestResult>('/api/backtest/strategy/run', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    }),
 
   vnpyStrategies: () => request<{ strategies: VnpyStrategy[] }>('/api/backtest/vnpy/strategies'),
 

@@ -113,6 +113,8 @@ export const storage = {
     maxExposure: string
     initialCapital: string
     positionSizing: 'equal' | 'score_weight'
+    volumeLimitEnabled?: boolean
+    signalPriceBasis?: 'qfq' | 'raw'
     maxBuyVolumeRatio?: string
     maxSellVolumeRatio?: string
     mode: 'position' | 'full'
