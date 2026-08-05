@@ -54,7 +54,6 @@ class DailyReference:
     previous_high: float | None = None
     previous_low: float | None = None
     previous_volume: float | None = None
-    raw_previous_close: float | None = None
     # Execution-only raw price inputs. Signal fields above may be projected
     # to qfq and must not be reused to calculate exchange price limits.
     limit_reference_price: float | None = None

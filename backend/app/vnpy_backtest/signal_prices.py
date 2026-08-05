@@ -28,33 +28,17 @@ class MinuteSignalPriceProjector:
         data_dir: Path,
         symbols: list[str],
         start: date,
-        end: date | str,
-        basis: str | None = None,
+        end: date,
+        basis: str,
         *,
-        factor_dataset: str | None = None,
+        factor_dataset: str = "adj_factor_xbx",
     ) -> "MinuteSignalPriceProjector":
-        # Backward-compatible four-argument form:
-        # load(data_dir, symbols, end, basis).
-        legacy_call = basis is None
-        if legacy_call:
-            if not isinstance(end, str):
-                raise ValueError("signal_price_basis is required")
-            basis = end
-            end = start
-        if not isinstance(end, date):
-            raise ValueError("end must be a date")
-        if factor_dataset is None:
-            factor_dataset = "adj_factor" if legacy_call else "adj_factor_xbx"
         if basis not in {"qfq", "raw"}:
             raise ValueError("signal_price_basis 必须是 qfq 或 raw")
         if basis == "raw":
             return cls(basis, {}, {})
         factors = load_local_factors(
-            data_dir,
-            symbols=symbols,
-            start=None if legacy_call else start,
-            end=end,
-            dataset=factor_dataset,
+            data_dir, symbols=symbols, start=start, end=end, dataset=factor_dataset,
         )
         lookup = factor_map(factors)
         events: dict[str, set[date]] = defaultdict(set)
