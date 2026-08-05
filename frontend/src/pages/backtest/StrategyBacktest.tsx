@@ -1,7 +1,7 @@
 import { Fragment, useState, useMemo, useEffect, useRef, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
-import { Play, FlaskConical, Clock, Loader2, Square, Search, Plus, X, SlidersHorizontal, Zap, ListPlus } from 'lucide-react'
+import { Play, FlaskConical, Clock, Loader2, Square, Search, Plus, X, SlidersHorizontal, Zap, ListPlus, Download } from 'lucide-react'
 import {
   api,
   type StrategyBacktestResult,
@@ -980,6 +980,34 @@ export function StrategyBacktest() {
 
   const dailyLedger = useMemo(() => [...(result?.daily_ledger ?? [])]
     .sort((a, b) => b.date.localeCompare(a.date)), [result?.daily_ledger])
+  const exportDailyLedger = () => {
+    if (!dailyLedger.length) return
+    const quote = (value: string | number | null | undefined) => `"${String(value ?? '').replace(/"/g, '""')}"`
+    const rows = [...dailyLedger].reverse().map(row => [
+      row.date,
+      row.buy_count,
+      row.sell_count,
+      row.buy_amount,
+      row.sell_amount,
+      row.commission,
+      row.stamp_tax,
+      row.slippage,
+      row.commission + row.stamp_tax + row.slippage,
+      row.realized_pnl,
+      row.end_equity,
+      row.daily_return,
+    ].map(quote).join(','))
+    const header = ['日期', '买入笔数', '卖出笔数', '买入成交额', '卖出成交额', '佣金', '印花税', '滑点成本', '总交易费用', '已实现盈亏', '日末权益', '日收益率']
+    const blob = new Blob([`\ufeff${header.map(quote).join(',')}\n${rows.join('\n')}`], { type: 'text/csv;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `vnpy_daily_ledger_${start}_${end}.csv`
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    URL.revokeObjectURL(url)
+  }
   const signalDiagnostics = useMemo(() => [...(result?.signal_diagnostics ?? [])]
     .sort((a, b) => b.timestamp.localeCompare(a.timestamp)), [result?.signal_diagnostics])
   const exitReasons = useMemo(() => Array.from(new Set((result?.trades ?? []).map(item => item.exit_reason).filter(Boolean))).sort(), [result?.trades])
@@ -1722,6 +1750,17 @@ export function StrategyBacktest() {
                             : `期末持仓 (${result.positions?.length ?? 0})`}
                     </button>
                   ))}
+                  {resultTab === 'daily' && dailyLedger.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={exportDailyLedger}
+                      title="导出每日账本 CSV"
+                      className="ml-auto mb-1.5 flex items-center gap-1 rounded-btn border border-border bg-surface px-2 py-1 text-xs text-secondary transition-colors hover:border-accent/40 hover:text-accent"
+                    >
+                      <Download size={13} />
+                      导出
+                    </button>
+                  )}
                 </div>
 
                 {resultTab === 'daily' && (
