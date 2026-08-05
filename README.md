@@ -54,7 +54,7 @@
 | :--------------- | :--------------------------------------------------------------------- | :-------------------------------- |
 | 🔍 **选股引擎**   | 18 个内置策略 + 自定义信号 + AI 生成 + 代码迁移,Polars 毫秒级扫全 A 股 | [strategy.md](./docs/strategy.md) |
 | 📊 **指标流水线** | MA/EMA/MACD/RSI/KDJ/布林/量比等,一次扫表落盘 enriched Parquet          | [features.md](./docs/features.md) |
-| 🧪 **回测引擎**   | 三种模式(个股/策略组合/自由信号),T+1/手续费/滑点/止损,SSE 流式进度     | [features.md](./docs/features.md) |
+| 🧪 **回测引擎**   | vn.py 股票池分钟回测，T+1/手续费/滑点/涨跌停/成交量限制，SSE 流式进度 | [features.md](./docs/features.md) |
 | 📡 **监控中心**   | 四类监控(策略/个股信号/价格/异动),多条件 AND/OR + 语音播报 + 飞书推送  | [features.md](./docs/features.md) |
 | 📈 **深度研报**   | FinSight 多阶段资料采集与分析，异步生成 Markdown / DOCX / PDF          | [deep-report-windows.md](./docs/deep-report-windows.md) |
 | 🏆 **连板梯队**   | 连板层级统计 + 概念涨幅轮动 + 盘后 AI 复盘 + 炸板/翘板预警             | [features.md](./docs/features.md) |
@@ -74,9 +74,7 @@
 
 **🔍 选股与回测**
 - **策略** Screener — Polars 毫秒级扫描全 A 股,18 个内置策略卡片 + 自定义条件
-- **回测** Backtest — 两种模式:
-  - **因子回测** — IC/IR、分层收益、多空组合,先筛掉无效指标
-  - **策略回测** — 净值曲线、回撤、夏普、胜率,支持 T+1/手续费/滑点/止损,SSE 流式进度
+- **回测** Backtest — vn.py 股票池组合分钟回测，支持开盘突破及条件 1/2/3 专用策略、T+1、费用、滑点、成交量限制和 SSE 流式进度
 
 **📈 个股与板块分析**
 - **深度研报** Deep Report — 选择标的与任务后异步生成研报，可查看进度、取消任务并下载 Markdown / DOCX / PDF
@@ -209,7 +207,7 @@ PORT=3018                      # 服务端口
 | :----------- | :------------------------------------------------------------------------------------------------ |
 | **后端**     | FastAPI · Pydantic v2 · APScheduler · sse-starlette                                               |
 | **数据**     | Polars(计算)· DuckDB(查询)· Parquet(存储)                                                         |
-| **回测**     | vectorbt(全项目唯一 pandas 边界)                                                                  |
+| **回测**     | vn.py 股票池组合引擎 · 本地 Tushare Parquet 分钟回放                                               |
 | **数据源**   | [TickFlow](https://tickflow.org/auth/register?ref=V3KDKGXPEA) 官方 SDK · 其他数据源后续迭代实装   |
 | **AI**(可选) | OpenAI 兼容接口(DeepSeek / 通义 / Ollama 等)                                                      |
 | **前端**     | React 18 · Vite · TypeScript · Tailwind · Tanstack Query · Lightweight Charts · ECharts · dnd-kit |
@@ -222,7 +220,7 @@ PORT=3018                      # 服务端口
 | Phase  | 内容                                                               | 状态 |
 | :----- | :----------------------------------------------------------------- | :--- |
 | 0-1    | 仓库骨架 · FastAPI 壳 · 能力探测 · K 线同步与分析页                | ✅    |
-| 2-3    | Polars enriched 流水线 · Screener · vectorbt 回测(T+1/手续费/止损) | ✅    |
+| 2-3    | Polars enriched 流水线 · Screener · vn.py 股票池分钟回测       | ✅    |
 | 4-5    | 监控引擎 · 四类监控规则 · 实时 SSE 推送 · 持久化记录               | ✅    |
 | 6      | 深度研报(FinSight 资料采集、分析、任务管理与 Word/PDF 导出)          | ✅    |
 | **v2** | Webhook 推送· 板块异动 · 早晚报 · 更多扩展           | 🚧    |
