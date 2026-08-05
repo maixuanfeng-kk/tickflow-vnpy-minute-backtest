@@ -287,9 +287,11 @@ def test_daily_context_uses_completed_days_only() -> None:
     start = datetime(2026, 1, 5, 9, 30)
     builder = DailyContextBuilder()
     builder.add_day({"600000.SH": [_bar("600000.SH", Exchange.SSE, start, 10), _bar("600000.SH", Exchange.SSE, start + timedelta(minutes=1), 11)]})
-    reference = builder.references()["600000.SH"]
+    reference = builder.references(
+        daily_market_metadata={date(2026, 1, 5): {"600000.SH": {"high": 12.0}}},
+    )["600000.SH"]
     assert reference.previous_close == 11
-    assert reference.previous_high == 11
+    assert reference.previous_high == 12
     assert reference.closes == (11,)
     assert reference.previous_cumulative_volumes[start.time()] == 10_000
 
@@ -308,10 +310,29 @@ def test_daily_context_keeps_raw_execution_pre_close_separate_from_signal_prices
         execution_metadata={
             "600000.SH": {"pre_close": 10.25, "price_limit_pct": 0.10},
         },
+        daily_market_metadata={date(2026, 1, 5): {"600000.SH": {"high": 12.0}}},
     )["600000.SH"]
     assert reference.previous_close == 11
     assert reference.limit_reference_price == 10.25
     assert reference.price_limit_pct == 0.10
+
+
+def test_daily_context_uses_daily_k_high_instead_of_minute_high() -> None:
+    start = datetime(2026, 1, 5, 9, 30)
+    builder = DailyContextBuilder()
+    builder.add_day({
+        "600000.SH": [
+            _bar("600000.SH", Exchange.SSE, start, 10),
+            _bar("600000.SH", Exchange.SSE, start + timedelta(minutes=1), 11),
+        ],
+    })
+
+    reference = builder.references(
+        date(2026, 1, 6),
+        daily_market_metadata={date(2026, 1, 5): {"600000.SH": {"high": 12.34}}},
+    )["600000.SH"]
+
+    assert reference.previous_high == 12.34
 
 
 def test_opening_breakout_uses_close_breakout_and_dynamic_ma5() -> None:

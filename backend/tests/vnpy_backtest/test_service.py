@@ -88,24 +88,25 @@ def test_instrument_absolute_limit_prices_are_not_used_as_historical_percentages
     assert tick_sizes == {"002938.SZ": 0.01}
 
 
-def test_daily_limit_metadata_uses_historical_raw_pre_close(tmp_path) -> None:
+def test_daily_market_metadata_uses_historical_raw_pre_close_and_high(tmp_path) -> None:
     part = tmp_path / "kline_daily_xbx" / "date=2026-05-22"
     part.mkdir(parents=True)
     pl.DataFrame({
         "symbol": ["002938.SZ"],
         "date": [date(2026, 5, 22)],
         "pre_close": [94.48],
+        "high": [96.25],
         "name": ["鹏鼎控股"],
     }).write_parquet(part / "part.parquet")
     repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
 
-    metadata = VnpyMinuteBacktestService(repo)._daily_limit_metadata(
+    metadata = VnpyMinuteBacktestService(repo)._daily_market_metadata(
         ("002938.SZ",),
         date(2026, 5, 22),
         date(2026, 5, 22),
     )
     assert metadata == {
         date(2026, 5, 22): {
-            "002938.SZ": {"pre_close": 94.48, "price_limit_pct": 0.10},
+            "002938.SZ": {"pre_close": 94.48, "high": 96.25, "price_limit_pct": 0.10},
         },
     }

@@ -104,7 +104,7 @@ class VnpyMinuteBacktestService:
                 factor_dataset="adj_factor_tushare",
             )
         daily_context = DailyContextBuilder(signal_projector)
-        daily_limit_metadata = self._daily_limit_metadata(symbols, config.start, config.end)
+        daily_market_metadata = self._daily_market_metadata(symbols, warmup_start, config.end)
         days_seen = 0
         # Partitions exist for every market trading day, even when none of the
         # selected securities traded.  Keep that calendar separate from the
@@ -142,7 +142,8 @@ class VnpyMinuteBacktestService:
                 daily_context.references(
                     trading_day,
                     symbols=bars_by_symbol,
-                    execution_metadata=daily_limit_metadata.get(trading_day, {}),
+                    execution_metadata=daily_market_metadata.get(trading_day, {}),
+                    daily_market_metadata=daily_market_metadata,
                 ),
             )
             daily_context.add_day(bars_by_symbol)
@@ -360,13 +361,13 @@ class VnpyMinuteBacktestService:
         except Exception:  # noqa: BLE001
             return {}, {}
 
-    def _daily_limit_metadata(
+    def _daily_market_metadata(
         self,
         symbols: tuple[str, ...],
         start: date,
         end: date,
     ) -> dict[date, dict[str, dict[str, object]]]:
-        """Load historical raw pre-close and point-in-time price-limit ratios.
+        """Load historical raw pre-close/high and point-in-time price-limit ratios.
 
         The instrument snapshot's ``limit_up`` and ``limit_down`` fields are
         absolute prices for its own as-of date.  They are deliberately excluded
@@ -380,7 +381,7 @@ class VnpyMinuteBacktestService:
                 return {}
             scan = pl.scan_parquet(str(source / "**" / "*.parquet"))
             columns = set(scan.collect_schema().names())
-            if not {"symbol", "date", "pre_close"}.issubset(columns):
+            if not {"symbol", "date", "pre_close", "high"}.issubset(columns):
                 return {}
             name_expr = pl.col("name").cast(pl.Utf8) if "name" in columns else pl.lit("")
             rows = (
@@ -393,6 +394,7 @@ class VnpyMinuteBacktestService:
                     pl.col("symbol").cast(pl.Utf8),
                     pl.col("date").cast(pl.Date),
                     pl.col("pre_close").cast(pl.Float64),
+                    pl.col("high").cast(pl.Float64),
                     name_expr.alias("name"),
                 )
                 .collect()
@@ -408,6 +410,7 @@ class VnpyMinuteBacktestService:
             rule = rule_for_symbol(symbol, name=name, trading_day=trading_day)
             result[trading_day][symbol] = {
                 "pre_close": row["pre_close"],
+                "high": row["high"],
                 "price_limit_pct": rule.price_limit_pct,
             }
         return dict(result)
