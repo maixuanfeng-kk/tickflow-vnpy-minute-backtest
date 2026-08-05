@@ -19,4 +19,5 @@ test('数据就绪检查会持续显示导入进度', () => {
   assert.match(stockPools, /dailyProImportStatus/)
   assert.match(stockPools, /importJob\.progress/)
   assert.match(stockPools, /专业日K导入进度/)
+  assert.match(stockPools, /\{importJob \? \(/)
 })

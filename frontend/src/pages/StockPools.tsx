@@ -75,7 +75,11 @@ export function StockPools() {
   const activeReadiness = result?.readiness ?? readiness.data
   const ready = activeReadiness?.status === 'ready'
   const importJob = dailyProImportStatus.data?.job
-  const importRunning = importJob?.status === 'pending' || importJob?.status === 'running'
+  const importStatusLabel = importJob?.status === 'succeeded'
+    ? '专业日K导入已完成'
+    : importJob?.status === 'failed'
+      ? '专业日K导入失败'
+      : '专业日K导入进度'
 
   useEffect(() => {
     if (!importJob?.id || (importJob.status !== 'succeeded' && importJob.status !== 'failed')) return
@@ -179,7 +183,7 @@ export function StockPools() {
               </button>
             ) : null}
           </div>
-          {importRunning ? (
+          {importJob ? (
             <button
               type="button"
               onClick={() => setShowDataImport(true)}
@@ -187,7 +191,7 @@ export function StockPools() {
               aria-label="查看专业日K导入进度"
             >
               <div className="flex items-center justify-between gap-3 text-xs">
-                <span className="truncate text-secondary">专业日K导入进度：{importJob.log.at(-1)?.msg ?? '准备导入'}</span>
+                <span className="truncate text-secondary">{importStatusLabel}：{importJob.log.at(-1)?.msg ?? '准备导入'}</span>
                 <span className="shrink-0 font-mono text-accent">{importJob.progress}%</span>
               </div>
               <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-border">
