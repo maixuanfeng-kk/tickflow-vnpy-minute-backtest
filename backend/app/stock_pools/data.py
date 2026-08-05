@@ -23,6 +23,7 @@ class DataReadiness:
     daily_imported_at: str | None = None
     financial_imported_at: str | None = None
     factor_built_at: str | None = None
+    daily_dataset: str = "kline_daily_pro"
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -33,7 +34,7 @@ class DataReadiness:
             "missing": list(self.missing),
             "warnings": list(self.warnings),
             "coverage": {
-                "daily_dataset": "kline_daily_tushare",
+                "daily_dataset": self.daily_dataset,
                 "daily_trading_days_before_as_of": self.daily_trading_days,
                 "listing_age_min_trading_days": 250,
                 "market_cap_unit": "CNY",
@@ -58,9 +59,9 @@ class StockPoolDataAdapter:
             first_of_month = date(year, month_number, 1)
         except ValueError:
             return DataReadiness(month, None, False, ("月份格式必须为 YYYY-MM",), ())
-        daily_path = self.data_dir / "kline_daily_tushare"
+        daily_dataset, daily_path = self._daily_dataset()
         factor_path = self.data_dir / "adj_factor_tushare"
-        income_path = self.data_dir / "financial_tushare" / "income" / "part.parquet"
+        income_path = self._financial_path()
         if not daily_path.exists() or not any(daily_path.rglob("*.parquet")):
             return DataReadiness(month, None, False, ("缺少专业日K数据（kline_daily_pro）",), ())
         daily_scan = pl.scan_parquet(str(daily_path / "**" / "*.parquet"))
@@ -68,7 +69,7 @@ class StockPoolDataAdapter:
             daily_columns = set(daily_scan.collect_schema().names())
         except Exception:  # noqa: BLE001
             return DataReadiness(month, None, False, ("无法读取专业日K Parquet 数据",), ())
-        required_daily = {"symbol", "name", "is_st", "date", "high", "close", "pre_close", "total_mv"}
+        required_daily = {"symbol", "date", "high", "close", "total_mv"}
         if not required_daily.issubset(daily_columns):
             missing_columns = ", ".join(sorted(required_daily - daily_columns))
             return DataReadiness(month, None, False, (f"专业日K缺少字段: {missing_columns}",), ())
@@ -139,18 +140,26 @@ class StockPoolDataAdapter:
                 missing.append("无法读取标准化财务利润表数据")
         return DataReadiness(
             month, as_of_date, not missing, tuple(missing), (), daily_days,
-            self._manifest_value("tushare_daily_import.json", "imported_at"),
+            self._manifest_value(
+                "local_daily_pro_import.json" if daily_dataset == "kline_daily_pro" else "tushare_daily_import.json",
+                "imported_at",
+            ),
             self._manifest_value("tushare_financial_import.json", "imported_at"),
             self._manifest_value("tushare_adj_factor_import.json", "imported_at"),
+            daily_dataset=daily_dataset,
         )
 
     def load(self, readiness: DataReadiness) -> StockPoolInput:
         if not readiness.ready or readiness.as_of_date is None:
             raise ValueError("数据尚未就绪")
-        daily_path = self.data_dir / "kline_daily_tushare" / "**" / "*.parquet"
+        daily_dataset, daily_root = self._daily_dataset()
+        daily_scan = pl.scan_parquet(str(daily_root / "**" / "*.parquet"))
+        daily_columns = set(daily_scan.collect_schema().names())
+        name = pl.col("name").cast(pl.Utf8) if "name" in daily_columns else pl.col("symbol").cast(pl.Utf8)
+        is_st = pl.col("is_st") if "is_st" in daily_columns else pl.lit(False)
         raw_daily = (
-            pl.scan_parquet(str(daily_path))
-            .select("symbol", "name", "is_st", "date", "high", "close", "total_mv")
+            daily_scan
+            .select(pl.col("symbol").cast(pl.Utf8), name.alias("name"), is_st.alias("is_st"), "date", "high", "close", "total_mv")
             .with_columns(pl.col("date").cast(pl.Date))
             .filter(pl.col("date") <= readiness.as_of_date)
             .sort(["symbol", "date"])
@@ -182,7 +191,7 @@ class StockPoolDataAdapter:
             pl.col("signal_close").alias("close"),
             pl.col("signal_high").alias("high"),
         ).drop(["signal_close", "signal_high"])
-        income = pl.read_parquet(self.data_dir / "financial_tushare" / "income" / "part.parquet")
+        income = pl.read_parquet(self._financial_path())
         instruments = raw_daily.group_by("symbol").agg(pl.col("date").min().alias("listing_date"))
         financials = self._normalise_financials(income)
         return StockPoolInput(
@@ -229,3 +238,19 @@ class StockPoolDataAdapter:
             return json.loads(path.read_text(encoding="utf-8")).get(key)
         except (OSError, json.JSONDecodeError):
             return None
+
+    def _daily_dataset(self) -> tuple[str, Path]:
+        for dataset in ("kline_daily_pro", "kline_daily_tushare", "kline_daily_xbx"):
+            path = self.data_dir / dataset
+            if path.exists() and any(path.rglob("*.parquet")):
+                return dataset, path
+        return "kline_daily_pro", self.data_dir / "kline_daily_pro"
+
+    def _financial_path(self) -> Path:
+        for path in (
+            self.data_dir / "financial_tushare" / "income" / "part.parquet",
+            self.data_dir / "financials" / "income" / "part.parquet",
+        ):
+            if path.exists():
+                return path
+        return self.data_dir / "financial_tushare" / "income" / "part.parquet"

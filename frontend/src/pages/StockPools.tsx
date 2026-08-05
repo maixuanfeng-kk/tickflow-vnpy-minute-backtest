@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Copy, Database, RefreshCw, Save, Workflow } from 'lucide-react'
+import { Copy, Database, FolderInput, RefreshCw, Save, Workflow } from 'lucide-react'
 import { EmptyState } from '@/components/EmptyState'
 import { PageHeader } from '@/components/PageHeader'
 import { toast } from '@/components/Toast'
 import { api, type StockPoolResult } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
+import { StockPoolDataImportDialog } from '@/components/stock-pools/StockPoolDataImportDialog'
 
 function statusText(status?: string) {
   return status === 'ready' ? '数据已就绪' : '数据尚未就绪'
@@ -18,6 +19,7 @@ export function StockPools() {
   const [result, setResult] = useState<StockPoolResult | null>(null)
   const [params, setParams] = useState<Record<string, number>>({})
   const [selectedMonthlyPoolKey, setSelectedMonthlyPoolKey] = useState<string | null>(null)
+  const [showDataImport, setShowDataImport] = useState(false)
   const strategies = useQuery({
     queryKey: QK.stockPoolStrategies,
     queryFn: api.stockPoolStrategies,
@@ -25,6 +27,14 @@ export function StockPools() {
   const readiness = useQuery({
     queryKey: QK.stockPoolReadiness(strategyId, month),
     queryFn: () => api.stockPoolReadiness(strategyId, month),
+  })
+  const dailyProImportStatus = useQuery({
+    queryKey: QK.dailyProImportStatus,
+    queryFn: api.dailyProImportStatus,
+    refetchInterval: query => {
+      const job = query.state.data?.job
+      return job && (job.status === 'pending' || job.status === 'running') ? 1_000 : 30_000
+    },
   })
   const runs = useQuery({
     queryKey: QK.stockPoolRuns(strategyId),
@@ -64,6 +74,14 @@ export function StockPools() {
 
   const activeReadiness = result?.readiness ?? readiness.data
   const ready = activeReadiness?.status === 'ready'
+  const importJob = dailyProImportStatus.data?.job
+  const importRunning = importJob?.status === 'pending' || importJob?.status === 'running'
+
+  useEffect(() => {
+    if (!importJob?.id || (importJob.status !== 'succeeded' && importJob.status !== 'failed')) return
+    queryClient.invalidateQueries({ queryKey: QK.stockPoolReadiness(strategyId, month) })
+    queryClient.invalidateQueries({ queryKey: QK.dataStatus })
+  }, [importJob?.id, importJob?.status, month, queryClient, strategyId])
   const copyCodeString = async () => {
     if (!result?.code_string) return
     try {
@@ -149,11 +167,34 @@ export function StockPools() {
         </section>
 
         <section className={`rounded-card border p-4 ${ready ? 'border-bull/30 bg-bull/[0.04]' : 'border-warning/30 bg-warning/[0.04]'}`}>
-          <div className="flex items-center gap-2">
-            <Database className={`h-4 w-4 ${ready ? 'text-bull' : 'text-warning'}`} />
-            <h2 className="text-sm font-medium">数据就绪检查：{statusText(activeReadiness?.status)}</h2>
-            {activeReadiness?.as_of_date && <span className="text-xs text-secondary">时点 {activeReadiness.as_of_date}</span>}
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <Database className={`h-4 w-4 ${ready ? 'text-bull' : 'text-warning'}`} />
+              <h2 className="text-sm font-medium">数据就绪检查：{statusText(activeReadiness?.status)}</h2>
+              {activeReadiness?.as_of_date && <span className="text-xs text-secondary">时点 {activeReadiness.as_of_date}</span>}
+            </div>
+            {!ready ? (
+              <button onClick={() => setShowDataImport(true)} className="inline-flex items-center gap-2 rounded-btn border border-warning/40 bg-warning/10 px-3 py-2 text-xs font-medium text-warning hover:bg-warning/15">
+                <FolderInput className="h-4 w-4" />导入所需数据
+              </button>
+            ) : null}
           </div>
+          {importRunning ? (
+            <button
+              type="button"
+              onClick={() => setShowDataImport(true)}
+              className="mt-3 block w-full rounded-btn border border-accent/20 bg-accent/[0.04] p-3 text-left hover:border-accent/40"
+              aria-label="查看专业日K导入进度"
+            >
+              <div className="flex items-center justify-between gap-3 text-xs">
+                <span className="truncate text-secondary">专业日K导入进度：{importJob.log.at(-1)?.msg ?? '准备导入'}</span>
+                <span className="shrink-0 font-mono text-accent">{importJob.progress}%</span>
+              </div>
+              <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-border">
+                <div className="h-full rounded-full bg-accent transition-all" style={{ width: `${importJob.progress}%` }} />
+              </div>
+            </button>
+          ) : null}
           {activeReadiness?.warnings.map(warning => <p key={warning} className="mt-2 text-xs text-warning">{warning}</p>)}
           {!ready && (
             <div className="mt-2 text-xs leading-relaxed text-secondary">
@@ -162,6 +203,15 @@ export function StockPools() {
             </div>
           )}
         </section>
+
+        {showDataImport ? (
+          <StockPoolDataImportDialog
+            readiness={activeReadiness}
+            strategyId={strategyId}
+            month={month}
+            onClose={() => setShowDataImport(false)}
+          />
+        ) : null}
 
         {result?.status === 'ready' ? (
           <>

@@ -13,11 +13,7 @@ from uuid import uuid4
 import polars as pl
 
 
-SOURCE_COLUMNS = {
-    "ts_code", "trade_date", "open", "high", "low", "close", "pre_close", "change",
-    "pct_chg", "vol", "amount", "total_mv", "circ_mv", "turnover_rate", "volume_ratio",
-    "pe", "pb", "total_share", "float_share", "free_share",
-}
+SOURCE_COLUMNS = {"ts_code", "trade_date", "open", "high", "low", "close", "vol", "amount", "total_mv", "circ_mv"}
 
 
 @dataclass
@@ -79,7 +75,8 @@ class LocalDailyProCsvImporter:
                 "volume": "shares (normalised from source vol lots x100)",
                 "amount": "CNY (normalised from source amount thousand-CNY x1000)",
                 "vol": "source lots", "amount_source": "source thousand-CNY",
-                "total_mv": "ten-thousand CNY", "circ_mv": "ten-thousand CNY",
+                "total_mv": "CNY (normalised from source ten-thousand CNY x10000)",
+                "circ_mv": "CNY (normalised from source ten-thousand CNY x10000)",
                 "total_share": "ten-thousand shares", "float_share": "ten-thousand shares",
             },
         }
@@ -155,7 +152,7 @@ class LocalDailyProCsvImporter:
             self._record(summary.failed_files, path.name, f"缺少字段: {', '.join(sorted(missing))}")
             return None
         summary.rows_read += raw.height
-        numeric = [name for name in SOURCE_COLUMNS - {"ts_code", "trade_date"}]
+        numeric = [name for name in raw.columns if name not in {"ts_code", "trade_date"}]
         typed = raw.with_columns(
             pl.col("ts_code").cast(pl.Utf8).str.strip_chars().str.to_uppercase(),
             pl.col("trade_date").cast(pl.Utf8).str.strip_chars(),
@@ -167,7 +164,11 @@ class LocalDailyProCsvImporter:
             (pl.col("vol") * 100).alias("volume"),
             (pl.col("amount") * 1_000).alias("amount_cny"),
             pl.col("amount").alias("amount_source"),
-        ).drop("amount").rename({"amount_cny": "amount"})
+            (pl.col("total_mv") * 10_000).alias("total_mv_cny"),
+            (pl.col("circ_mv") * 10_000).alias("circ_mv_cny"),
+        ).drop("amount", "total_mv", "circ_mv").rename({
+            "amount_cny": "amount", "total_mv_cny": "total_mv", "circ_mv_cny": "circ_mv",
+        })
         valid = (
             pl.col("symbol").str.contains(r"^\d{6}\.(SH|SZ|BJ)$")
             & pl.col("date").is_not_null()

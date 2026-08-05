@@ -151,6 +151,34 @@ def test_not_ready_does_not_create_formal_result(tmp_path) -> None:
     assert not (tmp_path / "pools").exists()
 
 
+def test_adapter_prefers_professional_daily_dataset_when_present(tmp_path) -> None:
+    daily_dir = tmp_path / "kline_daily_pro"
+    daily_dir.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["000001.SZ", "000001.SZ"],
+        "date": [date(2026, 4, 30), date(2026, 5, 4)],
+        "high": [10.0, 11.0], "close": [10.0, 11.0], "total_mv": [10_000_000_001.0, 10_000_000_001.0],
+    }).write_parquet(daily_dir / "part.parquet")
+
+    readiness = StockPoolDataAdapter(tmp_path).readiness("2026-05")
+
+    assert readiness.to_dict()["coverage"]["daily_dataset"] == "kline_daily_pro"
+
+
+def test_adapter_prefers_professional_daily_dataset_when_present(tmp_path) -> None:
+    daily_dir = tmp_path / "kline_daily_pro"
+    daily_dir.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["000001.SZ", "000001.SZ"],
+        "date": [date(2026, 4, 30), date(2026, 5, 4)],
+        "high": [10.0, 11.0], "close": [10.0, 11.0], "total_mv": [10_000_000_001.0, 10_000_000_001.0],
+    }).write_parquet(daily_dir / "part.parquet")
+
+    readiness = StockPoolDataAdapter(tmp_path).readiness("2026-05")
+
+    assert readiness.to_dict()["coverage"]["daily_dataset"] == "kline_daily_pro"
+
+
 def test_manual_save_writes_members_and_manifest(tmp_path) -> None:
     class ReadyAdapter:
         def readiness(self, month: str) -> DataReadiness:
