@@ -91,6 +91,16 @@ LOCAL_MINUTE_CSV_DIR=D:\\market-data\\2026  # 仅管理员命令行导入分钟 
 
 导入器要求 GBK 编码、首行为说明、第二行为包含“股票代码、k线结束时间、开盘价、收盘价、最高价、最低价、成交量、成交额”的 CSV 表头，文件名形如 `sh600000.csv`。已有 `symbol + datetime` 数据保持不变；成交量按“手”转为“股”；价格原样保存并标记为复权状态未知。
 
+当前股票池回测优先读取 Tushare 独立命名空间。另一台 Windows 电脑从源码部署时，在 `backend/` 目录执行：
+
+```powershell
+uv sync --extra vnpy-backtest
+uv run python -m app.scripts.import_tushare_local_data --source-root D:\market-data\tushare --datasets names daily minute financials --market-years 2025 2026
+uv run python -m app.scripts.import_tushare_local_data --source-root D:\market-data\tushare --datasets factors --market-years 2025 2026
+```
+
+数据分别写入 `DATA_DIR/name_changes_tushare`、`kline_daily_tushare`、`kline_minute_tushare`、`financial_tushare` 和 `adj_factor_tushare`。默认 `qfq` 信号价要求日线与复权因子完整；选择 `raw` 时不读取复权因子。仓库不会包含 CSV、Parquet、Token 或个人绝对路径，需要在新电脑单独导入或复制整个 `DATA_DIR`。
+
 ---
 
 ## 访问密码(公网部署)
@@ -108,10 +118,10 @@ AUTH_PASSWORD=你的密码    # 至少 6 位;仅首次生效,已设过则不覆�
 ## 后端依赖 Extras(可选)
 
 ```ini
-BACKEND_EXTRAS=             # 留空默认;legacy-cpu 兼容老 CPU
+BACKEND_EXTRAS=vnpy-backtest             # 股票池分钟回测
 ```
 
-老 CPU 无 AVX2/FMA 支持时设为 `legacy-cpu`,会给 Polars 切到 `rtcompat` 运行时;需回测则 `legacy-cpu backtest`。Docker 构建和 `./dev.sh` / `.\dev.ps1` 都会读取此值并同步依赖。详见 [deployment.md → 老 CPU 兼容](./deployment.md#老-cpu-兼容avx2fma-缺失)。
+老 CPU 无 AVX2/FMA 支持时设为 `legacy-cpu vnpy-backtest`。`./dev.sh` / `.\dev.ps1` 会读取此值并同步依赖。当前交付保证源码部署可运行；Docker 默认镜像和 GitHub Release 桌面安装包不默认包含 vn.py。详见 [deployment.md → 老 CPU 兼容](./deployment.md#老-cpu-兼容avx2fma-缺失)。
 
 ---
 

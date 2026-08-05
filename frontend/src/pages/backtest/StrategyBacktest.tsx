@@ -1,24 +1,22 @@
-import { useState, useMemo, useEffect, useRef, type ReactNode } from 'react'
+import { Fragment, useState, useMemo, useEffect, useRef, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { motion, AnimatePresence } from 'framer-motion'
-import { Play, FlaskConical, Clock, Loader2, Square, Search, Plus, X, SlidersHorizontal, BarChart3, Gauge, Zap, ListPlus, HelpCircle, ChevronRight, AlertTriangle } from 'lucide-react'
+import { motion } from 'framer-motion'
+import { Play, FlaskConical, Clock, Loader2, Square, Search, Plus, X, SlidersHorizontal, Zap, ListPlus } from 'lucide-react'
 import {
   api,
   type StrategyBacktestResult,
   type StrategyBacktestTrade,
   type StrategyDetail,
   type StrategyParamDef,
+  type VnpyStrategy,
 } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
 import { fmtPct, fmtPrice, priceColorClass } from '@/lib/format'
-import { boardTag } from '@/lib/board'
 import { BUILTIN_COLUMNS } from '@/lib/watchlist-columns'
-import { cnSignal } from '@/lib/signals'
 import { SignalPicker } from '@/components/screener/SignalPicker'
 import { startBacktest, stopBacktest, tryReconnect, useBacktestTask } from '@/lib/backtestTask'
-import { participationRatio } from '@/lib/openingVolumeExecution'
-import { useDataStatus, useCapabilities } from '@/lib/useSharedQueries'
+import { useDataStatus } from '@/lib/useSharedQueries'
 import { EmptyState } from '@/components/EmptyState'
 import { WarmupBadge } from '@/components/WarmupBadge'
 import { DatePicker } from '@/components/DatePicker'
@@ -26,8 +24,6 @@ import { StrategyNavChart } from './charts/StrategyNavChart'
 import { ReturnDistributionChart } from './charts/ReturnDistributionChart'
 import { TradeKlineModal } from './components/TradeKlineModal'
 import { SignalTriggerActions } from '@/components/signals/SignalTriggerActions'
-import { OpeningVolumeParamsEditor } from '@/components/strategy/OpeningVolumeParamsEditor'
-import { toast } from '@/components/Toast'
 
 const formatDate = (date: Date) => date.toISOString().slice(0, 10)
 const monthsAgo = (months: number) => {
@@ -37,6 +33,11 @@ const monthsAgo = (months: number) => {
 }
 const TODAY = formatDate(new Date())
 const THREE_MONTHS_AGO = monthsAgo(3)
+
+const VNPY_PORTFOLIO_DEFAULT_PARAMS = {
+  cash_reserve_ratio: 0.03,
+  min_commission: 5.0,
+}
 
 type QuickRangeUnit = 'month' | 'year' | 'all'
 type QuickRangeConfig = { id: string; enabled: boolean; unit: QuickRangeUnit; value: number }
@@ -51,11 +52,6 @@ const DEFAULT_QUICK_RANGES: QuickRangeConfig[] = [
   { id: 'range-3', enabled: true, unit: 'year', value: 1 },
   { id: 'range-4', enabled: true, unit: 'all', value: 0 },
 ]
-const OPENING_VOLUME_DEFAULTS = {
-  initialCapital: '10000000',
-  maxPositions: '8',
-  maxExposure: '97',
-} as const
 const quickRangeValue = (unit: QuickRangeUnit, value: unknown, fallback: number) => {
   if (unit === 'all') return 0
   const limits = QUICK_RANGE_LIMITS[unit]
@@ -97,67 +93,32 @@ const quickRangeTitle = (range: QuickRangeConfig) => range.unit === 'all'
 const INPUT_CLS = `w-full px-2.5 py-1.5 rounded-input bg-surface border border-border text-xs
   focus:outline-none focus:border-accent transition-colors duration-150 ease-smooth`
 
-/** 成交时序说明 — 黄色问号图标, 点击弹出气泡。
- * 用 fixed 定位脱离父容器 overflow 裁剪(左侧表单是 overflow-y-auto, absolute 气泡会被裁)。 */
-function FillRuleHint() {
-  const [open, setOpen] = useState(false)
-  const [pos, setPos] = useState<{ top: number; left: number } | null>(null)
-  const iconRef = useRef<HTMLButtonElement>(null)
-
-  const handleOpen = () => {
-    if (!open && iconRef.current) {
-      const r = iconRef.current.getBoundingClientRect()
-      setPos({ top: r.bottom + 4, left: r.left })
-    }
-    setOpen(v => !v)
-  }
-
-  // 气泡宽度 256px(w-64), 若右侧超出视口则向左对齐
-  const bubbleLeft = pos ? Math.min(pos.left, window.innerWidth - 256 - 8) : 0
-
-  return (
-    <div className="relative inline-flex items-center">
-      <button
-        ref={iconRef}
-        type="button"
-        onClick={handleOpen}
-        aria-label="查看成交时序说明"
-        aria-expanded={open}
-        title="查看成交时序说明"
-        className="inline-flex h-3.5 w-3.5 items-center justify-center text-yellow-500/80 transition-colors hover:text-yellow-500"
-      >
-        <HelpCircle className="h-3.5 w-3.5" />
-      </button>
-      <AnimatePresence>
-        {open && pos && (
-          <>
-            <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-            <motion.div
-              initial={{ opacity: 0, y: -4, scale: 0.95 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: -4, scale: 0.95 }}
-              transition={{ duration: 0.15 }}
-              style={{ top: pos.top, left: bubbleLeft }}
-              className="fixed z-50 w-64 bg-surface border border-border rounded-md shadow-xl p-3 text-[11px] text-secondary leading-relaxed"
-              onClick={e => e.stopPropagation()}
-            >
-              <div className="font-medium text-foreground mb-1.5">成交时序说明</div>
-              <div className="space-y-1">
-                <div><b className="text-foreground">建仓口径</b>和<b className="text-foreground">清仓口径</b>分别控制买卖信号出现后的成交时点。</div>
-                <div><b className="text-foreground">信号日收盘</b>仅适用于收盘前可确认的信号；收盘后确认的信号应选择<b className="text-foreground">次日开盘</b>。</div>
-                <div><b className="text-foreground">信号触发卖出</b>仅在分钟成交开启且卖出信号支持分钟回放时可用；分钟收盘确认后按下一分钟开盘成交。</div>
-                <div>买卖信号由<b className="text-foreground">策略触发器</b>决定，这里只控制信号出现后的成交时点。</div>
-              </div>
-            </motion.div>
-          </>
-        )}
-      </AnimatePresence>
-    </div>
-  )
-}
-
 const SRC_MAP: Record<string, string> = { builtin: '内置', custom: '自定义', ai: 'AI' }
 const TRADE_PAGE_SIZE_OPTIONS = [10, 20, 30, 50, 100]
+
+const VNPY_REJECTION_LABELS: Record<string, string> = {
+  max_positions: '已达最大持仓数',
+  no_next_bar: '信号后无下一根分钟 K 线',
+  no_position: '当前无可卖持仓',
+  t_plus_one: 'T+1 限制：当日买入不可卖出',
+  already_held: '已有持仓或买入委托',
+  insufficient_cash: '可用资金不足',
+  suspended_or_missing_bar: '停牌或缺少下一分钟数据',
+  price_limit: '涨跌停限制，无法成交',
+  below_minimum_lot: '资金不足最小买入单位',
+  below_lot_or_no_position: '可卖数量不足一手',
+}
+
+function vnpySignalExecutionText(item: { status?: string; fill_datetime?: string | null; due_at?: string | null; rejection_reason?: string | null }) {
+  if (item.status === 'filled') return item.fill_datetime ? `已成交 · ${item.fill_datetime}` : '已成交'
+  if (item.status === 'rejected') return VNPY_REJECTION_LABELS[item.rejection_reason ?? ''] ?? item.rejection_reason ?? '未执行'
+  if (item.status === 'queued') return item.due_at ? `等待下一分钟开盘 · ${item.due_at}` : '等待下一分钟开盘'
+  return '已触发，等待处理'
+}
+
+function isVnpyLongDirection(direction?: string | null) {
+  return direction === 'LONG' || direction === 'long' || direction === '多'
+}
 const BADGE_CLS_MAP: Record<string, string> = {
   builtin: 'bg-secondary/10 text-muted border-border',
   ai: 'bg-purple-500/10 text-purple-400 border-purple-500/30',
@@ -174,8 +135,6 @@ Object.assign(FIELD_LABEL, {
   vol_ratio_5d: '量比', vol_ratio_20d: '20日量比',
   macd_dif: 'MACD-DIF', macd_dea: 'MACD-DEA', macd_hist: 'MACD柱',
   boll_upper: '布林上轨', boll_lower: '布林下轨',
-  ma20_bias: 'MA20乖离率',
-  volume_ratio: '同期量比', today_return: '当日涨幅',
 })
 const BOARD_OPTIONS = ['沪主板', '深主板', '创业板', '科创板', '北交所']
 const BASIC_FILTER_FIELDS = [
@@ -185,12 +144,6 @@ const BASIC_FILTER_FIELDS = [
   { key: 'market_cap_min', label: '最低总市值', unit: '亿', scale: 1e8 },
   { key: 'turnover_min', label: '最低换手率', unit: '%' },
   { key: 'turnover_max', label: '最高换手率', unit: '%' },
-]
-const OPENING_VOLUME_FILTER_FIELDS = [
-  { key: 'price_min', label: '最低价', unit: '元' },
-  { key: 'price_max', label: '最高价', unit: '元' },
-  { key: 'amount_min', label: '最低累计成交额', unit: '亿', scale: 1e8 },
-  { key: 'amount_max', label: '最高累计成交额', unit: '亿', scale: 1e8 },
 ]
 type AdvancedSettingsTab = 'params' | 'filter' | 'entry' | 'exit' | 'scoring' | 'risk' | 'range'
 type StrategyGroup = 'all' | 'custom' | 'ai' | 'builtin'
@@ -203,19 +156,12 @@ const STRATEGY_GROUPS: { id: StrategyGroup; label: string }[] = [
 const ADVANCED_TABS: { id: AdvancedSettingsTab; label: string }[] = [
   { id: 'params', label: '策略参数' },
   { id: 'filter', label: '基础过滤' },
-  { id: 'entry', label: '入场触发器' },
-  { id: 'exit', label: '出场触发器' },
+  { id: 'entry', label: '买入触发器' },
+  { id: 'exit', label: '卖出触发器' },
   { id: 'scoring', label: '评分权重' },
   { id: 'risk', label: '风控' },
   { id: 'range', label: '回测范围' },
 ]
-const OPENING_VOLUME_ADVANCED_TABS = ADVANCED_TABS.filter(tab => (
-  tab.id === 'params'
-  || tab.id === 'filter'
-  || tab.id === 'scoring'
-  || tab.id === 'risk'
-  || tab.id === 'range'
-))
 const toSignalId = (sig: string) => (sig.startsWith('signal_') || sig.startsWith('csg_')) ? sig : `signal_${sig}`
 const numOrNull = (v: string) => v === '' || Number.isNaN(Number(v)) ? null : Number(v)
 const clamp = (v: number, min?: number, max?: number) => {
@@ -235,17 +181,7 @@ const mergeStrategyParams = (detail: StrategyDetail, values?: Record<string, any
   ...strategyDefaultParams(detail),
   ...(values ?? {}),
 })
-const normalizeStrategyOverrides = (detail: StrategyDetail, values?: Record<string, any> | null) => {
-  const next = { ...(values ?? {}) }
-  if (detail.execution_backend === 'matrix_native') {
-    // MatrixStrategy.compute_signals() owns entry/exit formulas. Remove both
-    // current and legacy persisted column overrides before any request.
-    delete next.entry_signals
-    delete next.exit_signals
-  }
-  return next
-}
-const buildDefaultOverrides = (detail: StrategyDetail) => normalizeStrategyOverrides(detail, {
+const buildDefaultOverrides = (detail: StrategyDetail) => ({
   basic_filter: { ...detail.basic_filter },
   entry_signals: detail.entry_signals.map(toSignalId),
   exit_signals: detail.exit_signals.map(toSignalId),
@@ -287,17 +223,7 @@ const statValueColor = (v: number | null | undefined) => {
   return v > 0 ? '#f87171' : '#34d399'
 }
 
-/** 信号 ID → 可读名称映射 (内置 + 自定义), 供交易记录显示具体触发信号。 */
-function useSignalNames(): Record<string, string> {
-  const customQ = useQuery({ queryKey: QK.customSignals, queryFn: api.customSignalsList })
-  return useMemo(() => {
-    const names: Record<string, string> = {}
-    for (const cs of customQ.data?.signals ?? []) names[`csg_${cs.id}`] = cs.name
-    return names
-  }, [customQ.data])
-}
-
-function ExitReasonBadge({ reason, signalId, signalNames }: { reason: string; signalId?: string | null; signalNames?: Record<string, string> }) {
+function ExitReasonBadge({ reason }: { reason: string }) {
   const config: Record<string, { label: string; cls: string }> = {
     signal: { label: '信号', cls: 'bg-accent/10 text-accent border-accent/30' },
     stop_loss: { label: '止损', cls: 'bg-red-500/10 text-red-400 border-red-500/30' },
@@ -309,121 +235,22 @@ function ExitReasonBadge({ reason, signalId, signalNames }: { reason: string; si
     end: { label: '期末', cls: 'bg-secondary/10 text-secondary border-border' },
   }
   const c = config[reason] ?? { label: reason, cls: 'bg-elevated text-muted border-border' }
-  // 信号类退出且能解析出具体信号名时, 显示具体信号而非笼统的"信号"
-  const specific = reason === 'signal' && signalId ? cnSignal(signalId, signalNames) : null
   return (
-    <span className={`text-[10px] px-1.5 py-0.5 rounded border ${c.cls} ${specific ? 'max-w-[7rem] truncate' : ''}`} title={specific ?? c.label}>
-      {specific ?? c.label}
-    </span>
+    <span className={`text-[10px] px-1.5 py-0.5 rounded border ${c.cls}`}>{c.label}</span>
   )
 }
 
-type DailyTradeRow = {
-  date: string
-  buys: StrategyBacktestTrade[]
-  sells: StrategyBacktestTrade[]
-  buyValue: number
-  sellValue: number
-  realizedPnl: number
-  cumulativePnl: number
-}
-
-function fmtPositionPct(v: number | null | undefined, digits = 2): string {
-  if (v == null || Number.isNaN(v)) return '—'
-  return `${(Math.abs(v) * 100).toFixed(digits)}%`
-}
-
-function fmtScore(v: number | null | undefined): string {
-  if (v == null || Number.isNaN(Number(v))) return '—'
-  return Number(v).toFixed(1)
-}
-
-function DailyTradeChip({ trade, side, strategyName, onClick, signalNames }: { trade: StrategyBacktestTrade; side: 'buy' | 'sell'; strategyName?: string; onClick?: () => void; signalNames?: Record<string, string> }) {
-  const isBuy = side === 'buy'
-  const tag = boardTag(trade.symbol)
-  const price = isBuy ? trade.entry_price : trade.exit_price
-  const amount = isBuy ? trade.entry_value : trade.exit_value
-  const pnlColor = priceColorClass(trade.pnl_amount ?? trade.pnl_pct)
-  const footerColor = isBuy ? 'text-secondary' : pnlColor
-  const footerText = `仓位 ${fmtPositionPct(trade.position_pct, 2)}`
-  const scoreText = fmtScore(trade.entry_score)
-  const buyStrategy = strategyName || '策略'
-
-  return (
-    <button type="button" onClick={onClick} className={`inline-flex ${isBuy ? 'w-[14.5rem]' : 'w-[14.5rem]'} flex-col gap-0.5 rounded-btn border px-1.5 py-1 text-left text-[11px] leading-4 transition-colors hover:border-accent/45 hover:bg-elevated/60 focus:outline-none focus:ring-1 focus:ring-accent/40 ${
-      isBuy ? 'border-accent/25 bg-accent/5' : 'border-border/70 bg-base/45'
-    }`}>
-      <span className="flex items-center gap-1">
-        <span className={`shrink-0 rounded px-1 py-px text-[9px] font-medium ${
-          isBuy ? 'bg-accent/15 text-accent' : 'bg-elevated text-secondary'
-        }`}>
-          {isBuy ? '买' : '卖'}
-        </span>
-        <span className="min-w-0 flex-1 truncate text-foreground">{trade.name || trade.symbol}</span>
-        {tag && <span className={`shrink-0 rounded px-1 text-[9px] font-medium ${isBuy ? 'bg-accent/20 text-accent' : 'bg-elevated text-secondary'}`}>{tag}</span>}
-      </span>
-      <span className="flex items-center justify-between gap-2 text-muted">
-        <span className="min-w-0 truncate">
-          <span className="font-mono">{trade.symbol}</span>
-          <span className="mx-1">·</span>
-          <span className="num">{fmtLots(trade.lots)}手</span>
-        </span>
-        {isBuy ? (
-          <span className="num shrink-0 text-secondary">{fmtPrice(price)}</span>
-        ) : (
-          <span className="flex shrink-0 items-center gap-1.5">
-            <span className="num text-secondary">{fmtPrice(price)}</span>
-            <ExitReasonBadge reason={trade.exit_reason} signalId={trade.exit_signal_id} signalNames={signalNames} />
-          </span>
-        )}
-      </span>
-      {isBuy ? (
-        <>
-          <span className="flex items-center justify-between gap-2">
-            <span className="min-w-0 truncate text-muted" title={buyStrategy}>策略 {buyStrategy}</span>
-            <span className="shrink-0 rounded border border-accent/25 bg-accent/10 px-1.5 py-px font-mono text-[10px] text-accent">
-              评分 {scoreText}
-            </span>
-          </span>
-          <span className="flex items-center justify-between gap-2">
-            <span className="num font-medium text-foreground">{fmtMoney(amount)}</span>
-            <span className={`min-w-0 truncate text-right num ${footerColor}`}>{footerText}</span>
-          </span>
-        </>
-      ) : (
-        <>
-          <span className="flex items-center justify-between gap-2">
-            <span className="text-muted">卖出</span>
-            <span className="num font-medium text-foreground">{fmtMoney(amount)}</span>
-          </span>
-          <span className="flex items-center justify-between gap-2">
-            <span className="text-muted">盈亏</span>
-            <span className={`flex shrink-0 items-center gap-1.5 text-right num font-medium ${pnlColor}`}>
-              <span>{fmtSignedMoney(trade.pnl_amount)}</span>
-              <span className="text-muted/40">/</span>
-              <span>{fmtPct(trade.pnl_pct)}</span>
-            </span>
-          </span>
-        </>
-      )}
-    </button>
-  )
-}
-
-function TradeLegCell({ trade, side, signalNames }: { trade: StrategyBacktestTrade; side: 'buy' | 'sell'; signalNames?: Record<string, string> }) {
+function TradeLegCell({ trade, side }: { trade: StrategyBacktestTrade; side: 'buy' | 'sell' }) {
   const isBuy = side === 'buy'
   const date = String(isBuy ? trade.entry_date : trade.exit_date).slice(0, 10)
   const signalDate = String(isBuy ? trade.entry_signal_date ?? '' : trade.exit_signal_date ?? '').slice(0, 10)
   const price = isBuy ? trade.entry_price : trade.exit_price
   const amount = isBuy ? trade.entry_value : trade.exit_value
-  const signalId = isBuy ? trade.entry_signal_id : trade.exit_signal_id
-  const signalLabel = signalId ? cnSignal(signalId, signalNames) : null
-  const signalDateLabel = isBuy || trade.exit_reason === 'signal' ? '信号' : '触发'
 
   return (
     <div className="min-w-[8.25rem] rounded-btn border border-border/60 bg-base/35 px-2 py-1 text-xs leading-4">
       <div className="flex items-center justify-between gap-2">
-        <span className="font-mono text-secondary">成交 {date}</span>
+        <span className="font-mono text-secondary">{date}</span>
         <span className={`rounded px-1.5 py-px text-[10px] font-medium ${
           isBuy ? 'bg-accent/15 text-accent' : 'bg-elevated text-secondary'
         }`}>
@@ -434,11 +261,8 @@ function TradeLegCell({ trade, side, signalNames }: { trade: StrategyBacktestTra
         <span className="num text-foreground">{fmtPrice(price)}</span>
         <span className="num font-medium text-foreground">{fmtMoney(amount)}</span>
       </div>
-      {signalLabel && (
-        <div className="mt-0.5 text-[10px] text-accent/80 truncate" title={signalLabel}>{signalLabel}</div>
-      )}
-      {signalDate && (
-        <div className="mt-0.5 text-[10px] text-muted">{signalDateLabel} {signalDate}</div>
+      {signalDate && signalDate !== date && (
+        <div className="mt-0.5 text-[10px] text-muted">信号 {signalDate}</div>
       )}
     </div>
   )
@@ -453,96 +277,10 @@ function fmtDuration(ms: number): string {
   return `${m}分${rest}秒`
 }
 
-const METRIC_HELP = {
-  avgReturn: {
-    title: '平均收益',
-    description: '所有已执行候选交易收益率的算术平均值。',
-    note: '容易受极端盈亏影响，建议与中位数一起看。',
-  },
-  medianReturn: {
-    title: '中位数收益',
-    description: '将每笔收益排序后位于中间的值。',
-    note: '比平均收益更不容易被少数极端样本扭曲。',
-  },
-  winRate: {
-    title: '胜率',
-    description: '盈利交易数占已完成交易数的比例。',
-    note: '胜率高不代表总收益一定高，还需结合盈亏比。',
-  },
-  profitFactor: {
-    title: '盈亏比',
-    description: '平均盈利幅度 ÷ 平均亏损幅度的绝对值。',
-    note: '大于 1 表示平均单笔盈利大于平均单笔亏损。',
-  },
-  totalReturn: {
-    title: '总收益',
-    description: '回测期末权益相对初始资金的累计收益率。',
-    note: '已反映回测中的仓位、费用、滑点和成交约束。',
-  },
-  annualReturn: {
-    title: '年化收益',
-    description: '将回测期总收益按复利折算为一年的收益率。',
-    note: '短周期回测的年化结果可能被明显放大。',
-  },
-  benchmarkReturn: {
-    title: '同期上证',
-    description: '同一回测区间内上证指数的累计收益率。',
-    note: '用于判断策略表现是否主要来自市场整体涨跌。',
-  },
-  excessReturn: {
-    title: '超额收益',
-    description: '策略总收益率减去同期上证指数收益率。',
-    note: '正值表示跑赢基准，负值表示跑输基准。',
-  },
-  sharpe: {
-    title: '夏普比率 (Sharpe Ratio)',
-    description: '收益序列的平均收益 ÷ 总波动，并按 252 期年化。',
-    note: '数值越高，单位波动获得的收益越多；小样本时仅供参考。',
-  },
-  sortino: {
-    title: '索提诺比率 (Sortino Ratio)',
-    description: '收益序列的平均收益 ÷ 下行偏差，并按 252 期年化。',
-    note: '只惩罚负收益波动，不将向上波动视为风险。',
-  },
-  maxDrawdown: {
-    title: '最大回撤',
-    description: '回测权益从历史高点到随后最低点的最大跌幅。',
-    note: '越接近 0 通常代表历史资金回撤越小。',
-  },
-  mcDrawdownMedian: {
-    title: '蒙卡回撤中位数',
-    description: '对交易收益有放回重抽样，各自计算最大回撤后取中位数。',
-    note: '表示交易顺序变化时较典型的最大回撤场景。',
-  },
-  mcDrawdown95: {
-    title: '蒙卡回撤 95% 边界',
-    description: '交易收益重抽样结果中偏悲观的最大回撤边界。',
-    note: '约有 95% 的模拟顺序回撤不劣于此值，但不是未来承诺。',
-  },
-  tradeCount: {
-    title: '交易数',
-    description: '回测期内已完成建仓和清仓的交易笔数。',
-    note: '样本越少，胜率和风险指标的稳定性越低。',
-  },
-  avgDuration: {
-    title: '平均持仓',
-    description: '所有已完成交易的平均持仓天数。',
-    note: '全量模式下每个候选独立执行后再汇总。',
-  },
-  finalEquity: {
-    title: '最终权益',
-    description: '回测结束时账户现金与持仓市值的合计。',
-    note: '已反映成交费用、滑点和仓位约束。',
-  },
-} as const
-
-type MetricHelpKey = keyof typeof METRIC_HELP
-
-function MetricLabel({ label, metric }: { label: string; metric: MetricHelpKey }) {
+function SharpeLabel() {
   const [open, setOpen] = useState(false)
   const [alignRight, setAlignRight] = useState(false)
   const ref = useRef<HTMLSpanElement>(null)
-  const help = METRIC_HELP[metric]
   useEffect(() => {
     if (!open) return
     const onClick = (e: MouseEvent) => {
@@ -560,22 +298,20 @@ function MetricLabel({ label, metric }: { label: string; metric: MetricHelpKey }
   }
   return (
     <span className="relative inline-flex items-center gap-1" ref={ref}>
-      {label}
+      夏普
       <button
         type="button"
         onClick={toggle}
-        aria-label={`查看${label}说明`}
-        aria-expanded={open}
-        title={`查看${label}说明`}
-        className="inline-flex h-3.5 w-3.5 items-center justify-center text-muted transition-colors hover:text-accent"
+        className="inline-flex h-3.5 w-3.5 items-center justify-center rounded-full border border-border bg-base text-[10px] text-muted transition-colors hover:border-accent/50 hover:text-accent"
       >
-        <HelpCircle className="h-3.5 w-3.5" />
+        ?
       </button>
       {open && (
         <span className={`absolute top-full z-50 mt-1.5 w-60 max-w-[calc(100vw-1.5rem)] rounded-lg border border-border bg-elevated px-3 py-2.5 text-[11px] leading-relaxed text-secondary shadow-xl ${alignRight ? 'right-0' : 'left-0'}`}>
-          <span className="block font-medium text-foreground">{help.title}</span>
-          <span className="mt-1 block">{help.description}</span>
-          <span className="mt-0.5 block text-warning">{help.note}</span>
+          <span className="block font-medium text-foreground">夏普比率 (Sharpe Ratio)</span>
+          <span className="mt-1 block">衡量<b className="text-foreground">单位波动风险</b>换来的超额收益。</span>
+          <span className="mt-0.5 block">数值越高，收益相对波动越优秀；</span>
+          <span className="mt-0.5 block text-warning">短周期或交易次数少时容易偏高，仅供参考。</span>
         </span>
       )}
     </span>
@@ -661,14 +397,6 @@ function StrategyParamInput({ param, value, onChange }: {
   value: any
   onChange: (value: any) => void
 }) {
-  if (param.type === 'time') {
-    return (
-      <label className="block">
-        <span className="mb-1 block text-[11px] text-secondary">{param.label}</span>
-        <input type="time" value={String(value ?? param.default)} onChange={e => onChange(e.target.value)} className={INPUT_CLS} />
-      </label>
-    )
-  }
   if (param.type === 'bool') {
     const checked = value === true || value === 'true' || value === 'True' || value === true
     return (
@@ -699,30 +427,6 @@ function StrategyParamInput({ param, value, onChange }: {
       </label>
     )
   }
-  if (param.type === 'percent') {
-    const percent = Number(value ?? param.default) * 100
-    return (
-      <label className="block">
-        <span className="mb-1 block text-[11px] text-secondary">{param.label}</span>
-        <div className="flex items-center gap-1.5">
-          <input
-            type="number"
-            value={percent}
-            min={param.min != null ? param.min * 100 : undefined}
-            max={param.max != null ? param.max * 100 : undefined}
-            step={(param.step ?? 0.01) * 100}
-            onChange={e => {
-              const n = numOrNull(e.target.value)
-              if (n == null) return onChange('')
-              onChange(clamp(n, param.min != null ? param.min * 100 : undefined, param.max != null ? param.max * 100 : undefined) / 100)
-            }}
-            className={INPUT_CLS}
-          />
-          <span className="text-xs text-muted">%</span>
-        </div>
-      </label>
-    )
-  }
   return (
     <label className="block">
       <span className="mb-1 block text-[11px] text-secondary">{param.label}</span>
@@ -744,28 +448,80 @@ function StrategyParamInput({ param, value, onChange }: {
   )
 }
 
-function StockPoolPicker({
-  value,
-  onChange,
-  assetType = 'stock',
-  emptyLabel = '全市场',
-  emptyDescription = '默认全市场回测，由基础过滤和策略条件筛选。',
-}: {
-  value: string
-  onChange: (value: string) => void
-  assetType?: 'stock' | 'etf'
-  emptyLabel?: string
-  emptyDescription?: string
+function VnpyStrategyParamInput({ param, value, onChange }: {
+  param: VnpyStrategy['parameters'][number]
+  value: unknown
+  onChange: (value: unknown) => void
 }) {
+  if (param.kind === 'bool') {
+    return (
+      <label className="flex items-center justify-between gap-2 text-[11px] text-secondary">
+        {param.label}
+        <input type="checkbox" checked={value === true} onChange={event => onChange(event.target.checked)} className="h-3.5 w-3.5 accent-amber-400" />
+      </label>
+    )
+  }
+  if (param.kind === 'string' || param.kind === 'time') {
+    return (
+      <label className="block">
+        <span className="mb-1 block text-[11px] text-secondary">{param.label}</span>
+        <input type="text" value={String(value ?? param.default ?? '')} onChange={event => onChange(event.target.value)} className={INPUT_CLS} />
+      </label>
+    )
+  }
+  return (
+    <label className="block">
+      <span className="mb-1 block text-[11px] text-secondary">{param.label}</span>
+      <input
+        type="number"
+        value={typeof value === 'number' ? value : Number(param.default ?? 0)}
+        min={param.minimum ?? undefined}
+        max={param.maximum ?? undefined}
+        step={param.kind === 'int' ? 1 : 0.01}
+        onChange={event => onChange(param.kind === 'int' ? Math.round(Number(event.target.value)) : Number(event.target.value))}
+        className={INPUT_CLS}
+      />
+    </label>
+  )
+}
+
+function parseBulkPoolSymbols(raw: string): { symbols: string[]; invalid: number } {
+  const seen = new Set<string>()
+  let invalid = 0
+  for (const token of raw.split(/[\s,;，；\[\]\(\){}'"`]+/)) {
+    if (!token) continue
+    const normalized = token.trim().toUpperCase()
+    const match = normalized.match(/^(\d{6})(?:\.(XSHG|XSHE|XBSE|SH|SZ|BJ|SSE|SZSE|BSE))?$/)
+    if (!match) {
+      invalid += 1
+      continue
+    }
+    const [, code, suffix] = match
+    let exchange: string
+    if (["XSHG", "SH", "SSE"].includes(suffix ?? "")) exchange = "SH"
+    else if (["XSHE", "SZ", "SZSE"].includes(suffix ?? "")) exchange = "SZ"
+    else if (["XBSE", "BJ", "BSE"].includes(suffix ?? "")) exchange = "BJ"
+    else if (code.startsWith("6")) exchange = "SH"
+    else if (code.startsWith("4") || code.startsWith("8")) exchange = "BJ"
+    else exchange = "SZ"
+    seen.add(`${code}.${exchange}`)
+  }
+  return { symbols: [...seen], invalid }
+}
+
+function StockPoolPicker({ value, onChange }: { value: string; onChange: (value: string) => void }) {
   const symbols = useMemo(() => value.split(',').map(s => s.trim()).filter(Boolean), [value])
   const [query, setQuery] = useState('')
   const [open, setOpen] = useState(false)
+  const [bulkOpen, setBulkOpen] = useState(false)
+  const [bulkText, setBulkText] = useState('')
+  const [bulkMessage, setBulkMessage] = useState<string | null>(null)
+  const [showAllSymbols, setShowAllSymbols] = useState(false)
   const [symbolNames, setSymbolNames] = useState<Record<string, string>>({})
   const ref = useRef<HTMLDivElement>(null)
-  const searchAssetTypes = assetType === 'etf' ? 'stock,etf' : 'stock'
   const search = useQuery({
-    queryKey: QK.instrumentSearch(query, searchAssetTypes),
-    queryFn: () => api.instrumentSearch(query, 20, searchAssetTypes),
+    queryKey: QK.instrumentSearch(query),
+    queryFn: () => api.instrumentSearch(query),
     enabled: query.trim().length > 0,
     staleTime: 30_000,
   })
@@ -804,6 +560,16 @@ function StockPoolPicker({
     setOpen(false)
   }
   const removeSymbol = (symbol: string) => setSymbols(symbols.filter(s => s !== symbol))
+  const applyBulkPool = () => {
+    const parsed = parseBulkPoolSymbols(bulkText)
+    if (parsed.symbols.length === 0) {
+      setBulkMessage('未识别到有效股票代码。')
+      return
+    }
+    setSymbols(parsed.symbols)
+    setBulkMessage(`已导入 ${parsed.symbols.length} 只${parsed.invalid ? `；跳过 ${parsed.invalid} 项` : ''}`)
+    setShowAllSymbols(false)
+  }
   // 一键导入自选: 合并去重, 顺带回填股票名
   const importFromWatchlist = () => {
     const entries = watchlist.data?.symbols ?? []
@@ -855,7 +621,7 @@ function StockPoolPicker({
         <div className="flex shrink-0 items-center gap-1.5">
           {/* 当前范围 — 有范围显示个数, 无范围显示全市场 */}
           <span className={`whitespace-nowrap text-[11px] font-medium ${symbols.length === 0 ? 'text-amber-400' : 'text-accent'}`}>
-            {symbols.length === 0 ? emptyLabel : `共 ${symbols.length} 只`}
+            {symbols.length === 0 ? '全市场' : `共 ${symbols.length} 只`}
           </span>
           <button
             type="button"
@@ -869,6 +635,14 @@ function StockPoolPicker({
           </button>
           <button
             type="button"
+            onClick={() => setBulkOpen(value => !value)}
+            className={`inline-flex items-center whitespace-nowrap rounded-input border px-2 py-1.5 text-[11px] transition-colors ${bulkOpen ? 'border-accent/50 bg-accent/10 text-accent' : 'border-border bg-surface text-secondary hover:border-accent/50 hover:text-foreground'}`}
+            title="粘贴聚宽、TickFlow 或纯六码股票代码；将自动转换交易所后缀并去重"
+          >
+            批量粘贴
+          </button>
+          <button
+            type="button"
             onClick={() => setSymbols([])}
             disabled={symbols.length === 0}
             className="inline-flex items-center gap-1 whitespace-nowrap rounded-input border border-border bg-surface px-2 py-1.5 text-[11px] text-secondary transition-colors hover:border-danger/50 hover:text-danger disabled:cursor-not-allowed disabled:opacity-50"
@@ -879,10 +653,26 @@ function StockPoolPicker({
           </button>
         </div>
       </div>
+      {bulkOpen && (
+        <div className="rounded-input border border-accent/25 bg-accent/5 p-2">
+          <textarea
+            value={bulkText}
+            onChange={event => { setBulkText(event.target.value); setBulkMessage(null) }}
+            placeholder="粘贴列表，例如 ['688322.XSHG', '002978.XSHE']，也支持逗号、换行或纯六码代码"
+            rows={5}
+            className="w-full resize-y rounded-input border border-border bg-base px-2 py-1.5 font-mono text-[11px] text-foreground outline-none focus:border-accent"
+          />
+          <div className="mt-1.5 flex items-center gap-2">
+            <button type="button" onClick={applyBulkPool} className="rounded-btn bg-accent px-2 py-1 text-[11px] font-medium text-white hover:bg-accent/90">替换为该股票池</button>
+            {bulkMessage && <span className="text-[11px] text-secondary">{bulkMessage}</span>}
+          </div>
+          <p className="mt-1 text-[10px] text-muted">自动转换：XSHG→SH、XSHE→SZ、XBSE→BJ；重复代码自动去除。</p>
+        </div>
+      )}
       <div className="flex flex-wrap gap-1.5">
         {symbols.length === 0 ? (
-          <span className="text-[11px] text-muted">{emptyDescription}</span>
-        ) : symbols.map(symbol => {
+          <span className="text-[11px] text-muted">默认全市场回测，由基础过滤和策略条件筛选。</span>
+        ) : (showAllSymbols ? symbols : symbols.slice(0, 48)).map(symbol => {
           const name = symbolNames[symbol]
           return (
           <span key={symbol} className="inline-flex items-center gap-1 rounded-btn border border-accent/30 bg-accent/10 px-2 py-1 text-[10px] text-accent">
@@ -895,45 +685,28 @@ function StockPoolPicker({
           )
         })}
       </div>
+      {symbols.length > 48 && (
+        <button type="button" onClick={() => setShowAllSymbols(value => !value)} className="text-[11px] text-accent hover:text-accent/80">
+          {showAllSymbols ? '收起股票列表' : `显示其余 ${symbols.length - 48} 只`}
+        </button>
+      )}
     </div>
   )
 }
 
 export function StrategyBacktest() {
-  const signalNames = useSignalNames()
   const [saved] = useState(() => storage.strategyBacktestLast.get(null))
   const [selectedStrategy, setSelectedStrategy] = useState<string | null>(saved?.selectedStrategy ?? null)
   const [strategyGroup, setStrategyGroup] = useState<StrategyGroup>('all')
   const [symbols, setSymbols] = useState(saved?.symbols ?? '')
-  const [universeSource, setUniverseSource] = useState<'market' | 'manual' | 'monthly_pool'>(saved?.universeSource ?? (saved?.symbols ? 'manual' : 'market'))
-  const [poolKey, setPoolKey] = useState<string | null>(saved?.poolKey ?? null)
-  const watchlistPools = useQuery({
-    queryKey: QK.watchlistPools,
-    queryFn: api.watchlistPools,
-  })
-  const monthlyPools = useMemo(
-    () => (watchlistPools.data?.pools ?? []).filter(pool => pool.month).sort((a, b) => b.month!.localeCompare(a.month!)),
-    [watchlistPools.data?.pools],
-  )
-  const selectedMonthlyPool = monthlyPools.find(pool => pool.pool_key === poolKey)
-  const selectedMonthlyMembers = useQuery({
-    queryKey: QK.watchlist(poolKey ?? undefined),
-    queryFn: () => api.watchlistList(poolKey ?? undefined),
-    enabled: universeSource === 'monthly_pool' && !!poolKey,
-  })
-  const [assetType, setAssetType] = useState<'stock' | 'etf'>(saved?.assetType ?? 'stock')
   const [start, setStart] = useState(saved?.start ?? THREE_MONTHS_AGO)
   const [end, setEnd] = useState(saved?.end ?? TODAY)
   // 成交口径: 建仓/清仓可独立配置。向后兼容老 matching (派生为 entry=exit=matching)。
   const [matching] = useState<'close_t' | 'open_t+1'>(saved?.matching ?? 'open_t+1')
   const [entryFill, setEntryFill] = useState<'close_t' | 'open_t+1'>(saved?.entryFill ?? saved?.matching ?? 'open_t+1')
-  const [exitFill, setExitFill] = useState<'close_t' | 'open_t+1' | 'signal_next_minute'>(
-    saved ? (saved.exitFill ?? saved.matching ?? 'close_t') : 'open_t+1',
+  const [exitFill, setExitFill] = useState<'close_t' | 'open_t+1'>(
+    saved?.exitFill === 'open_t+1' ? 'open_t+1' : 'close_t',
   )
-  const [candidateSort, setCandidateSort] = useState<'score' | 'volume_ratio' | 'watchlist_order'>(
-    saved?.candidateSort ?? 'volume_ratio',
-  )
-  const [forceCloseAtEnd, setForceCloseAtEnd] = useState(saved?.forceCloseAtEnd ?? true)
   const [fees, setFees] = useState(saved?.fees ?? '2')
   const [stampTax, setStampTax] = useState(saved?.stampTax ?? '1')
   const [slippage, setSlippage] = useState(saved?.slippage ?? '5')
@@ -941,23 +714,19 @@ export function StrategyBacktest() {
   const [maxExposure, setMaxExposure] = useState(saved?.maxExposure ?? '100')
   const [initialCapital, setInitialCapital] = useState(saved?.initialCapital ?? '1000000')
   const [positionSizing, setPositionSizing] = useState<'equal' | 'score_weight'>(saved?.positionSizing ?? 'equal')
-  const [maxBuyVolumeRatio, setMaxBuyVolumeRatio] = useState(saved?.maxBuyVolumeRatio ?? '0')
-  const [maxSellVolumeRatio, setMaxSellVolumeRatio] = useState(saved?.maxSellVolumeRatio ?? '0')
-  const [simMode, setSimMode] = useState<'position' | 'full'>(saved?.mode ?? 'position')
-  const [holdingDays, setHoldingDays] = useState(saved?.holdingDays ?? '5')
-  const [highGranularity, setHighGranularity] = useState(saved?.minuteFill ?? false)
-  const [signalPriceBasis, setSignalPriceBasis] = useState<'qfq' | 'raw'>('qfq')
+  const [volumeLimitEnabled, setVolumeLimitEnabled] = useState(saved?.volumeLimitEnabled ?? true)
+  const [signalPriceBasis, setSignalPriceBasis] = useState<'qfq' | 'raw'>(saved?.signalPriceBasis ?? 'qfq')
+  const simMode = 'position' as const
+  const holdingDays = '5'
   const [settingsOpen, setSettingsOpen] = useState(false)
-  // 分钟K成交价细化: 不改变信号日或成交日, 需 Pro+ 分钟K能力
-  const { data: caps } = useCapabilities()
-  const hasMinuteBatch = !!caps?.capabilities?.['kline.minute.batch']
-  const toggleMinuteFill = () => {
-    if (!hasMinuteBatch) return
-    if (highGranularity) {
-      if (exitFill === 'signal_next_minute') setExitFill('close_t')
-    }
-    setHighGranularity(value => !value)
-  }
+  // vn.py 本地分钟回测；具体股票池规模由注册策略决定。
+  // This page is dedicated to the vn.py minute engine. The legacy matrix
+  // branch remains in the module only for compatibility with old saved state,
+  // but is no longer reachable from the UI.
+  const highGranularity = true
+  const [vnpyStrategyId, setVnpyStrategyId] = useState('opening_breakout_pool')
+  const [vnpyParams, setVnpyParams] = useState<Record<string, unknown>>(VNPY_PORTFOLIO_DEFAULT_PARAMS)
+  const [vnpyPoolOpen, setVnpyPoolOpen] = useState(false)
   const [rangeSettingsOpen, setRangeSettingsOpen] = useState(false)
   const [quickRanges, setQuickRanges] = useState(loadQuickRanges)
   const [settingsTab, setSettingsTab] = useState<AdvancedSettingsTab>('params')
@@ -969,22 +738,22 @@ export function StrategyBacktest() {
   // 跨会话/拉新代码后自动渲染一个可能对应已失效策略的旧结果会造成困惑
   // (切页不卸载组件,内存中的 result 仍保留,无需靠 localStorage 恢复)。
   const [result, setResult] = useState<StrategyBacktestResult | null>(null)
-  const [resultTab, setResultTab] = useState<'daily' | 'trades' | 'picks'>('daily')
+  const [resultTab, setResultTab] = useState<'daily' | 'trades' | 'signals' | 'positions'>('daily')
   const [dailyPage, setDailyPage] = useState(0)
   const [tradePage, setTradePage] = useState(0)
   const [tradePageSize, setTradePageSize] = useState(10)
+  const [dailyExpanded, setDailyExpanded] = useState<string | null>(null)
+  const [tradeSearch, setTradeSearch] = useState('')
+  const [tradeReason, setTradeReason] = useState('')
   const [selectedTrade, setSelectedTrade] = useState<StrategyBacktestTrade | null>(null)
   const loadedStrategyRef = useRef<string | null>(null)
 
   const strategies = useQuery({
-    queryKey: QK.screenerStrategies(assetType, true),
-    queryFn: () => api.screenerStrategies(assetType, true),
+    queryKey: QK.screenerStrategies(),
+    queryFn: () => api.screenerStrategies(),
+    enabled: !highGranularity,
   })
-  const vnpyStrategies = useQuery({
-    queryKey: QK.vnpyStrategies,
-    queryFn: api.vnpyStrategies,
-  })
-  const vnpyStrategyList = useMemo(() => vnpyStrategies.data?.strategies ?? [], [vnpyStrategies.data])
+
   const strategyList = useMemo(() => strategies.data?.presets ?? [], [strategies.data])
   const filteredStrategyList = useMemo(() => (
     strategyGroup === 'all' ? strategyList : strategyList.filter(st => st.source === strategyGroup)
@@ -994,29 +763,48 @@ export function StrategyBacktest() {
   // 拉新代码后会失效,导致 strategyGet 一直 404/加载中)。列表就绪后若失效,
   // 连带清除其专属的 params/overrides/result(这些是该策略的运行配置/产物,
   // 策略失效后留着会造成"孤儿"状态:界面显示旧回测结果却无对应策略)。
-  const selectedVnpyStrategy = vnpyStrategyList.find(strategy => strategy.id === selectedStrategy) ?? null
-
   useEffect(() => {
-    if (strategies.isLoading || vnpyStrategies.isLoading || strategyList.length === 0) return
-    if (selectedStrategy && !strategyList.some(st => st.id === selectedStrategy) && !vnpyStrategyList.some(st => st.id === selectedStrategy)) {
+    if (strategies.isLoading || strategyList.length === 0) return
+    if (selectedStrategy && !strategyList.some(st => st.id === selectedStrategy)) {
       setSelectedStrategy(null)
       setStrategyParams({})
       setOverrides({})
       setResult(null)
     }
-  }, [strategies.isLoading, vnpyStrategies.isLoading, strategyList, selectedStrategy, vnpyStrategyList])
+  }, [strategies.isLoading, strategyList, selectedStrategy])
 
   const strategyDetail = useQuery({
-    queryKey: QK.strategyDetail(selectedStrategy ?? ''),
+    queryKey: ['strategy-detail', selectedStrategy],
     queryFn: () => api.strategyGet(selectedStrategy!),
-    enabled: !!selectedStrategy && !selectedVnpyStrategy,
+    enabled: !highGranularity && !!selectedStrategy,
   })
 
   const backtestTask = useBacktestTask()
   const isPending = backtestTask?.isPending ?? false
 
   const dataStatus = useDataStatus()
+  const vnpyStrategies = useQuery({ queryKey: ['vnpy-strategies'], queryFn: api.vnpyStrategies })
+  const vnpyStrategy = useMemo<VnpyStrategy | undefined>(
+    () => vnpyStrategies.data?.strategies.find(item => item.id === vnpyStrategyId),
+    [vnpyStrategies.data, vnpyStrategyId],
+  )
   const earliestDate = dataStatus.data?.daily?.earliest_date ?? null
+  const hasLocalMinuteData = !!dataStatus.data?.minute?.trading_days
+
+  useEffect(() => {
+    const first = vnpyStrategies.data?.strategies[0]
+    if (first && !vnpyStrategies.data?.strategies.some(item => item.id === vnpyStrategyId)) {
+      setVnpyStrategyId(first.id)
+    }
+  }, [vnpyStrategies.data, vnpyStrategyId])
+
+  useEffect(() => {
+    if (!vnpyStrategy) return
+    setVnpyParams({
+      ...VNPY_PORTFOLIO_DEFAULT_PARAMS,
+      ...Object.fromEntries(vnpyStrategy.parameters.map(param => [param.name, param.default])),
+    })
+  }, [vnpyStrategyId, vnpyStrategy])
 
   const resetConfigFromDetail = (detail: StrategyDetail) => {
     setStrategyParams(strategyDefaultParams(detail))
@@ -1035,7 +823,7 @@ export function StrategyBacktest() {
     loadedStrategyRef.current = detail.id
     if (saved?.selectedStrategy === detail.id && (saved.params || saved.overrides)) {
       setStrategyParams(mergeStrategyParams(detail, saved.params))
-      setOverrides(normalizeStrategyOverrides(detail, saved.overrides ?? buildDefaultOverrides(detail)))
+      setOverrides(saved.overrides ?? buildDefaultOverrides(detail))
       return
     }
     resetConfigFromDetail(detail)
@@ -1052,18 +840,11 @@ export function StrategyBacktest() {
       storage.strategyBacktestLast.set({
         selectedStrategy,
         symbols,
-        assetType,
-        universeSource,
-        poolKey,
-        poolMonth: selectedMonthlyPool?.month ?? null,
-        poolUpdatedAt: selectedMonthlyPool?.updated_at ?? null,
         start,
         end,
         matching,
         entryFill,
         exitFill,
-        candidateSort,
-        forceCloseAtEnd,
         fees,
         stampTax,
         slippage,
@@ -1071,11 +852,10 @@ export function StrategyBacktest() {
         maxExposure,
         initialCapital,
         positionSizing,
-        maxBuyVolumeRatio,
-        maxSellVolumeRatio,
+        volumeLimitEnabled,
+        signalPriceBasis,
         mode: simMode,
         holdingDays,
-        minuteFill: highGranularity,
         params: strategyParams,
         overrides,
         result: backtestTask.result,
@@ -1083,81 +863,10 @@ export function StrategyBacktest() {
     }
   }, [backtestTask])
 
-  const handleRun = async () => {
-    const detail = strategyDetail.data
-    if (!selectedStrategy) return
-    const requestOverrides = detail
-      ? normalizeStrategyOverrides(detail, overrides)
-      : overrides
-    if (vnpyStrategyList.some(strategy => strategy.id === selectedStrategy)) {
-      const poolSymbols = symbols.split(/[\s,]+/).map(symbol => symbol.trim()).filter(Boolean)
-      if (poolSymbols.length === 0) {
-        toast('请输入至少一只用于 vn.py 回测的股票代码。', 'error')
-        return
-      }
-      startBacktest({
-        strategy_id: selectedStrategy,
-        symbols: poolSymbols,
-        start: start || null,
-        end: end || undefined,
-        entry_fill: 'next_minute_open',
-        exit_fill: 'next_minute_open',
-        candidate_sort: candidateSort,
-        force_close_at_end: forceCloseAtEnd,
-        commission_pct: Number(fees) / 10000,
-        stamp_tax_pct: Number(stampTax) / 1000,
-        slippage_bps: Number(slippage),
-        max_positions: Number(maxPositions),
-        initial_capital: Number(initialCapital),
-        position_sizing: 'equal',
-        max_buy_volume_ratio: participationRatio(maxBuyVolumeRatio),
-        max_sell_volume_ratio: participationRatio(maxSellVolumeRatio),
-        signal_price_basis: signalPriceBasis,
-        params: {
-          ...strategyParams,
-          basic_filter: requestOverrides.basic_filter,
-          scoring: requestOverrides.scoring,
-          score_min: requestOverrides.score_min,
-          score_max: requestOverrides.score_max,
-          max_hold_days: requestOverrides.max_hold_days,
-          take_profit_pct: requestOverrides.take_profit,
-          trailing_stop_pct: requestOverrides.trailing_stop,
-          trailing_take_profit_activate_pct: requestOverrides.trailing_take_profit_activate,
-          trailing_take_profit_drawdown_pct: requestOverrides.trailing_take_profit_drawdown,
-          cash_reserve_ratio: 1 - Number(maxExposure) / 100,
-          min_commission: 5,
-        },
-        engine: 'vnpy',
-      })
-      return
-    }
-    let frozenPoolSymbols: string[] | null = null
-    if (universeSource === 'monthly_pool') {
-      if (!poolKey) {
-        toast('请先选择月份股票池。', 'error')
-        return
-      }
-      try {
-        // 启动前重新读取成员，提交具体代码以冻结本次回测范围。
-        const snapshot = await api.watchlistList(poolKey)
-        frozenPoolSymbols = snapshot.symbols.map(item => item.symbol).filter(Boolean)
-      } catch {
-        return
-      }
-      if (frozenPoolSymbols.length === 0) {
-        toast('所选月份股票池为空。', 'error')
-        return
-      }
-      if ((highGranularity || detail?.id === 'opening_volume_portfolio') && frozenPoolSymbols.length > 1000) {
-        toast('vn.py 分钟组合回测最多支持 1000 只股票。', 'error')
-        return
-      }
-      setSymbols(frozenPoolSymbols.join(','))
-    }
+  const handleRun = () => {
     startBacktest({
-      strategy_id: highGranularity ? 'minute_double_ma_volume' : selectedStrategy,
-      asset_type: assetType,
-      symbols: frozenPoolSymbols ?? (symbols ? symbols.split(',').map(s => s.trim()).filter(Boolean) : null),
+      strategy_id: vnpyStrategyId,
+      symbols: symbols ? symbols.split(',').map(s => s.trim()).filter(Boolean) : null,
       start: start || null,
       end: end || undefined,
       matching,
@@ -1170,23 +879,14 @@ export function StrategyBacktest() {
       max_exposure_pct: Number(maxExposure) / 100,
       initial_capital: Number(initialCapital),
       position_sizing: positionSizing,
-      params: strategyParams,
-      overrides: requestOverrides,
+      volume_limit_enabled: volumeLimitEnabled,
+      signal_price_basis: signalPriceBasis,
+      params: vnpyParams,
+      overrides: {},
       mode: simMode,
       holding_days: Number(holdingDays) || 5,
-      minute_fill: false,
-      engine: highGranularity ? 'vnpy' : 'matrix',
+      engine: 'vnpy',
     })
-  }
-  const selectStrategy = (strategyId: string) => {
-    setSelectedStrategy(strategyId)
-    if (vnpyStrategyList.some(strategy => strategy.id === strategyId)) {
-      setHighGranularity(false)
-      setSimMode('position')
-      setInitialCapital(OPENING_VOLUME_DEFAULTS.initialCapital)
-      setMaxPositions(OPENING_VOLUME_DEFAULTS.maxPositions)
-      setMaxExposure(OPENING_VOLUME_DEFAULTS.maxExposure)
-    }
   }
 
   // 提取统计
@@ -1210,6 +910,7 @@ export function StrategyBacktest() {
   const excessReturn = strategyReturn != null && benchmarkReturn != null
     ? strategyReturn - benchmarkReturn
     : null
+  const isVnpyPortfolio = s?.mode === 'vnpy_portfolio'
 
   const applyRange = (months: number) => {
     setStart(monthsAgo(months))
@@ -1266,98 +967,47 @@ export function StrategyBacktest() {
   }`
 
   const sortedTrades = useMemo(() => {
-    return [...(result?.trades ?? [])].sort((a, b) => {
+    const query = tradeSearch.trim().toLowerCase()
+    return [...(result?.trades ?? [])].filter(item => {
+      const matchesQuery = !query || `${item.symbol} ${item.name ?? ''}`.toLowerCase().includes(query)
+      return matchesQuery && (!tradeReason || item.exit_reason === tradeReason)
+    }).sort((a, b) => {
       const exitCmp = String(b.exit_date).localeCompare(String(a.exit_date))
       if (exitCmp !== 0) return exitCmp
       return String(b.entry_date).localeCompare(String(a.entry_date))
     })
-  }, [result?.trades])
+  }, [result?.trades, tradeReason, tradeSearch])
 
-  const dailyTradeRows = useMemo<DailyTradeRow[]>(() => {
-    const rows = new Map<string, Omit<DailyTradeRow, 'cumulativePnl'>>()
-    const ensure = (date: string) => {
-      if (!rows.has(date)) {
-        rows.set(date, { date, buys: [], sells: [], buyValue: 0, sellValue: 0, realizedPnl: 0 })
-      }
-      return rows.get(date)!
-    }
-
-    for (const t of result?.trades ?? []) {
-      const entryDate = String(t.entry_date).slice(0, 10)
-      const exitDate = String(t.exit_date).slice(0, 10)
-      const buyRow = ensure(entryDate)
-      buyRow.buys.push(t)
-      buyRow.buyValue += Number(t.entry_value ?? 0)
-
-      const sellRow = ensure(exitDate)
-      sellRow.sells.push(t)
-      sellRow.sellValue += Number(t.exit_value ?? 0)
-      sellRow.realizedPnl += Number(t.pnl_amount ?? 0)
-    }
-
-    let cumulativePnl = 0
-    return [...rows.values()]
-      .sort((a, b) => a.date.localeCompare(b.date))
-      .map(row => {
-        cumulativePnl += row.realizedPnl
-        return { ...row, cumulativePnl }
-      })
-      .reverse()
-  }, [result?.trades])
+  const dailyLedger = useMemo(() => [...(result?.daily_ledger ?? [])]
+    .sort((a, b) => b.date.localeCompare(a.date)), [result?.daily_ledger])
+  const signalDiagnostics = useMemo(() => [...(result?.signal_diagnostics ?? [])]
+    .sort((a, b) => b.timestamp.localeCompare(a.timestamp)), [result?.signal_diagnostics])
+  const exitReasons = useMemo(() => Array.from(new Set((result?.trades ?? []).map(item => item.exit_reason).filter(Boolean))).sort(), [result?.trades])
 
   const tradePageCount = sortedTrades.length
     ? Math.ceil(sortedTrades.length / tradePageSize)
     : 0
   const dailyPageSize = 10
-  const dailyPageCount = dailyTradeRows.length
-    ? Math.ceil(dailyTradeRows.length / dailyPageSize)
+  const dailyPageCount = dailyLedger.length
+    ? Math.ceil(dailyLedger.length / dailyPageSize)
     : 0
   const safeDailyPage = Math.min(dailyPage, Math.max(dailyPageCount - 1, 0))
   const dailyStart = safeDailyPage * dailyPageSize
-  const visibleDailyRows = dailyTradeRows.slice(dailyStart, dailyStart + dailyPageSize)
-  const dailyEnd = Math.min(dailyStart + visibleDailyRows.length, dailyTradeRows.length)
+  const visibleDailyRows = dailyLedger.slice(dailyStart, dailyStart + dailyPageSize)
+  const dailyEnd = Math.min(dailyStart + visibleDailyRows.length, dailyLedger.length)
   const safeTradePage = Math.min(tradePage, Math.max(tradePageCount - 1, 0))
   const tradeStart = safeTradePage * tradePageSize
   const visibleTrades = sortedTrades.slice(tradeStart, tradeStart + tradePageSize)
   const tradeEnd = Math.min(tradeStart + visibleTrades.length, sortedTrades.length)
-  const symbolNames = useMemo(() => {
-    const names: Record<string, string> = {}
-    result?.trades.forEach(t => {
-      if (t.name) names[t.symbol] = t.name
-    })
-    return names
-  }, [result?.trades])
-
   const detail = strategyDetail.data
-  const openingVolumeStrategy = selectedVnpyStrategy !== null
-  const matrixStrategy = detail?.execution_backend === 'matrix_native'
-  const visibleAdvancedTabs = useMemo(
-    () => openingVolumeStrategy
-      ? OPENING_VOLUME_ADVANCED_TABS
-      : matrixStrategy
-      ? ADVANCED_TABS.filter(tab => tab.id !== 'entry' && tab.id !== 'exit')
-      : ADVANCED_TABS,
-    [matrixStrategy, openingVolumeStrategy],
-  )
   const basicFilter = (overrides.basic_filter ?? {}) as Record<string, any>
   const entrySignals = (overrides.entry_signals ?? []) as string[]
   const exitSignals = (overrides.exit_signals ?? []) as string[]
-  const effectiveExitSignals = (overrides.exit_signals ?? detail?.exit_signals ?? []) as string[]
-  const minuteTriggerSignals = detail?.minute_exit_trigger_supported_signals ?? []
-  const unsupportedMinuteExitSignals = effectiveExitSignals.filter(signal => !minuteTriggerSignals.includes(signal))
-  const minuteExitTriggerSupported = effectiveExitSignals.length > 0 && unsupportedMinuteExitSignals.length === 0
-
-  useEffect(() => {
-    if (highGranularity && minuteExitTriggerSupported) return
-    if (exitFill === 'signal_next_minute') setExitFill('close_t')
-  }, [exitFill, highGranularity, minuteExitTriggerSupported])
 
   const scoring = useMemo(() => (overrides.scoring ?? {}) as Record<string, number>, [overrides.scoring])
   const scoreMinValue = overrides.score_min == null ? '' : String(overrides.score_min)
   const scoreMaxValue = overrides.score_max == null ? '' : String(overrides.score_max)
-  const stopLossPct = openingVolumeStrategy
-    ? Number(strategyParams.stop_loss_pct ?? 0) * 100
-    : overrides.stop_loss == null ? '' : String(Math.abs(Number(overrides.stop_loss)) * 100)
+  const stopLossPct = overrides.stop_loss == null ? '' : String(Math.abs(Number(overrides.stop_loss)) * 100)
   const takeProfitPct = overrides.take_profit == null ? '' : String(Math.abs(Number(overrides.take_profit)) * 100)
   const trailingStopPct = overrides.trailing_stop == null ? '' : String(Math.abs(Number(overrides.trailing_stop)) * 100)
   const trailingTakeProfitActivatePct = overrides.trailing_take_profit_activate == null ? '' : String(Math.abs(Number(overrides.trailing_take_profit_activate)) * 100)
@@ -1368,12 +1018,6 @@ export function StrategyBacktest() {
   useEffect(() => {
     if (!editingScoring) setScoringDraft(scoringToPct(scoring))
   }, [scoring, editingScoring])
-
-  useEffect(() => {
-    if (!visibleAdvancedTabs.some(tab => tab.id === settingsTab)) {
-      setSettingsTab('params')
-    }
-  }, [settingsTab, visibleAdvancedTabs])
 
   const updateOverride = (key: string, value: any) => {
     setOverrides(prev => ({ ...prev, [key]: value }))
@@ -1414,77 +1058,14 @@ export function StrategyBacktest() {
         maxHoldDaysValue !== '' ? `最长 ${maxHoldDaysValue}天` : '不限持仓',
       ].join(' · ')
     : '选择策略后可调整参数 / 过滤 / 买卖触发器 / 评分 / 风控'
-  const selectedStrategyName = selectedVnpyStrategy?.name ?? detail?.name ?? strategyList.find(st => st.id === selectedStrategy)?.name ?? '未选择策略'
+  const selectedStrategyName = detail?.name ?? strategyList.find(st => st.id === selectedStrategy)?.name ?? '未选择策略'
   const selectedStrategySource = detail?.source ?? strategyList.find(st => st.id === selectedStrategy)?.source
-  const stockPoolCount = symbols.split(/[\s,]+/).map(symbol => symbol.trim()).filter(Boolean).length
-  const stockPoolSummary = openingVolumeStrategy
-    ? stockPoolCount > 0 ? `股票池 已输入 ${stockPoolCount} 只` : '请输入回测股票代码'
-    : stockPoolCount > 0 ? `股票池 已限定 ${stockPoolCount} 只` : '股票池 全市场'
-  const chooseMonthlyPool = (nextPoolKey: string) => {
-    setPoolKey(nextPoolKey || null)
-    setUniverseSource('monthly_pool')
-  }
-  const universeSelector = (
-    <div className="space-y-2">
-      <div className="inline-flex h-8 overflow-hidden rounded-btn border border-border">
-        <button
-          type="button"
-          onClick={() => { setUniverseSource('market'); setSymbols('') }}
-          className={`px-3 text-xs transition-colors ${universeSource === 'market' ? 'bg-accent/10 text-accent' : 'text-muted hover:text-foreground'}`}
-        >
-          {openingVolumeStrategy ? '手工股票池' : '全市场'}
-        </button>
-        <button
-          type="button"
-          onClick={() => setUniverseSource('manual')}
-          className={`px-3 text-xs transition-colors ${universeSource === 'manual' ? 'bg-accent/10 text-accent' : 'text-muted hover:text-foreground'}`}
-        >
-          手工股票池
-        </button>
-        <button
-          type="button"
-          onClick={() => chooseMonthlyPool(poolKey ?? monthlyPools[0]?.pool_key ?? '')}
-          disabled={monthlyPools.length === 0}
-          className={`px-3 text-xs transition-colors disabled:opacity-40 ${universeSource === 'monthly_pool' ? 'bg-accent/10 text-accent' : 'text-muted hover:text-foreground'}`}
-        >
-          月份股票池
-        </button>
-      </div>
-      {universeSource === 'monthly_pool' && (
-        <div className="flex flex-wrap items-center gap-2">
-          <select
-            value={poolKey ?? ''}
-            onChange={event => chooseMonthlyPool(event.target.value)}
-            className="h-8 rounded-btn border border-border bg-surface px-2 text-xs outline-none focus:border-accent"
-          >
-            <option value="" disabled>选择月份</option>
-            {monthlyPools.map(pool => <option key={pool.pool_key} value={pool.pool_key}>{pool.label ?? pool.month}</option>)}
-          </select>
-          <span className="text-[11px] text-secondary">
-            {selectedMonthlyMembers.isFetching ? '读取成员中...' : `${selectedMonthlyMembers.data?.symbols.length ?? selectedMonthlyPool?.member_count ?? 0} 只，启动时冻结成员`}
-          </span>
-        </div>
-      )}
-    </div>
-  )
+  const stockPoolCount = symbols.split(',').map(s => s.trim()).filter(Boolean).length
+  const stockPoolSummary = stockPoolCount > 0 ? `股票池 已限定 ${stockPoolCount} 只` : '股票池 全市场'
   const resultStartDate = result?.config?.start ?? result?.equity_curve?.[0]?.date ?? start
   const resultEndDate = result?.config?.end ?? result?.equity_curve?.[result.equity_curve.length - 1]?.date ?? end
   const resultTradeDays = result?.equity_curve?.length ?? 0
-  const selectionStats = result?.stats?.selection as Record<string, number | boolean> | undefined
-  const selectionStages = selectionStats
-    ? [
-        {
-          key: 'strategy',
-          label: result?.stats?.execution_backend === 'matrix_native' ? '策略信号' : '策略命中',
-          value: Number(selectionStats.strategy_matches ?? 0),
-        },
-        ...(selectionStats.entry_trigger_enabled === true
-          ? [{ key: 'entry', label: '入场候选', value: Number(selectionStats.entry_candidates ?? 0) }]
-          : []),
-        { key: 'trades', label: '完成交易', value: Number(result?.stats?.n_trades ?? result?.trades.length ?? 0) },
-      ]
-    : []
-  const executionStats = (result?.execution ?? result?.stats?.execution ?? {}) as Record<string, number>
+  const executionStats = (result?.stats?.execution ?? {}) as Record<string, number>
   const executionSummary = [
     ['buy_no_slot', '满仓未买'],
     ['buy_exposure', '仓位上限'],
@@ -1494,7 +1075,6 @@ export function StrategyBacktest() {
     ['sell_limit_down', '跌停阻塞'],
     ['sell_suspended', '停牌阻塞'],
     ['pending_exit', '待卖阻塞'],
-    ['sell_minute_trigger_fallback', '分钟信号顺延'],
   ]
     .map(([key, label]) => ({ key, label, value: Number(executionStats[key] ?? 0) }))
     .filter(item => item.value > 0)
@@ -1504,46 +1084,54 @@ export function StrategyBacktest() {
       {/* 配置面板 */}
       <section className="space-y-3 border-b xl:border-b-0 xl:border-r border-border bg-base/25 px-3 py-3 xl:overflow-y-auto">
         <div>
-          <div className="flex items-center justify-between mb-1.5">
-            <label className="text-xs font-medium text-secondary">选择策略</label>
-            {/* 分钟K成交 */}
-            {!openingVolumeStrategy && (
-            <div className="flex items-center gap-1">
-              <Gauge className={`h-3 w-3 ${highGranularity ? 'text-amber-400' : 'text-muted/50'}`} />
+          <div className="mb-1.5">
+            <label className="text-xs font-medium text-secondary">vn.py 分钟策略</label>
+          </div>
+          {/* vn.py 分钟回测说明 */}
+          {highGranularity && (
+            <div className="mb-2 rounded-btn border border-amber-400/30 bg-amber-400/5 px-2 py-1.5">
+              <div className="flex items-start gap-1.5">
+                <Zap className="h-3 w-3 text-amber-400 shrink-0 mt-px" />
+                <div className="text-[10px] leading-snug text-amber-400/90">
+                  <span className="font-medium">vn.py 分钟回测</span>
+                  ：{vnpyStrategy ? `当前策略支持 ${vnpyStrategy.min_symbols}–${vnpyStrategy.max_symbols} 只股票，` : ''}使用本地分钟 K 与下一分钟开盘撮合。
+                  <span className="text-amber-400/70"> 需要先由服务器管理员导入所选日期的本地分钟 K 数据。</span>
+                  {!hasLocalMinuteData && <span className="ml-1 text-danger">当前库未检测到分钟数据。</span>}
+                  <select
+                    value={vnpyStrategyId}
+                    onChange={event => setVnpyStrategyId(event.target.value)}
+                    className="ml-2 rounded border border-amber-400/30 bg-base px-1.5 py-0.5 text-[10px] text-amber-200"
+                    aria-label="vn.py 策略"
+                  >
+                    {(vnpyStrategies.data?.strategies ?? []).map(strategy => (
+                      <option key={strategy.id} value={strategy.id}>{strategy.name}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
               <button
-                onClick={toggleMinuteFill}
-                disabled={!hasMinuteBatch}
-                title={!hasMinuteBatch
-                  ? '分钟K成交价：需 Pro+ 权限 (分钟K批量)'
-                  : '分钟K成交：细化成交价，并为兼容的卖出信号提供下一分钟成交。'
-                }
-                className={`group relative inline-flex h-3.5 w-6 items-center rounded-full shrink-0 transition-colors duration-200 ${
-                  !hasMinuteBatch ? 'bg-elevated opacity-50 cursor-not-allowed'
-                  : highGranularity ? 'bg-amber-500 cursor-pointer'
-                  : 'bg-elevated cursor-pointer'
-                }`}
+                type="button"
+                onClick={() => setVnpyPoolOpen(value => !value)}
+                className="mt-2 rounded border border-amber-400/30 bg-base px-2 py-1 text-[10px] text-amber-200 hover:bg-elevated"
               >
-                <span className={`inline-block h-2.5 w-2.5 rounded-full bg-white shadow-sm transition-transform duration-200 ${
-                  highGranularity ? 'translate-x-[13px]' : 'translate-x-0.5'
-                }`} />
+                股票池：{stockPoolCount || 0} 只 · {vnpyPoolOpen ? '收起' : '编辑'}
               </button>
-              <span className={`text-[9px] font-medium ${highGranularity ? 'text-amber-400' : 'text-muted/50'}`}>分钟成交</span>
-              {!hasMinuteBatch && (
-                <span className="text-[8px] text-accent/70 font-medium bg-accent/10 px-1 py-px rounded">Pro+</span>
+              {vnpyPoolOpen && <div className="mt-2 border-t border-amber-400/20 pt-2"><StockPoolPicker value={symbols} onChange={setSymbols} /></div>}
+              {(vnpyStrategy?.parameters.length ?? 0) > 0 && (
+                <div className="mt-2 grid grid-cols-2 gap-2 border-t border-amber-400/20 pt-2">
+                  {vnpyStrategy!.parameters.map(param => (
+                    <VnpyStrategyParamInput
+                      key={param.name}
+                      param={param}
+                      value={vnpyParams[param.name]}
+                      onChange={value => setVnpyParams(previous => ({ ...previous, [param.name]: value }))}
+                    />
+                  ))}
+                </div>
               )}
             </div>
-            )}
-          </div>
-          {/* 分钟K开启时的提示条 */}
-          {!openingVolumeStrategy && highGranularity && hasMinuteBatch && (
-            <div className="mb-2 flex items-start gap-1.5 rounded-btn border border-amber-400/30 bg-amber-400/5 px-2 py-1.5">
-              <Zap className="h-3 w-3 text-amber-400 shrink-0 mt-px" />
-              <div className="text-[10px] leading-snug text-amber-400/90">
-                <span className="font-medium">分钟K成交价</span>
-                ：默认在成交日细化穿越价/VWAP；选择“信号触发卖出”时，会对兼容的卖出信号做分钟回放。需本地有足够的分钟K历史。
-              </div>
-            </div>
           )}
+          {!highGranularity && <>
           <div className="overflow-hidden rounded-input border border-border bg-surface">
             <div className="flex border-b border-border/60 bg-base/30 p-0.5">
               {STRATEGY_GROUPS.map(group => (
@@ -1564,13 +1152,13 @@ export function StrategyBacktest() {
             {strategies.isLoading && (
               <span className="text-xs text-muted px-2 py-1">加载中…</span>
             )}
-            {!strategies.isLoading && filteredStrategyList.length === 0 && !['all', 'custom'].includes(strategyGroup) && (
+            {!strategies.isLoading && filteredStrategyList.length === 0 && (
               <span className="text-xs text-muted px-2 py-1">当前分组暂无策略</span>
             )}
-            {[...filteredStrategyList, ...vnpyStrategyList].map(st => (
+            {filteredStrategyList.map(st => (
               <button
                 key={st.id}
-                onClick={() => selectStrategy(st.id)}
+                onClick={() => setSelectedStrategy(st.id)}
                 className={`px-2 py-1 rounded-btn text-[11px] border transition-all duration-150 ease-smooth cursor-pointer
                   ${selectedStrategy === st.id
                     ? 'border-accent/50 bg-accent/10 text-accent shadow-[0_0_10px_rgba(59,130,246,0.1)]'
@@ -1578,7 +1166,7 @@ export function StrategyBacktest() {
                   }`}
               >
                 <span className="font-medium">{st.name}</span>
-                {'source' in st && st.source && st.source !== 'builtin' && (
+                {st.source && st.source !== 'builtin' && (
                   <span className={`ml-1 text-[8px] px-1 py-px rounded border ${BADGE_CLS_MAP[st.source] ?? ''}`}>
                     {SRC_MAP[st.source] ?? ''}
                   </span>
@@ -1587,6 +1175,7 @@ export function StrategyBacktest() {
             ))}
             </div>
           </div>
+          </>}
         </div>
 
         {selectedStrategy && strategyDetail.isLoading && (
@@ -1595,8 +1184,8 @@ export function StrategyBacktest() {
 
         <button
           type="button"
-          onClick={() => (openingVolumeStrategy || detail) && setSettingsOpen(true)}
-          disabled={(!detail && !openingVolumeStrategy) || strategyDetail.isLoading}
+          onClick={() => detail && setSettingsOpen(true)}
+          disabled={!detail || strategyDetail.isLoading}
           className="group w-full rounded-btn border border-border bg-surface px-3 py-2.5 text-left transition-colors hover:border-accent/40 hover:bg-elevated/70 disabled:cursor-not-allowed disabled:opacity-55"
         >
           <span className="flex items-center gap-2 text-xs font-semibold text-foreground">
@@ -1613,7 +1202,7 @@ export function StrategyBacktest() {
             )}
           </span>
           <span className="mt-1 block text-[10px] font-medium text-secondary">{stockPoolSummary}</span>
-          <span className="mt-1 block text-[10px] leading-4 text-muted">{openingVolumeStrategy ? selectedVnpyStrategy?.description : advancedSummary}</span>
+          <span className="mt-1 block text-[10px] leading-4 text-muted">{advancedSummary}</span>
         </button>
 
         <div className="rounded-btn border border-border bg-surface p-2.5">
@@ -1726,68 +1315,23 @@ export function StrategyBacktest() {
           )}
         </div>
 
-        {openingVolumeStrategy && (
-          <div className="rounded-btn border border-border bg-surface p-2.5">
-            <label className="mb-1.5 block text-xs font-medium text-secondary">信号价格口径</label>
-            <select value={signalPriceBasis} onChange={event => setSignalPriceBasis(event.target.value as 'qfq' | 'raw')} className={INPUT_CLS}>
-              <option value="qfq">前复权（默认，缺因子时严格报错）</option>
-              <option value="raw">原始价格</option>
-            </select>
-            <p className="mt-1.5 text-[10px] leading-4 text-muted">撮合始终使用原始分钟行情；前复权只用于策略信号和动态均线。</p>
-          </div>
-        )}
-
         <div className="grid grid-cols-2 gap-2">
           <div>
-            <div className="mb-1.5 flex items-center gap-1">
-              <label className="text-xs font-medium text-secondary">建仓口径</label>
-              <FillRuleHint />
-            </div>
-            {openingVolumeStrategy ? (
-              <div className="rounded-input border border-border bg-elevated px-2.5 py-1.5 text-xs text-secondary">下一根实际存在的分钟 K 开盘成交</div>
-            ) : (
-              <select value={entryFill} onChange={e => setEntryFill(e.target.value as 'close_t' | 'open_t+1')} className={INPUT_CLS}>
-                <option value="open_t+1">次日开盘（推荐）</option>
-                <option value="close_t">信号日收盘</option>
-              </select>
-            )}
+            <label className="text-xs font-medium text-secondary block mb-1.5">建仓口径</label>
+            <select value={entryFill} onChange={e => setEntryFill(e.target.value as any)} className={INPUT_CLS}>
+              <option value="open_t+1">次日开盘成交（推荐）</option>
+              <option value="close_t">信号日收盘成交</option>
+            </select>
           </div>
           <div>
-            <label className="mb-1.5 block text-xs font-medium text-secondary">清仓口径</label>
-            {openingVolumeStrategy ? (
-              <div className="rounded-input border border-border bg-elevated px-2.5 py-1.5 text-xs text-secondary">下一根实际存在的分钟 K 开盘成交</div>
-            ) : (
-              <select
-                value={exitFill}
-                onChange={e => setExitFill(e.target.value as 'close_t' | 'open_t+1' | 'signal_next_minute')}
-                className={INPUT_CLS}
-              >
-                <option value="close_t">信号日收盘（推荐）</option>
-                <option value="open_t+1">次日开盘</option>
-                {highGranularity && minuteExitTriggerSupported && (
-                  <option value="signal_next_minute">信号触发卖出 BETA</option>
-                )}
-              </select>
-            )}
+            <label className="text-xs font-medium text-secondary block mb-1.5">清仓口径</label>
+            <select value={exitFill} onChange={e => setExitFill(e.target.value as any)} className={INPUT_CLS}>
+              <option value="close_t">到期/信号日收盘成交（推荐）</option>
+              <option value="open_t+1">次日开盘成交</option>
+            </select>
           </div>
-          {!openingVolumeStrategy && (entryFill === 'close_t' || exitFill === 'close_t') && (
-            <div className="col-span-2 flex items-start gap-1 text-[10px] leading-4 text-warning">
-              <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
-              <span>信号日收盘仅适合收盘前已确认的信号</span>
-            </div>
-          )}
-          {!openingVolumeStrategy && exitFill === 'signal_next_minute' && (
-            <div className="col-span-2 text-[10px] leading-4 text-accent">
-              分钟收盘确认卖出信号后，按下一分钟开盘成交；尾盘或分钟数据缺失时顺延到下一交易日开盘
-            </div>
-          )}
-          {!openingVolumeStrategy && highGranularity && effectiveExitSignals.length > 0 && !minuteExitTriggerSupported && (
-            <div className="col-span-2 flex items-start gap-1 text-[10px] leading-4 text-muted">
-              <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
-              <span>当前卖出信号暂不支持分钟触发回放</span>
-            </div>
-          )}
         </div>
+        <div className="mt-1 text-[10px] leading-4 text-muted">建仓默认次日开盘（避免未来函数），清仓默认当日收盘（持仓中可盘中/收盘卖）；买卖点由策略触发器决定，这里只决定成交价。</div>
 
         {simMode === 'position' && (
         <div className="grid grid-cols-2 gap-2">
@@ -1798,14 +1342,10 @@ export function StrategyBacktest() {
           </div>
           <div>
             <label className="text-xs font-medium text-secondary block mb-1.5">买入权重</label>
-            {openingVolumeStrategy ? (
-              <div className="rounded-input border border-border bg-elevated px-2.5 py-1.5 text-xs text-secondary">固定等权</div>
-            ) : (
-              <select value={positionSizing} onChange={e => setPositionSizing(e.target.value as any)} className={INPUT_CLS}>
-                <option value="equal">等权买入</option>
-                <option value="score_weight">评分加权</option>
-              </select>
-            )}
+            <select value={positionSizing} onChange={e => setPositionSizing(e.target.value as any)} className={INPUT_CLS}>
+              <option value="equal">等权买入</option>
+              <option value="score_weight">评分加权</option>
+            </select>
           </div>
           <div>
             <label className="text-xs font-medium text-secondary block mb-1.5">最大持仓数</label>
@@ -1817,50 +1357,62 @@ export function StrategyBacktest() {
             <input type="number" min={0} max={100} value={maxExposure} onChange={e => setMaxExposure(e.target.value)}
               className={INPUT_CLS} />
           </div>
-        </div>
-        )}
-        {simMode === 'position' && openingVolumeStrategy && (
-        <div className="grid grid-cols-2 gap-2">
           <div>
-            <label className="text-[10px] font-medium text-secondary block mb-1">买入成交量上限（%）</label>
-            <input type="number" min={0} max={100} value={maxBuyVolumeRatio} onChange={e => setMaxBuyVolumeRatio(e.target.value)} className={INPUT_CLS} />
-          </div>
-          <div>
-            <label className="text-[10px] font-medium text-secondary block mb-1">卖出成交量上限（%）</label>
-            <input type="number" min={0} max={100} value={maxSellVolumeRatio} onChange={e => setMaxSellVolumeRatio(e.target.value)} className={INPUT_CLS} />
-          </div>
-          <div className="col-span-2 text-[10px] leading-4 text-muted">0 表示不限制；大于 0 时，单笔成交量不超过当前分钟成交量的对应比例。</div>
-        </div>
-        )}
-        {simMode === 'position' && (
-        <div className="grid grid-cols-3 gap-2">
-          <div>
-            <label className="text-[10px] font-medium text-secondary block mb-1">佣金（万分之）</label>
+            <label className="text-xs font-medium text-secondary block mb-1.5">佣金(万分之)</label>
             <input type="number" min={0} value={fees} onChange={e => setFees(e.target.value)} className={INPUT_CLS} />
           </div>
           <div>
-            <label className="text-[10px] font-medium text-secondary block mb-1">印花税（千分之）</label>
+            <label className="text-xs font-medium text-secondary block mb-1.5">印花税(千分之)</label>
             <input type="number" min={0} value={stampTax} onChange={e => setStampTax(e.target.value)} className={INPUT_CLS} />
           </div>
           <div>
-            <label className="text-[10px] font-medium text-secondary block mb-1">滑点（万分之）</label>
+            <label className="text-xs font-medium text-secondary block mb-1.5">滑点(万分之)</label>
             <input type="number" min={0} value={slippage} onChange={e => setSlippage(e.target.value)} className={INPUT_CLS} />
           </div>
+          {highGranularity && (
+            <div className="col-span-2 flex items-center justify-between rounded-btn border border-border bg-base px-3 py-2.5">
+              <div>
+                <div className="text-xs font-medium text-secondary">单分钟成交量10%限制</div>
+                <div className="mt-0.5 text-[10px] leading-4 text-muted">
+                  开启后每只股票每分钟最多成交该分钟成交量的10%；关闭后不限制成交量。
+                </div>
+              </div>
+              <button
+                type="button"
+                aria-pressed={volumeLimitEnabled}
+                onClick={() => setVolumeLimitEnabled(value => !value)}
+                className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${
+                  volumeLimitEnabled ? 'bg-accent' : 'bg-elevated'
+                }`}
+              >
+                <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${
+                  volumeLimitEnabled ? 'translate-x-[18px]' : 'translate-x-0.5'
+                }`} />
+              </button>
+            </div>
+          )}
+        {highGranularity && (
+          <div className="col-span-2 rounded-btn border border-border bg-base p-2.5">
+            <label className="text-xs font-medium text-secondary block mb-1.5">技术信号价格</label>
+            <select value={signalPriceBasis} onChange={e => setSignalPriceBasis(e.target.value as 'qfq' | 'raw')} className={INPUT_CLS}>
+              <option value="qfq">前复权（推荐）</option>
+              <option value="raw">不复权（与旧结果对照）</option>
+            </select>
+            <p className="mt-1 text-[10px] leading-4 text-muted">仅影响昨日高点、跨日涨幅和动态均线等信号；分钟 K 撮合、成交量、资金和成交价格始终使用原始价格。</p>
+          </div>
+        )}
         </div>
         )}
         {simMode === 'position' && (
         <div className="text-[10px] leading-4 text-muted">
-          {openingVolumeStrategy
-            ? <>单只目标金额 = 当前总资产 × 最大总仓位 ÷ 最大持仓数；当前约 {Number.isFinite(targetPositionPct) ? targetPositionPct.toFixed(1) : '—'}%。剩余现金不是新增持仓名额，只有实际卖出成功才释放持仓数。</>
-            : <>单票目标约 {Number.isFinite(targetPositionPct) ? targetPositionPct.toFixed(1) : '—'}%。最大总仓位控制资金投入；剩余现金不是新增持仓名额，只有实际卖出成功才释放持仓数。</>}
+          单票目标约 {Number.isFinite(targetPositionPct) ? targetPositionPct.toFixed(1) : '—'}%。最大总仓位控制资金投入；剩余现金不是新增持仓名额，只有实际卖出成功才释放持仓数。
         </div>
         )}
-        {simMode === 'full' && (
-        <div className="rounded-btn border border-accent/20 bg-accent/5 px-3 py-2.5 text-[11px] leading-relaxed text-secondary">
-          <span className="font-medium text-foreground">全量模拟</span>：每日将策略选出的全部候选独立买入，不受资金/最大持仓数限制；每一笔仍按策略卖点、止损、移动止盈/止损和最长持仓执行，用于评估策略本身的选股 + 交易规则质量。
-        </div>
+        {highGranularity && simMode === 'position' && (
+          <div className="rounded-btn border border-accent/20 bg-accent/5 px-3 py-2 text-[11px] leading-4 text-secondary">
+            vn.py 组合回测会严格限制为最多 {Number(maxPositions) || 1} 只持仓。等权买入会在每个交易日开始按“可购买资金 ÷ 剩余仓位数”确定当日单仓额度，初始资金的 3% 始终保留；当天连续买入沿用该额度，只有完整卖出释放资金和仓位后才重新计算。评分加权则按策略评分分配，开盘突破策略目前以命中条件数作为评分。若同一分钟触发的买入信号超过剩余名额，先按命中条件数从多到少、再按股票代码从小到大形成候选队列；下一分钟主候选无法成交时，会在同一撮合时点继续尝试后续候选，直到填满空仓或候选耗尽。
+          </div>
         )}
-
         {isPending ? (
           <button
             onClick={stopBacktest}
@@ -1874,7 +1426,7 @@ export function StrategyBacktest() {
         ) : (
           <button
             onClick={handleRun}
-            disabled={!selectedStrategy || strategyDetail.isLoading}
+            disabled={vnpyStrategies.isLoading || !vnpyStrategyId}
             className="group w-full inline-flex items-center justify-center gap-2.5 rounded-btn border border-accent/40
               bg-gradient-to-r from-accent to-blue-500 px-3 py-2.5 text-white shadow-[0_10px_24px_rgba(59,130,246,0.22)]
               transition-all duration-150 ease-smooth hover:-translate-y-0.5 hover:shadow-[0_14px_28px_rgba(59,130,246,0.28)]
@@ -1890,53 +1442,6 @@ export function StrategyBacktest() {
 
       {/* 结果面板 */}
       <section className="min-w-0 space-y-3 bg-base/15 px-3 py-3 xl:overflow-y-auto">
-        {/* 模式切换: 仓位模拟 / 全量模拟 */}
-        <div className="flex items-center justify-between gap-2">
-          <div className="inline-flex rounded-btn border border-border bg-surface/80 p-0.5 shadow-sm">
-            {([['position', '仓位模拟'], ...(!openingVolumeStrategy ? [['full', '全量模拟'] as const] : [])]).map(([val, label]) => (
-              <button
-                key={val}
-                onClick={() => setSimMode(val as 'position' | 'full')}
-                className={`inline-flex items-center gap-1.5 rounded-[5px] px-3 py-1.5 text-xs font-medium transition-colors cursor-pointer ${
-                  simMode === val
-                    ? 'bg-accent text-white shadow-sm'
-                    : 'text-secondary hover:bg-elevated hover:text-foreground'
-                }`}
-                title={val === 'position' ? '受仓位/资金约束的真实账户模拟' : '全部候选独立执行，不受资金和持仓数量约束'}
-              >
-                {val === 'position' ? <Play className="h-3.5 w-3.5" /> : <BarChart3 className="h-3.5 w-3.5" />}
-                {label}
-              </button>
-            ))}
-          </div>
-          {simMode === 'full' && (
-            maxHoldDaysValue !== '' ? (
-              <div className="rounded-btn border border-border bg-surface px-2 py-1 text-[11px] text-secondary">
-                策略最长 <span className="font-mono text-foreground">{maxHoldDaysValue}</span> 天
-              </div>
-            ) : (
-              <div className="flex items-center gap-1.5 text-[11px] text-secondary">
-                <span>兜底上限</span>
-                <div className="flex rounded-btn border border-border overflow-hidden">
-                  {(['1', '5', '10', '20'] as const).map(d => (
-                    <button
-                      key={d}
-                      onClick={() => setHoldingDays(d)}
-                      className={`px-2 py-1 text-[11px] font-medium transition-colors cursor-pointer ${
-                        holdingDays === d
-                          ? 'bg-accent/10 text-accent'
-                          : 'text-muted hover:text-secondary hover:bg-elevated'
-                      }`}
-                    >
-                      {d}天
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )
-          )}
-        </div>
-
         {result?.error && (
           <div className="text-sm text-danger bg-danger/10 border border-danger/30 rounded-btn px-3 py-2">
             {result.error}
@@ -1953,7 +1458,7 @@ export function StrategyBacktest() {
           <EmptyState
             icon={FlaskConical}
             title="选择策略并开始回测"
-            hint="策略回测复用策略定义 ( 买入/卖出触发器、止损、最大持仓 ) 做全周期模拟。服务器建议优先使用最近3个月；长周期建议本机或 8GB 以上内存环境运行。"
+            hint="vn.py 分钟回测使用本地 Tushare 分钟 K 数据，按策略信号、下一分钟开盘撮合、资金和持仓限制执行。"
           />
         )}
 
@@ -1969,17 +1474,13 @@ export function StrategyBacktest() {
                 <Loader2 className="relative h-4 w-4 animate-spin text-accent" />
               </span>
               <div className="min-w-0">
-                <div className={backtestTask?.reconnecting ? 'text-xs font-medium text-warning' : 'text-xs font-medium text-accent'}>
-                  {backtestTask?.reconnecting
-                    ? '连接中断，重试中…'
-                    : backtestTask?.progress
-                      ? `回测中 · ${backtestTask.progress.date}`
-                      : '正在重新计算回测…'}
+                <div className="text-xs font-medium text-accent">
+                  {backtestTask?.progress
+                    ? `回测中 · 第 ${backtestTask.progress.day}/${backtestTask.progress.total} 天 (${backtestTask.progress.date})`
+                    : '正在重新计算回测…'}
                 </div>
                 <div className="mt-0.5 text-[11px] text-secondary">
-                  {backtestTask?.reconnecting
-                    ? '正在尝试恢复连接，若持续失败可停止后重试'
-                    : result ? '当前展示上次结果，完成后自动替换' : '正在加载回测数据…'}
+                  {result ? '当前展示上次结果，完成后自动替换' : '正在加载回测数据…'}
                 </div>
               </div>
               {backtestTask?.progress && (
@@ -2026,14 +1527,14 @@ export function StrategyBacktest() {
 
             {/* 统计卡片 */}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-              <Stat label={<MetricLabel label="平均收益" metric="avgReturn" />} value={fmtPct(result.stats.avg_return)} color={statValueColor(result.stats.avg_return)} />
-              <Stat label={<MetricLabel label="中位数" metric="medianReturn" />} value={fmtPct(result.stats.median_return)} color={statValueColor(result.stats.median_return)} />
-              <Stat label={<MetricLabel label="胜率" metric="winRate" />} value={fmtPct(result.stats.win_rate)} color={statValueColor(result.stats.win_rate)} />
-              <Stat label={<MetricLabel label="盈亏比" metric="profitFactor" />} value={result.stats.profit_factor != null ? Number(result.stats.profit_factor).toFixed(2) : '—'} />
-              <Stat label={<MetricLabel label="超额(vs基准)" metric="excessReturn" />} value={fmtPct(result.stats.excess)} color={statValueColor(result.stats.excess)} />
-              <Stat label={<MetricLabel label="夏普" metric="sharpe" />} value={result.stats.sharpe != null ? Number(result.stats.sharpe).toFixed(2) : '—'} />
-              <Stat label={<MetricLabel label="最大回撤" metric="maxDrawdown" />} value={fmtPct(result.stats.max_drawdown)} color={statValueColor(result.stats.max_drawdown)} />
-              <Stat label={<MetricLabel label="累计收益" metric="totalReturn" />} value={fmtPct(result.stats.total_return)} color={statValueColor(result.stats.total_return)} />
+              <Stat label="平均收益" value={fmtPct(result.stats.avg_return)} color={statValueColor(result.stats.avg_return)} />
+              <Stat label="中位数" value={fmtPct(result.stats.median_return)} color={statValueColor(result.stats.median_return)} />
+              <Stat label="胜率" value={fmtPct(result.stats.win_rate)} color={statValueColor(result.stats.win_rate)} />
+              <Stat label="盈亏比" value={result.stats.profit_factor != null ? Number(result.stats.profit_factor).toFixed(2) : '—'} />
+              <Stat label="超额(vs基准)" value={fmtPct(result.stats.excess)} color={statValueColor(result.stats.excess)} />
+              <Stat label="夏普" value={result.stats.sharpe != null ? Number(result.stats.sharpe).toFixed(2) : '—'} />
+              <Stat label="最大回撤" value={fmtPct(result.stats.max_drawdown)} color={statValueColor(result.stats.max_drawdown)} />
+              <Stat label="累计收益" value={fmtPct(result.stats.total_return)} color={statValueColor(result.stats.total_return)} />
             </div>
 
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted">
@@ -2123,44 +1624,51 @@ export function StrategyBacktest() {
             {/* 统计卡片 */}
             <div className="rounded-card border border-border bg-surface p-4">
               <div className="grid grid-cols-[repeat(auto-fit,minmax(9rem,1fr))] gap-3">
-                <Stat label={<MetricLabel label="总收益" metric="totalReturn" />} value={strategyReturn != null ? fmtPct(strategyReturn) : '—'}
+                <Stat label="总收益" value={strategyReturn != null ? fmtPct(strategyReturn) : '—'}
                   color={statValueColor(strategyReturn)} />
-                <Stat label={<MetricLabel label="年化" metric="annualReturn" />} value={pick('annual_return') != null ? fmtPct(pick('annual_return') as number) : '—'}
+                <Stat label="年化" value={pick('annual_return') != null ? fmtPct(pick('annual_return') as number) : '—'}
                   color={statValueColor(pick('annual_return') as number)} />
-                <Stat label={<MetricLabel label="同期上证" metric="benchmarkReturn" />} value={benchmarkReturn != null ? fmtPct(benchmarkReturn) : '—'}
+                <Stat label={isVnpyPortfolio ? '本地基准' : '同期上证'} value={benchmarkReturn != null ? fmtPct(benchmarkReturn) : isVnpyPortfolio ? '未配置' : '—'}
                   color={statValueColor(benchmarkReturn)} />
-                <Stat label={<MetricLabel label="超额收益" metric="excessReturn" />} value={excessReturn != null ? fmtPct(excessReturn) : '—'}
+                <Stat label="超额收益" value={excessReturn != null ? fmtPct(excessReturn) : isVnpyPortfolio ? '未配置基准' : '—'}
                   color={statValueColor(excessReturn)} />
-                <Stat label={<MetricLabel label="夏普" metric="sharpe" />} value={pick('sharpe') != null ? Number(pick('sharpe')).toFixed(2) : '—'} />
-                <Stat label={<MetricLabel label="索提诺" metric="sortino" />} value={pick('sortino') != null ? Number(pick('sortino')).toFixed(2) : '—'} />
-                <Stat label={<MetricLabel label="最大回撤" metric="maxDrawdown" />} value={pick('max_drawdown') != null ? fmtPct(pick('max_drawdown') as number) : '—'}
-                  color="#34d399" />
-                <Stat label={<MetricLabel label="蒙卡回撤(中位)" metric="mcDrawdownMedian" />} value={pick('mc_maxdd_p50') != null ? fmtPct(pick('mc_maxdd_p50') as number) : '—'}
-                  color="#34d399" />
-                <Stat label={<MetricLabel label="蒙卡回撤(95%边界)" metric="mcDrawdown95" />} value={pick('mc_maxdd_p95') != null ? fmtPct(pick('mc_maxdd_p95') as number) : '—'}
-                  color="#34d399" />
-                <Stat label={<MetricLabel label="胜率" metric="winRate" />} value={pick('win_rate') != null ? fmtPct(pick('win_rate') as number) : '—'} />
-                <Stat label={<MetricLabel label="交易数" metric="tradeCount" />} value={pick('n_trades') != null ? String(pick('n_trades')) : '—'} />
+                <Stat label={<SharpeLabel />} value={pick('sharpe') != null ? Number(pick('sharpe')).toFixed(2) : '—'} />
+                <Stat label="最大回撤" value={pick('max_drawdown') != null ? fmtPct(pick('max_drawdown') as number) : '—'}
+                  color={statValueColor(pick('max_drawdown') as number)} />
+                <Stat label="胜率" value={pick('win_rate') != null ? fmtPct(pick('win_rate') as number) : '—'} />
+                <Stat label="交易数" value={pick('n_trades') != null ? String(pick('n_trades')) : '—'} />
                 {result.stats.full_kind === 'candidate_execution' ? (
-                  <Stat label={<MetricLabel label="平均持仓" metric="avgDuration" />} value={pick('avg_duration') != null ? `${Number(pick('avg_duration')).toFixed(1)}天` : '—'} />
+                  <Stat label="平均持仓" value={pick('avg_duration') != null ? `${Number(pick('avg_duration')).toFixed(1)}天` : '—'} />
                 ) : (
-                  <Stat label={<MetricLabel label="最终权益" metric="finalEquity" />} value={pick('final_equity') != null ? fmtPrice(pick('final_equity') as number) : '—'} />
+                  <Stat label="最终权益" value={pick('final_equity') != null ? fmtPrice(pick('final_equity') as number) : '—'} />
                 )}
               </div>
             </div>
 
-            {selectionStages.length > 0 && (
-              <div className="flex flex-wrap items-center gap-y-2 rounded-card border border-border bg-base/35 px-3 py-2 text-[11px] text-secondary">
-                <span className="mr-2 font-medium text-foreground">选择漏斗</span>
-                {selectionStages.map((stage, index) => (
-                  <div key={stage.key} className="flex items-center">
-                    {index > 0 && <ChevronRight className="mx-1.5 h-3 w-3 text-muted/60" />}
-                    <span>{stage.label} <b className="font-mono text-foreground">{stage.value}</b></span>
-                  </div>
-                ))}
-                {Number(selectionStats?.entry_trigger_filtered ?? 0) > 0 && (
-                  <span className="ml-auto text-amber-400">入场触发器过滤 {Number(selectionStats?.entry_trigger_filtered)} 个</span>
-                )}
+            {isVnpyPortfolio && (
+              <div className="rounded-card border border-amber-400/25 bg-amber-400/5 p-3">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <span className="text-xs font-medium text-amber-200">分钟组合执行摘要</span>
+                  <span className="text-[10px] text-amber-200/70">基准未配置，超额收益不计算</span>
+                </div>
+                <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-[11px] text-secondary md:grid-cols-4">
+                  <span>股票池 <b className="font-mono text-foreground">{pick('symbols_requested') ?? 0}</b></span>
+                  <span>回放交易日 <b className="font-mono text-foreground">{pick('trading_days') ?? 0}</b></span>
+                  <span>订单成交 <b className="font-mono text-foreground">{pick('order_fill_count') ?? 0}</b></span>
+                  <span>期末持仓 <b className="font-mono text-foreground">{pick('open_position_count') ?? 0}</b></span>
+                  <span>佣金 <b className="font-mono text-foreground">{fmtPrice(Number(pick('commission') ?? 0))}</b></span>
+                  <span>印花税 <b className="font-mono text-foreground">{fmtPrice(Number(pick('stamp_tax') ?? 0))}</b></span>
+                  <span>滑点成本 <b className="font-mono text-foreground">{fmtPrice(Number(pick('slippage_cost') ?? 0))}</b></span>
+                  <span>拒单 <b className="font-mono text-foreground">{pick('rejection_count') ?? 0}</b></span>
+                  <span>平均单笔 <b className="font-mono text-foreground">{pick('avg_trade_return') != null ? fmtPct(pick('avg_trade_return') as number) : '—'}</b></span>
+                  <span>盈亏比 <b className="font-mono text-foreground">{pick('profit_factor') != null ? Number(pick('profit_factor')).toFixed(2) : '—'}</b></span>
+                  <span>总成本 <b className="font-mono text-foreground">{fmtPrice(Number(pick('total_cost') ?? 0))}</b></span>
+                </div>
+              </div>
+            )}
+            {!!result.warnings?.length && (
+              <div className="rounded-btn border border-warning/30 bg-warning/[0.06] px-3 py-2 text-xs leading-5 text-warning">
+                {result.warnings.map(warning => <p key={warning}>{warning}</p>)}
               </div>
             )}
 
@@ -2192,60 +1700,10 @@ export function StrategyBacktest() {
               </div>
             )}
 
-            {Array.isArray(result.open_positions) && result.open_positions.length > 0 && (
-              <div className="overflow-hidden rounded-card border border-amber-400/30 bg-amber-400/5">
-                <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
-                  <span className="text-xs font-medium text-amber-300">期末未平仓</span>
-                  <span className="text-[10px] text-muted">计入最终权益，不计入已完成交易数和胜率</span>
-                </div>
-                <div className="overflow-x-auto">
-                  <table className="w-full min-w-[980px] text-sm text-foreground">
-                    <thead className="bg-elevated/70 text-left text-secondary">
-                      <tr>
-                        <th className="px-4 py-2 font-medium">标的</th>
-                        <th className="px-4 py-2 font-medium">持股数</th>
-                        <th className="px-4 py-2 font-medium">买入价 / 时间</th>
-                        <th className="px-4 py-2 font-medium">期末价 / 时间</th>
-                        <th className="px-4 py-2 text-right font-medium">市值</th>
-                        <th className="px-4 py-2 text-right font-medium">浮动盈亏</th>
-                        <th className="px-4 py-2 font-medium">未平仓原因</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {result.open_positions.map(position => (
-                        <tr key={`${position.symbol}-${position.entry_datetime}`} className="border-t border-border">
-                          <td className="px-4 py-2.5">
-                            <div className="font-medium">{position.name || position.symbol}</div>
-                            <div className="font-mono text-[11px] text-muted">{position.symbol}</div>
-                          </td>
-                          <td className="px-4 py-2.5 font-mono">{fmtShares(position.shares)} 股</td>
-                          <td className="px-4 py-2.5">
-                            <div className="font-mono">{fmtPrice(position.entry_price)}</div>
-                            <div className="text-[11px] text-muted">{position.entry_datetime}</div>
-                          </td>
-                          <td className="px-4 py-2.5">
-                            <div className="font-mono">{fmtPrice(position.mark_price)}</div>
-                            <div className="text-[11px] text-muted">{position.mark_datetime}</div>
-                          </td>
-                          <td className="px-4 py-2.5 text-right font-mono">{fmtPrice(position.market_value)}</td>
-                          <td className={`px-4 py-2.5 text-right font-mono ${priceColorClass(position.unrealized_pnl_amount)}`}>
-                            <div>{fmtSignedMoney(position.unrealized_pnl_amount)}</div>
-                            <div className="text-[11px]">{fmtPct(position.unrealized_pnl_pct)}</div>
-                          </td>
-                          <td className="px-4 py-2.5 text-[11px] text-amber-300">{position.exit_block_reason || '未启用期末强平'}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            )}
-
-            {/* Tab: 按日期 / 交易明细 / 选股分析 */}
-            {(result.trades.length > 0 || result.per_symbol_stats.length > 0) && (
+            {(dailyLedger.length > 0 || result.trades.length > 0 || signalDiagnostics.length > 0 || (result.positions?.length ?? 0) > 0) && (
               <div className="rounded-card border border-border overflow-hidden">
                 <div className="flex items-center gap-1 border-b border-border px-4 pt-2">
-                  {(['daily', 'trades', 'picks'] as const).map(t => (
+                  {(['daily', 'trades', 'signals', 'positions'] as const).map(t => (
                     <button
                       key={t}
                       onClick={() => setResultTab(t)}
@@ -2256,10 +1714,12 @@ export function StrategyBacktest() {
                       }`}
                     >
                       {t === 'daily'
-                        ? `每日交易 (${dailyTradeRows.length})`
+                        ? `每日账本 (${dailyLedger.length})`
                         : t === 'trades'
                           ? `交易明细 (${sortedTrades.length})`
-                          : `选股分析 (${result.per_symbol_stats.length})`}
+                          : t === 'signals'
+                            ? `信号诊断 (${signalDiagnostics.length})`
+                            : `期末持仓 (${result.positions?.length ?? 0})`}
                     </button>
                   ))}
                 </div>
@@ -2267,62 +1727,40 @@ export function StrategyBacktest() {
                 {resultTab === 'daily' && (
                   <div>
                     <div className="overflow-x-auto">
-                    <table className="w-full min-w-[960px] text-sm text-foreground">
+                    <table className="w-full min-w-[1080px] text-sm text-foreground">
                       <thead className="bg-elevated">
                         <tr className="text-left text-secondary">
-                          <th className="px-3 py-2.5 font-medium w-[8.5rem]">日期</th>
-                          <th className="px-3 py-2.5 font-medium">买入</th>
-                          <th className="px-3 py-2.5 font-medium">卖出</th>
-                          <th className="px-3 py-2.5 font-medium text-right w-[8rem]">当日收益</th>
-                          <th className="px-3 py-2.5 font-medium text-right w-[8rem]">累计收益</th>
+                          <th className="px-3 py-2.5 font-medium">日期 / 成交</th>
+                          <th className="px-3 py-2.5 font-medium text-right">买入金额</th>
+                          <th className="px-3 py-2.5 font-medium text-right">卖出金额</th>
+                          <th className="px-3 py-2.5 font-medium text-right">交易费用</th>
+                          <th className="px-3 py-2.5 font-medium text-right">已实现盈亏</th>
+                          <th className="px-3 py-2.5 font-medium text-right">日末权益</th>
+                          <th className="px-3 py-2.5 font-medium text-right">日收益</th>
                         </tr>
                       </thead>
                       <tbody>
                         {visibleDailyRows.map(row => (
-                          <tr key={row.date} className="border-t border-border hover:bg-elevated/50 transition-colors">
-                            <td className="px-3 py-2.5 whitespace-nowrap">
-                              <div className="font-mono text-foreground">{row.date}</div>
-                              <div className="mt-0.5 text-[11px] text-muted">
-                                买 {row.buys.length} / 卖 {row.sells.length}
-                              </div>
-                            </td>
-                            <td className="px-3 py-2.5">
-                              {row.buys.length === 0 ? (
-                                <span className="text-muted">—</span>
-                              ) : (
-                                <div className="flex flex-wrap gap-1.5">
-                                  {row.buys.map((t, i) => (
-                                    <DailyTradeChip key={`buy-${t.symbol}-${t.entry_date}-${t.exit_date}-${i}`} trade={t} side="buy" strategyName={result?.strategy_info?.name ?? selectedStrategyName} onClick={() => setSelectedTrade(t)} signalNames={signalNames} />
-                                  ))}
-                                </div>
-                              )}
-                            </td>
-                            <td className="px-3 py-2.5">
-                              {row.sells.length === 0 ? (
-                                <span className="text-muted">—</span>
-                              ) : (
-                                <div className="flex flex-wrap gap-1.5">
-                                  {row.sells.map((t, i) => (
-                                    <DailyTradeChip key={`sell-${t.symbol}-${t.entry_date}-${t.exit_date}-${i}`} trade={t} side="sell" onClick={() => setSelectedTrade(t)} signalNames={signalNames} />
-                                  ))}
-                                </div>
-                              )}
-                            </td>
-                            <td className={`px-3 py-2.5 text-right num font-semibold whitespace-nowrap ${priceColorClass(row.realizedPnl)}`}>
-                              {fmtSignedMoney(row.realizedPnl)}
-                            </td>
-                            <td className={`px-3 py-2.5 text-right num font-semibold whitespace-nowrap ${priceColorClass(row.cumulativePnl)}`}>
-                              {fmtSignedMoney(row.cumulativePnl)}
-                            </td>
-                          </tr>
+                          <Fragment key={row.date}>
+                            <tr onClick={() => setDailyExpanded(value => value === row.date ? null : row.date)} className="cursor-pointer border-t border-border hover:bg-elevated/50 transition-colors">
+                              <td className="px-3 py-2.5 whitespace-nowrap"><div className="font-mono text-foreground">{row.date}</div><div className="mt-0.5 text-[11px] text-muted">买 {row.buy_count} / 卖 {row.sell_count} · 点击展开</div></td>
+                              <td className="px-3 py-2.5 text-right num">{fmtMoney(row.buy_amount)}</td>
+                              <td className="px-3 py-2.5 text-right num">{fmtMoney(row.sell_amount)}</td>
+                              <td className="px-3 py-2.5 text-right num text-secondary">{fmtMoney(row.commission + row.stamp_tax + row.slippage)}</td>
+                              <td className={`px-3 py-2.5 text-right num font-semibold ${priceColorClass(row.realized_pnl)}`}>{fmtSignedMoney(row.realized_pnl)}</td>
+                              <td className="px-3 py-2.5 text-right num">{fmtMoney(row.end_equity)}</td>
+                              <td className={`px-3 py-2.5 text-right num font-semibold ${priceColorClass(row.daily_return)}`}>{fmtPct(row.daily_return)}</td>
+                            </tr>
+                            {dailyExpanded === row.date && <tr className="border-t border-border bg-base/40"><td colSpan={7} className="px-5 py-3"><div className="mb-2 text-xs font-medium text-secondary">当日逐笔成交</div><div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">{row.fills.length ? row.fills.map((fill, index) => <div key={`${fill.symbol}-${fill.entry_date}-${index}`} className="rounded-btn border border-border/70 bg-surface px-3 py-2 text-xs"><div className="flex justify-between gap-2"><span className="font-mono text-foreground">{fill.symbol}</span><span className={isVnpyLongDirection(fill.direction) ? 'text-accent' : 'text-secondary'}>{isVnpyLongDirection(fill.direction) ? '买入' : '卖出'}</span></div><div className="mt-1 text-secondary">{fill.name || '名称未知'} · {String(fill.entry_date).slice(11, 16)} · {fmtShares(fill.shares)} 股</div><div className="mt-1 num text-foreground">{fmtMoney(fill.entry_value)}</div></div>) : <span className="text-xs text-muted">当日无成交</span>}</div></td></tr>}
+                          </Fragment>
                         ))}
                       </tbody>
                     </table>
                     </div>
-                    {dailyTradeRows.length > 0 && (
+                    {dailyLedger.length > 0 && (
                       <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border px-4 py-2 text-xs text-muted">
                         <span>
-                          显示 {dailyStart + 1}-{dailyEnd} 天 / 共 {dailyTradeRows.length} 天，每页 10 天
+                          显示 {dailyStart + 1}-{dailyEnd} 天 / 共 {dailyLedger.length} 天，每页 10 天
                         </span>
                         <div className="flex flex-wrap items-center gap-2">
                           <button
@@ -2351,11 +1789,14 @@ export function StrategyBacktest() {
                 )}
 
                 {resultTab === 'trades' && (
+                  <div>
+                    <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2.5"><input value={tradeSearch} onChange={event => { setTradeSearch(event.target.value); setTradePage(0) }} placeholder="搜索代码或名称" className="w-48 rounded-btn border border-border bg-base px-2.5 py-1.5 text-xs outline-none focus:border-accent" /><select value={tradeReason} onChange={event => { setTradeReason(event.target.value); setTradePage(0) }} className="rounded-btn border border-border bg-base px-2.5 py-1.5 text-xs text-secondary outline-none focus:border-accent"><option value="">全部退出原因</option>{exitReasons.map(reason => <option key={reason} value={reason}>{reason}</option>)}</select></div>
                   <div className="overflow-x-auto">
                     <table className="w-full min-w-[960px] text-sm text-foreground">
                       <thead className="bg-elevated">
                         <tr className="text-left text-secondary">
-                          <th className="px-4 py-2.5 font-medium">标的</th>
+                          <th className="px-4 py-2.5 font-medium">股票代码</th>
+                          <th className="px-4 py-2.5 font-medium">股票名称</th>
                           <th className="px-4 py-2.5 font-medium">买入</th>
                           <th className="px-4 py-2.5 font-medium">卖出</th>
                           <th className="px-4 py-2.5 font-medium text-right">仓位 / 手数</th>
@@ -2366,18 +1807,14 @@ export function StrategyBacktest() {
                       </thead>
                       <tbody>
                         {visibleTrades.map((t: StrategyBacktestTrade, i: number) => (
-                          <tr key={`${t.symbol}-${t.entry_date}-${tradeStart + i}`} className="border-t border-border hover:bg-elevated/50 transition-colors group">
+                          <tr key={`${t.symbol}-${t.entry_date}-${tradeStart + i}`} onClick={() => setSelectedTrade(t)} className="cursor-pointer border-t border-border hover:bg-elevated/50 transition-colors group">
+                            <td className="px-4 py-2.5 font-mono text-foreground">{t.symbol}</td>
+                            <td className="px-4 py-2.5 font-medium text-foreground group-hover:text-accent transition-colors">{t.name || '名称未知'}</td>
                             <td className="px-4 py-2.5">
-                              <div className="font-medium text-foreground group-hover:text-accent transition-colors">
-                                {t.name || t.symbol}
-                              </div>
-                              <div className="mt-0.5 font-mono text-[11px] text-muted">{t.symbol}</div>
+                              <TradeLegCell trade={t} side="buy" />
                             </td>
                             <td className="px-4 py-2.5">
-                              <TradeLegCell trade={t} side="buy" signalNames={signalNames} />
-                            </td>
-                            <td className="px-4 py-2.5">
-                              <TradeLegCell trade={t} side="sell" signalNames={signalNames} />
+                              <TradeLegCell trade={t} side="sell" />
                             </td>
                             <td className="px-4 py-2.5 text-right">
                               <div className="num text-foreground">{fmtPct(t.position_pct, 2)}</div>
@@ -2391,10 +1828,11 @@ export function StrategyBacktest() {
                               <div className="mt-0.5 text-[11px]">{fmtPct(t.pnl_pct)}</div>
                             </td>
                             <td className="px-4 py-2.5 text-right num text-secondary">
-                              <div>{t.duration} 天</div>
+                              <div>{t.duration} 个交易日</div>
+                              <div className="mt-0.5 text-[11px] text-muted">{t.duration_minutes ?? 0} 个有效分钟</div>
                               {!!t.blocked_exit_days && <div className="mt-0.5 text-[11px] text-amber-400">阻塞 {t.blocked_exit_days} 天</div>}
                             </td>
-                            <td className="px-4 py-2.5"><ExitReasonBadge reason={t.exit_reason} signalId={t.exit_signal_id} signalNames={signalNames} /></td>
+                            <td className="px-4 py-2.5"><ExitReasonBadge reason={t.exit_reason} /></td>
                           </tr>
                         ))}
                       </tbody>
@@ -2443,41 +1881,24 @@ export function StrategyBacktest() {
                         </div>
                       </div>
                     )}
-                  </div>
+                  </div></div>
                 )}
 
-                {resultTab === 'picks' && (
-                  <table className="w-full text-sm">
+                {resultTab === 'signals' && (
+                  <div className="overflow-x-auto"><table className="w-full min-w-[920px] text-sm">
                     <thead className="bg-elevated">
                       <tr className="text-left text-secondary">
-                        <th className="px-4 py-2.5 font-medium">标的</th>
-                        <th className="px-4 py-2.5 font-medium text-right">选股次数</th>
-                        <th className="px-4 py-2.5 font-medium text-right">总收益</th>
-                        <th className="px-4 py-2.5 font-medium text-right">胜率</th>
-                        <th className="px-4 py-2.5 font-medium text-right">最佳</th>
-                        <th className="px-4 py-2.5 font-medium text-right">最差</th>
+                        <th className="px-4 py-2.5 font-medium">触发时间</th><th className="px-4 py-2.5 font-medium">股票代码</th><th className="px-4 py-2.5 font-medium">股票名称</th><th className="px-4 py-2.5 font-medium">方向 / 条件</th><th className="px-4 py-2.5 font-medium">执行状态</th><th className="px-4 py-2.5 font-medium">成交或拒单原因</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {result.per_symbol_stats.map((r) => (
-                        <tr key={r.symbol} className="border-t border-border hover:bg-elevated/50 transition-colors group">
-                          <td className="px-4 py-2">
-                            <div className="font-medium text-foreground group-hover:text-accent transition-colors">
-                              {r.name || symbolNames[r.symbol] || r.symbol}
-                            </div>
-                            <div className="mt-0.5 font-mono text-[11px] text-muted">{r.symbol}</div>
-                          </td>
-                          <td className="px-4 py-2 text-right num">{r.n_trades}</td>
-                          <td className={`px-4 py-2 text-right num ${priceColorClass(r.total_return)}`}>
-                            {fmtPct(r.total_return)}
-                          </td>
-                          <td className="px-4 py-2 text-right num">{fmtPct(r.win_rate)}</td>
-                          <td className={`px-4 py-2 text-right num ${priceColorClass(r.best)}`}>{fmtPct(r.best)}</td>
-                          <td className={`px-4 py-2 text-right num ${priceColorClass(r.worst)}`}>{fmtPct(r.worst)}</td>
-                        </tr>
-                      ))}
+                      {signalDiagnostics.map(item => <tr key={item.id} className="border-t border-border hover:bg-elevated/50"><td className="px-4 py-2 font-mono text-xs text-secondary whitespace-nowrap">{item.timestamp}</td><td className="px-4 py-2 font-mono">{item.symbol}</td><td className="px-4 py-2">{item.name || '名称未知'}</td><td className="px-4 py-2"><div className={isVnpyLongDirection(item.direction) ? 'text-accent' : 'text-secondary'}>{isVnpyLongDirection(item.direction) ? '买入' : '卖出'}</div><div className="mt-0.5 text-xs text-muted">{item.conditions.join('；') || item.reason}</div></td><td className="px-4 py-2"><span className={`inline-flex whitespace-nowrap rounded border px-1.5 py-0.5 text-xs ${item.status === 'filled' ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400' : item.status === 'rejected' ? 'border-red-500/30 bg-red-500/10 text-red-400' : 'border-border text-secondary'}`}>{item.status === 'filled' ? '已成交' : item.status === 'rejected' ? '已拒单' : item.status === 'queued' ? '已排队' : '已触发'}</span></td><td className="px-4 py-2 text-xs text-secondary whitespace-nowrap">{vnpySignalExecutionText(item)}</td></tr>)}
                     </tbody>
-                  </table>
+                  </table></div>
+                )}
+
+                {resultTab === 'positions' && (
+                  <div className="overflow-x-auto"><table className="w-full min-w-[1040px] text-sm"><thead className="bg-elevated"><tr className="text-left text-secondary"><th className="px-4 py-2.5 font-medium">股票代码</th><th className="px-4 py-2.5 font-medium">股票名称</th><th className="px-4 py-2.5 font-medium text-right">持仓股数</th><th className="px-4 py-2.5 font-medium text-right">成本 / 收盘</th><th className="px-4 py-2.5 font-medium text-right">市值 / 仓位</th><th className="px-4 py-2.5 font-medium text-right">浮动盈亏</th><th className="px-4 py-2.5 font-medium">建仓 / 持有</th></tr></thead><tbody>{(result.positions ?? []).map(item => <tr key={item.symbol} className="border-t border-border hover:bg-elevated/50"><td className="px-4 py-2 font-mono">{item.symbol}</td><td className="px-4 py-2 font-medium">{item.name || '名称未知'}</td><td className="px-4 py-2 text-right num">{fmtShares(item.volume)}</td><td className="px-4 py-2 text-right num"><div>{fmtPrice(item.average_cost)}</div><div className="mt-0.5 text-xs text-muted">{fmtPrice(item.mark_price)}</div></td><td className="px-4 py-2 text-right num"><div>{fmtMoney(item.market_value)}</div><div className="mt-0.5 text-xs text-muted">{fmtPct(item.position_pct)}</div></td><td className={`px-4 py-2 text-right num ${priceColorClass(item.unrealized_pnl)}`}><div>{fmtSignedMoney(item.unrealized_pnl)}</div><div className="mt-0.5 text-xs">{fmtPct(item.unrealized_pnl_pct)}</div></td><td className="px-4 py-2 text-xs text-secondary"><div>{item.entry_date || '—'}</div><div className="mt-0.5">{item.holding_days} 个交易日 · {item.holding_minutes} 个有效分钟</div></td></tr>)}</tbody></table>{!(result.positions?.length) && <div className="p-8 text-center text-sm text-muted">回测结束时没有未平仓持仓。</div>}</div>
                 )}
               </div>
             )}
@@ -2526,7 +1947,7 @@ export function StrategyBacktest() {
                 </button>
               </div>
               <div className="mt-3 flex gap-1 overflow-x-auto">
-                {visibleAdvancedTabs.map(tab => (
+                {ADVANCED_TABS.map(tab => (
                   <button
                     key={tab.id}
                     type="button"
@@ -2549,93 +1970,32 @@ export function StrategyBacktest() {
                 <div>成交口径可分别设置建仓/清仓：默认建仓次日开盘（避免未来函数）、清仓当日收盘（持仓中可盘中/收盘卖）。</div>
                 <div>退出优先级：止损/移动止损 &gt; 卖点信号 &gt; 到期平仓；到期只作兜底，不抢占卖点或风控。</div>
                 <div>最大持仓数控制同时持股数量，最大总仓位控制资金投入比例；剩余现金不等于可新增持仓名额。</div>
-                {matrixStrategy && <div className="text-accent">当前为 Matrix 策略，进出场信号由策略公式生成，不能用列信号覆盖。</div>}
               </div>
 
               {settingsTab === 'range' && (
                 <ConfigSection title="回测范围">
-                  {openingVolumeStrategy ? (
-                    <>
-                      <div className="flex items-center gap-2 text-xs text-secondary">
-                        <span className="text-[11px] text-muted">资产类型</span>
-                        <span className="rounded-btn border border-accent/40 bg-accent/10 px-3 py-1.5 text-accent">股票</span>
-                      </div>
-                      <label className="mt-3 block text-[11px] text-secondary">股票池（1–1000 只，逗号或换行分隔）</label>
-                      <textarea
-                        value={symbols}
-                        onChange={(event) => { setUniverseSource('manual'); setSymbols(event.target.value) }}
-                        placeholder="例如：600000.SH, 000001.SZ"
-                        rows={7}
-                        className="mt-1.5 w-full resize-y rounded-btn border border-border bg-canvas px-2.5 py-2 font-mono text-xs text-foreground outline-none transition-colors placeholder:text-muted focus:border-accent/60"
-                      />
-                      <div className="text-[11px] leading-5 text-muted">vn.py 回测仅使用这里手工输入并冻结的股票代码；不会读取月度股票池或服务器自选股。</div>
-                    </>
-                  ) : (
-                    <>
-                      <div className="flex items-center gap-2">
-                        <span className="text-[11px] text-muted">资产类型</span>
-                        <div className="inline-flex h-8 rounded-btn border border-border overflow-hidden">
-                          {(['stock', 'etf'] as const).map(t => (
-                            <button
-                              key={t}
-                              type="button"
-                              onClick={() => { setAssetType(t); setSelectedStrategy(null); setSymbols(''); setUniverseSource('market') }}
-                              className={`h-full px-3 text-xs font-medium transition-colors cursor-pointer
-                                ${assetType === t ? 'bg-accent/10 text-accent' : 'text-muted hover:text-foreground'}`}
-                            >
-                              {t === 'stock' ? '股票' : 'ETF'}
-                            </button>
-                          ))}
-                        </div>
-                        <span className="text-[11px] text-muted/70">ETF 仅技术类策略,读 ETF enriched</span>
-                      </div>
-                      {assetType === 'stock' && universeSelector}
-                      {(assetType === 'etf' || universeSource === 'manual') && (
-                        <StockPoolPicker
-                          value={symbols}
-                          onChange={(next) => { setUniverseSource('manual'); setSymbols(next) }}
-                          assetType={assetType}
-                        />
-                      )}
-                      <div className="text-[11px] leading-5 text-muted">默认全市场回测；月份股票池会在启动时重新读取成员并冻结实际提交范围。</div>
-                    </>
-                  )}
+                  <StockPoolPicker value={symbols} onChange={setSymbols} />
+                  <div className="text-[11px] leading-5 text-muted">默认全市场回测，由基础过滤、策略条件和买卖触发器筛选；需要单票调试或自选池回测时再限定股票池。</div>
                 </ConfigSection>
               )}
 
               {settingsTab === 'params' && (
-                openingVolumeStrategy ? (
-                  <OpeningVolumeParamsEditor
-                    definitions={selectedVnpyStrategy?.parameters.map(param => ({
-                      id: param.name,
-                      label: param.label,
-                      default: param.default,
-                      type: param.kind === 'time' ? 'time' : param.kind === 'int' ? 'int' : 'float',
-                      min: param.minimum,
-                      max: param.maximum,
-                    })) ?? []}
-                    values={strategyParams}
-                    hideRiskFields
-                    onChange={(id, value) => setStrategyParams(current => ({ ...current, [id]: value }))}
-                  />
-                ) : (
-                  <ConfigSection title="策略参数" hint="自动限制 min/max">
-                    {detail.params.length > 0 ? (
-                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                        {detail.params.map(param => (
-                          <StrategyParamInput
-                            key={param.id}
-                            param={param}
-                            value={strategyParams[param.id]}
-                            onChange={value => setStrategyParams(prev => ({ ...prev, [param.id]: value }))}
-                          />
-                        ))}
-                      </div>
-                    ) : (
-                      <div className="text-xs text-muted">当前策略没有可调参数。</div>
-                    )}
-                  </ConfigSection>
-                )
+                <ConfigSection title="策略参数" hint="自动限制 min/max">
+                  {detail.params.length > 0 ? (
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                      {detail.params.map(param => (
+                        <StrategyParamInput
+                          key={param.id}
+                          param={param}
+                          value={strategyParams[param.id]}
+                          onChange={value => setStrategyParams(prev => ({ ...prev, [param.id]: value }))}
+                        />
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="text-xs text-muted">当前策略没有可调参数。</div>
+                  )}
+                </ConfigSection>
               )}
 
               {settingsTab === 'filter' && (
@@ -2649,7 +2009,7 @@ export function StrategyBacktest() {
                     启用基础过滤
                   </label>
                   <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                    {(openingVolumeStrategy ? OPENING_VOLUME_FILTER_FIELDS : BASIC_FILTER_FIELDS).map(field => {
+                    {BASIC_FILTER_FIELDS.map(field => {
                       const scale = field.scale ?? 1
                       const value = basicFilter[field.key] == null ? '' : Number(basicFilter[field.key]) / scale
                       return (
@@ -2699,8 +2059,8 @@ export function StrategyBacktest() {
 
               {settingsTab === 'entry' && (
                 <ConfigSection
-                  title="入场触发器"
-                  hint="任一入场点满足即可进入候选"
+                  title="买入触发器"
+                  hint="任一买点满足即可进入候选"
                   actions={<SignalTriggerActions kind="entry" signals={entrySignals} onChange={next => updateOverride('entry_signals', next)} />}
                 >
                   <SignalPicker
@@ -2713,8 +2073,8 @@ export function StrategyBacktest() {
 
               {settingsTab === 'exit' && (
                 <ConfigSection
-                  title="出场触发器"
-                  hint="任一出场点满足即触发出场"
+                  title="卖出触发器"
+                  hint="任一卖点满足即触发卖出"
                   actions={<SignalTriggerActions kind="exit" signals={exitSignals} onChange={next => updateOverride('exit_signals', next)} />}
                 >
                   <SignalPicker
@@ -2727,28 +2087,6 @@ export function StrategyBacktest() {
 
               {settingsTab === 'scoring' && (
                 <ConfigSection title="评分权重" hint="临时拖动滑块，保存时统一归权">
-                  {openingVolumeStrategy && (
-                    <label className="block">
-                      <span className="mb-1 block text-[11px] font-medium text-secondary">候选排序方式</span>
-                      <select
-                        value={candidateSort}
-                        onChange={e => {
-                          setCandidateSort(e.target.value as 'score' | 'volume_ratio' | 'watchlist_order')
-                          setEditingScoring(false)
-                        }}
-                        className={INPUT_CLS}
-                      >
-                        <option value="score">综合评分</option>
-                        <option value="volume_ratio">同期量比优先</option>
-                        <option value="watchlist_order">股票池顺序</option>
-                      </select>
-                      <span className="mt-1 block text-[10px] leading-4 text-muted">逐分钟即时排序；只有同一分钟候选超过剩余名额时才决定优先买入顺序。</span>
-                    </label>
-                  )}
-                  <fieldset
-                    disabled={openingVolumeStrategy && candidateSort !== 'score'}
-                    className={`space-y-3 ${openingVolumeStrategy && candidateSort !== 'score' ? 'opacity-50' : ''}`}
-                  >
                   {Object.entries(scoring).length > 0 ? (() => {
                     const visibleWeights = editingScoring ? scoringDraft : scoringToPct(scoring)
                     const total = Object.values(visibleWeights).reduce((a, b) => a + b, 0)
@@ -2798,11 +2136,7 @@ export function StrategyBacktest() {
                   <div className="border-t border-border/40 pt-3">
                     <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                       <span className="text-[11px] font-medium text-secondary">评分过滤</span>
-                      <span className="text-[10px] text-muted">
-                        {openingVolumeStrategy
-                          ? '仅在同一分钟候选超过剩余名额时进行评分和区间筛选'
-                          : '留空 = 不过滤；命中范围后按评分从高到低买入'}
-                      </span>
+                      <span className="text-[10px] text-muted">留空 = 不过滤；命中范围后按评分从高到低买入</span>
                     </div>
                     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                       <label className="block">
@@ -2838,13 +2172,8 @@ export function StrategyBacktest() {
                         />
                       </label>
                     </div>
-                    <div className="mt-2 text-[10px] leading-4 text-muted">
-                      {openingVolumeStrategy
-                        ? '候选未超过剩余名额时，保持策略原有排序，不因评分区间排除股票。'
-                        : '例如最小值 71 表示只把评分 ≥ 71 的股票放入下一交易日买入预选池。'}
-                    </div>
+                    <div className="mt-2 text-[10px] leading-4 text-muted">例如最小值 71 表示只把评分 ≥ 71 的股票放入下一交易日买入预选池。</div>
                   </div>
-                  </fieldset>
                 </ConfigSection>
               )}
 
@@ -2861,14 +2190,7 @@ export function StrategyBacktest() {
                         step={0.5}
                         onChange={e => {
                           const n = numOrNull(e.target.value)
-                          if (openingVolumeStrategy) {
-                            setStrategyParams(prev => ({
-                              ...prev,
-                              stop_loss_pct: n == null ? 0 : clamp(Math.abs(n), 0, 99) / 100,
-                            }))
-                          } else {
-                            updateOverride('stop_loss', n == null ? null : -Math.abs(n) / 100)
-                          }
+                          updateOverride('stop_loss', n == null ? null : -Math.abs(n) / 100)
                         }}
                         className={INPUT_CLS}
                       />
@@ -2955,22 +2277,6 @@ export function StrategyBacktest() {
                       />
                     </label>
                   </div>
-                  {openingVolumeStrategy && (
-                    <label className="flex items-start gap-2 rounded-btn border border-border bg-base/40 px-3 py-2.5">
-                      <input
-                        type="checkbox"
-                        checked={forceCloseAtEnd}
-                        onChange={e => setForceCloseAtEnd(e.target.checked)}
-                        className="mt-0.5 h-4 w-4 accent-accent"
-                      />
-                      <span>
-                        <span className="block text-[11px] font-medium text-secondary">回测末期强制平仓</span>
-                        <span className="mt-0.5 block text-[10px] leading-4 text-muted">
-                          开启后最后交易日不再新开仓；持仓按末根分钟收盘价尝试卖出。受 T+1、停牌和一字跌停限制，无法成交的股票保留为期末未平仓。
-                        </span>
-                      </span>
-                    </label>
-                  )}
                 </ConfigSection>
               )}
             </div>

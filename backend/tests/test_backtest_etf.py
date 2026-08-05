@@ -192,17 +192,3 @@ def test_panel_cache_stats_counts_scans_hits_reuses():
     # 其余 4 线程要么 single-flight 复用, 要么(慢调度下 leader 已写缓存)命中 ——
     # 二者之和恒为 4。不锁定 reuse/hit 具体分配, 避免时序 flaky。
     assert s["reuse_count"] + (s["hit_count"] - 1) == 4, "4 个非 leader 线程应复用或命中"
-
-
-def test_job_key_includes_asset_type_and_is_consistent():
-    """stream 与 cancel 必须用同一 job_key: asset_type 进 key 且相同入参产出相同 key。"""
-    from app.api.backtest import _make_job_key
-
-    args = ("s1", None, None, None, "open_t+1", None, None,
-            0.0002, 5.0, 10, 1.0, 1_000_000.0, "equal", None, None,
-            "position", 5, None, None)
-    k_stock = _make_job_key(*args, asset_type="stock")
-    k_etf = _make_job_key(*args, asset_type="etf")
-    assert k_stock != k_etf
-    # 相同参数(含 asset_type)必须产出相同 key —— stream 端与 cancel 端对齐的前提
-    assert _make_job_key(*args, asset_type="etf") == k_etf

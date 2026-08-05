@@ -144,7 +144,6 @@ class DailyContextBuilder:
                 previous_high=adjusted(previous, "high"),
                 previous_low=adjusted(previous, "low"),
                 previous_volume=previous["volume"],
-                raw_previous_close=raw_previous_close,
                 limit_reference_price=metadata_pre_close if metadata_pre_close > 0 else raw_previous_close,
                 price_limit_pct=metadata_limit_pct if metadata_limit_pct > 0 else None,
                 closes=tuple(adjusted(row, "close") for row in rows[-5:]),

@@ -28,9 +28,9 @@ cp .env.example .env       # 按需填 TICKFLOW_API_KEY(留空 = None 模式)
 
 ```bash
 # 后端
-cd backend && uv sync --extra backtest   # 含回测依赖
+cd backend && uv sync --extra vnpy-backtest   # 含 vn.py 股票池分钟回测依赖
 # 老 CPU: uv sync --extra legacy-cpu
-# 老 CPU + 回测: uv sync --extra legacy-cpu --extra backtest
+# 老 CPU + 回测: uv sync --extra legacy-cpu --extra vnpy-backtest
 uv run uvicorn app.main:app --reload --port 3018
 
 # 前端
@@ -80,14 +80,14 @@ docker compose up --build -d
 
 ```ini
 BACKEND_EXTRAS=legacy-cpu          # 兼容老 CPU
-BACKEND_EXTRAS=legacy-cpu backtest # 兼容老 CPU + 回测依赖
+BACKEND_EXTRAS=legacy-cpu vnpy-backtest # 兼容老 CPU + 回测依赖
 ```
 
 手动启动源码时，也可以在 `backend/` 目录直接执行 `uv sync --extra legacy-cpu`。不要设置 `POLARS_SKIP_CPU_CHECK`，它只会隐藏警告，实际执行不支持的指令时仍可能崩溃。
 
 ### 回测依赖说明
 
-vectorbt → numba 体积较大,作为可选 extras(`uv sync --extra backtest`)。macOS / Intel 无预构建 wheel 时需 `brew install cmake` 现场编译。
+股票池分钟回测依赖 `vnpy` 与 `vnpy-ctastrategy`，源码部署使用 `uv sync --extra vnpy-backtest`。Docker 默认镜像和 GitHub Release 桌面安装包不默认包含该 extra；本交付的完整回测验收范围是 Windows 源码部署。
 
 ---
 
