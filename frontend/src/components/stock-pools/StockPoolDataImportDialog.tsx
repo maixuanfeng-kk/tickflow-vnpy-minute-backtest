@@ -30,9 +30,9 @@ export function StockPoolDataImportDialog({ readiness, strategyId, month, onClos
     mutationFn: () => api.dailyProImportStart(sourceDir.trim()),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: QK.dailyProImportStatus })
-      toast('专业日 K 导入任务已启动', 'success')
+      toast('Tushare 日 K 导入任务已启动', 'success')
     },
-    onError: error => toast(error instanceof Error ? error.message : '专业日 K 导入启动失败', 'error'),
+    onError: error => toast(error instanceof Error ? error.message : 'Tushare 日 K 导入启动失败', 'error'),
   })
   const job = status.data?.job
   const manifest = status.data?.manifest
@@ -48,7 +48,7 @@ export function StockPoolDataImportDialog({ readiness, strategyId, month, onClos
 
   const submit = () => {
     if (!sourceDir.trim()) {
-      toast('请输入专业日 K CSV 目录', 'error')
+      toast('请输入 Tushare 日 K CSV 目录', 'error')
       inputRef.current?.focus()
       return
     }
@@ -85,7 +85,7 @@ export function StockPoolDataImportDialog({ readiness, strategyId, month, onClos
           <div className="flex items-start gap-2">
             <Database className="mt-0.5 h-4 w-4 shrink-0 text-accent" />
             <div>
-              <h3 className="text-xs font-medium">专业日 K CSV</h3>
+              <h3 className="text-xs font-medium">Tushare 日 K CSV</h3>
               <p className="mt-1 text-xs leading-relaxed text-secondary">目录需包含按年份组织的文件，例如 <code>2026/000001_SZ.csv</code>。服务端将扫描并写入股票池专用数据集。</p>
             </div>
           </div>

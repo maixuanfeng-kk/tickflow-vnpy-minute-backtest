@@ -68,7 +68,7 @@ class LocalDailyProCsvImporter:
     @staticmethod
     def schema_document() -> dict[str, object]:
         return {
-            "dataset": "kline_daily_pro",
+            "dataset": "kline_daily_tushare",
             "version": 1,
             "source": "local annual daily CSV",
             "units": {
@@ -94,6 +94,8 @@ class LocalDailyProCsvImporter:
         if not files:
             raise ValueError("未找到指定年份的专业日K CSV 文件")
 
+        if not dry_run:
+            self._migrate_legacy_dataset()
         stage_root = self.data_dir / ".local-daily-pro-import-staging" / uuid4().hex
         dates: set[str] = set()
         try:
@@ -195,7 +197,7 @@ class LocalDailyProCsvImporter:
             partition.write_parquet(output)
 
     def _replace_partitions(self, stage_root: Path, dates: set[str], summary: LocalDailyProImportSummary) -> None:
-        output_root = self.data_dir / "kline_daily_pro"
+        output_root = self.data_dir / "kline_daily_tushare"
         for index, trade_date in enumerate(sorted(dates), start=1):
             paths = sorted((stage_root / f"date={trade_date}").glob("batch=*.parquet"))
             if not paths:
@@ -214,9 +216,15 @@ class LocalDailyProCsvImporter:
             summary.latest_date = trade_date if summary.latest_date is None else max(summary.latest_date, trade_date)
             self._report(index, len(dates), "重建专业日K Parquet 分区")
 
+    def _migrate_legacy_dataset(self) -> None:
+        legacy = self.data_dir / "kline_daily_pro"
+        target = self.data_dir / "kline_daily_tushare"
+        if legacy.exists() and not target.exists():
+            legacy.replace(target)
+
     def _write_metadata(self, summary: LocalDailyProImportSummary) -> None:
         metadata = {**self.schema_document(), "years": summary.years, "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
-        path = self.data_dir / "kline_daily_pro" / "_metadata.json"
+        path = self.data_dir / "kline_daily_tushare" / "_metadata.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_suffix(".tmp")
         temporary.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")

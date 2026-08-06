@@ -43,6 +43,29 @@ async def test_start_daily_pro_import_accepts_tushare_year_directory(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_start_daily_pro_import_accepts_single_year_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = tmp_path / "2026"
+    source.mkdir(parents=True)
+    _write_tushare_daily_csv(source / "000001_SZ.csv")
+    store = JobStore(store_dir=tmp_path / "jobs")
+    monkeypatch.setattr(daily_pro_import, "job_store", store)
+
+    async def no_background_import(*_args: object) -> None:
+        return None
+
+    monkeypatch.setattr(daily_pro_import, "_run_import", no_background_import)
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(repo=SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path / "data"))))
+    )
+
+    result = await daily_pro_import.start_import(
+        daily_pro_import.DailyProImportRequest(source_dir=str(source)), request
+    )
+
+    assert result["reused"] is False
+
+
+@pytest.mark.asyncio
 async def test_start_daily_pro_import_rejects_empty_or_nonannual_directory(tmp_path: Path) -> None:
     with pytest.raises(HTTPException, match="请输入"):
         await daily_pro_import.start_import(daily_pro_import.DailyProImportRequest(source_dir="  "), None)  # type: ignore[arg-type]
@@ -53,6 +76,31 @@ async def test_start_daily_pro_import_rejects_empty_or_nonannual_directory(tmp_p
         await daily_pro_import.start_import(
             daily_pro_import.DailyProImportRequest(source_dir=str(source)), None  # type: ignore[arg-type]
         )
+
+
+def test_daily_pro_import_publishes_tushare_dataset_and_factors(tmp_path: Path) -> None:
+    source = tmp_path / "daily"
+    (source / "2026").mkdir(parents=True)
+    _write_tushare_daily_csv(source / "2026" / "000001_SZ.csv")
+    store = JobStore(store_dir=tmp_path / "jobs")
+    job_id, _ = store.create()
+
+    class Repo:
+        def refresh_cache(self) -> None:
+            return None
+
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(daily_pro_import, "job_store", store)
+        monkeypatch.setattr(daily_pro_import, "try_acquire_run_slot", lambda: True)
+        monkeypatch.setattr(daily_pro_import, "release_run_slot", lambda: None)
+        monkeypatch.setattr(daily_pro_import, "invalidate_data_cache", lambda: None)
+        daily_pro_import._import_sync(job_id, source, tmp_path / "data", Repo())
+    finally:
+        monkeypatch.undo()
+
+    assert (tmp_path / "data" / "kline_daily_tushare").exists()
+    assert (tmp_path / "data" / "adj_factor_tushare").exists()
 
 
 def test_daily_pro_import_releases_run_slot_before_marking_job_finished(

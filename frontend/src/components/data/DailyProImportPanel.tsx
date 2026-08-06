@@ -28,9 +28,9 @@ export function DailyProImportPanel() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: QK.dailyProImportStatus })
       queryClient.invalidateQueries({ queryKey: QK.pipelineJobs })
-      toast('专业日 K 本地导入任务已启动', 'success')
+      toast('Tushare 日 K 本地导入任务已启动', 'success')
     },
-    onError: error => toast(error instanceof Error ? error.message : '专业日 K 导入启动失败', 'error'),
+    onError: error => toast(error instanceof Error ? error.message : 'Tushare 日 K 导入启动失败', 'error'),
   })
   const job = status.data?.job
   const manifest = status.data?.manifest
@@ -48,7 +48,7 @@ export function DailyProImportPanel() {
         <div className="flex items-start gap-2">
           <CalendarDays className="mt-0.5 h-4 w-4 shrink-0 text-accent" />
           <div>
-            <h2 className="text-sm font-medium text-foreground">专业日 K 本地导入</h2>
+            <h2 className="text-sm font-medium text-foreground">Tushare 日 K 本地导入</h2>
             <p className="mt-1 text-xs leading-relaxed text-secondary">
               输入包含 `2025/000001_SZ.csv` 等年度目录的 Tushare 日K数据。总市值会自动从万元转换为元，供月度股票池使用。
             </p>
@@ -68,7 +68,7 @@ export function DailyProImportPanel() {
           className="min-w-0 flex-1 rounded-btn border border-border bg-base px-3 py-2 text-sm text-foreground outline-none placeholder:text-muted focus:border-accent disabled:opacity-50"
         />
         <button
-          onClick={() => sourceDir.trim() ? startImport.mutate() : toast('请输入专业日 K CSV 目录', 'error')}
+          onClick={() => sourceDir.trim() ? startImport.mutate() : toast('请输入 Tushare 日 K CSV 目录', 'error')}
           disabled={running}
           className="inline-flex items-center justify-center gap-2 rounded-btn bg-accent px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
         >
@@ -92,7 +92,7 @@ export function DailyProImportPanel() {
       {job?.status === 'failed' && (
         <div className="mt-4 flex items-start gap-2 rounded-btn border border-danger/30 bg-danger/[0.04] p-3 text-xs text-danger">
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-          <span>{job.error ?? '专业日 K 导入失败，已有本地数据仍保留。'}</span>
+          <span>{job.error ?? 'Tushare 日 K 导入失败，已有本地数据仍保留。'}</span>
         </div>
       )}
 
