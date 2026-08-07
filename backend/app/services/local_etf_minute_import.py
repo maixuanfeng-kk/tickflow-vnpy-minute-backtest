@@ -49,6 +49,8 @@ class LocalEtfMinuteCsvImporter:
         if not source.is_dir():
             raise ValueError(f"ETF minute source directory does not exist: {source}")
         files = sorted(source.glob("*/[0-9]*.csv"))
+        if not files and source.name.upper().endswith(("_SZ", "_SH")):
+            files = sorted(source.glob("[0-9]*.csv"))
         summary = LocalEtfMinuteImportSummary(
             status="preview" if dry_run else "running",
             dry_run=dry_run,

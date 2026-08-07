@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from app.vnpy_backtest.strategies.base import StrategyKind, StrategyParameter, StrategySpec
+from app.vnpy_backtest.strategies.etf_159915_minute import Etf159915MinuteStrategy
 from app.vnpy_backtest.strategies.opening_breakout_condition_1 import OpeningBreakoutCondition1Strategy
 from app.vnpy_backtest.strategies.opening_breakout_condition_2 import OpeningBreakoutCondition2Strategy
 from app.vnpy_backtest.strategies.opening_breakout_condition_3 import OpeningBreakoutCondition3Strategy
@@ -9,6 +10,15 @@ from app.vnpy_backtest.strategies.opening_breakout_pool import OpeningBreakoutPo
 
 
 _STRATEGIES: dict[str, StrategySpec] = {
+    "etf_159915_minute": StrategySpec(
+        id="etf_159915_minute",
+        name="159915 ETF 分钟交易策略",
+        kind=StrategyKind.PORTFOLIO,
+        strategy_class=Etf159915MinuteStrategy,
+        min_symbols=1,
+        max_symbols=1,
+        description="159915 raw 1m ETF strategy with documented dynamic entry and exit protection.",
+    ),
     "opening_breakout_pool": StrategySpec(
         id="opening_breakout_pool",
         name="开盘突破股票池（vn.py）",

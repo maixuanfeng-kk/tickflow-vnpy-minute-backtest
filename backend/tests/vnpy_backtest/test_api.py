@@ -22,6 +22,7 @@ def test_vnpy_strategy_catalog_contains_four_portfolio_strategies() -> None:
     response = backtest.vnpy_strategies()
 
     assert {item["id"] for item in response["strategies"]} == {
+        "etf_159915_minute",
         "opening_breakout_pool",
         "opening_breakout_condition_1",
         "opening_breakout_condition_2",

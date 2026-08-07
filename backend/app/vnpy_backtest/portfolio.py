@@ -146,7 +146,8 @@ class DailyContextBuilder:
                 previous_volume=previous["volume"],
                 limit_reference_price=metadata_pre_close if metadata_pre_close > 0 else raw_previous_close,
                 price_limit_pct=metadata_limit_pct if metadata_limit_pct > 0 else None,
-                closes=tuple(adjusted(row, "close") for row in rows[-5:]),
+                closes=tuple(adjusted(row, "close") for row in rows[-10:]),
+                opens=tuple(adjusted(row, "open") for row in rows[-10:]),
                 previous_cumulative_volumes=previous["cumulative_volumes"],
             )
         return result
@@ -186,6 +187,27 @@ class DailyContextBuilder:
                     "cumulative_volumes": cumulative_volumes,
                 }
             )
+
+    def add_daily_history(self, history: Mapping[str, Sequence[Mapping[str, object]]]) -> None:
+        """Seed completed daily OHLC history before minute warmup begins."""
+        for symbol, rows in history.items():
+            for row in sorted(rows, key=lambda item: item["date"]):
+                trading_day = row["date"]
+                if isinstance(trading_day, str):
+                    trading_day = date.fromisoformat(trading_day)
+                if self._history[symbol] and self._history[symbol][-1]["date"] >= trading_day:
+                    continue
+                self._history[symbol].append(
+                    {
+                        "date": trading_day,
+                        "open": float(row["open"]),
+                        "high": float(row["high"]),
+                        "low": float(row["low"]),
+                        "close": float(row["close"]),
+                        "volume": float(row.get("volume", 0.0) or 0.0),
+                        "cumulative_volumes": {},
+                    }
+                )
 
 
 class MultiSymbolNextBarOpenEngine:

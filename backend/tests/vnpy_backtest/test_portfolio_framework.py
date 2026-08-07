@@ -43,6 +43,7 @@ def test_registry_exposes_only_portfolio_strategies() -> None:
     assert get_strategy("opening_breakout_condition_3") is not None
     assert get_strategy("minute_double_ma_volume") is None
     assert [item.id for item in list_strategies()] == [
+        "etf_159915_minute",
         "opening_breakout_pool",
         "opening_breakout_condition_1",
         "opening_breakout_condition_2",
