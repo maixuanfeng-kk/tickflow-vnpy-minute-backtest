@@ -3,7 +3,7 @@ from datetime import datetime
 from vnpy.trader.constant import Direction, Exchange, Interval
 from vnpy.trader.object import BarData
 
-from app.vnpy_backtest.strategies.base import DailyReference, PortfolioContext
+from app.vnpy_backtest.strategies.base import DailyReference, PortfolioContext, PortfolioPositionView
 from app.vnpy_backtest.strategies.etf_159915_minute import Etf159915MinuteStrategy
 from app.vnpy_backtest.strategies.registry import get_strategy
 
@@ -49,3 +49,23 @@ def test_sell_trigger_is_strict_and_protection_suppresses_regular_sell():
     moment = datetime(2026, 7, 2, 10, 0)
     strategy.on_minute({"159915.SZ": _bar(moment, 3.2)}, _context(moment, reference))
     assert strategy._strictly_below(3.3, 3.3) is False
+
+
+def test_54_high_open_reversal_returns_one_sell_intent():
+    strategy = Etf159915MinuteStrategy({})
+    reference = DailyReference(previous_open=3.2, previous_close=3.4, previous_high=3.5, previous_low=3.1, closes=(3.3, 3.4))
+    position = {"159915.SZ": PortfolioPositionView("159915.SZ", 100, 3.4, datetime(2026, 7, 1).date())}
+    first = datetime(2026, 7, 2, 9, 30)
+    second = datetime(2026, 7, 2, 9, 31)
+    strategy.on_minute({"159915.SZ": _bar(first, 3.5)}, _context(first, reference, position))
+    intents = strategy.on_minute({"159915.SZ": _bar(second, 3.45)}, _context(second, reference, position))
+    assert len(intents) == 1
+    assert intents[0].direction == Direction.SHORT
+    assert intents[0].reason == "5.4"
+
+
+def test_1500_bar_does_not_create_a_signal_without_a_next_bar():
+    strategy = Etf159915MinuteStrategy({})
+    reference = DailyReference(previous_open=3.2, previous_close=3.4, previous_high=3.5, previous_low=3.1, closes=(3.3, 3.4))
+    moment = datetime(2026, 7, 2, 15, 0)
+    assert strategy.on_minute({"159915.SZ": _bar(moment, 3.2)}, _context(moment, reference)) == []

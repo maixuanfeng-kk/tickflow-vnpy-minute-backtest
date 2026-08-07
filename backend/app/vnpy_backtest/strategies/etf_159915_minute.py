@@ -53,6 +53,8 @@ class Etf159915MinuteStrategy:
         self._update_intraday(bar)
         current = float(bar.close_price)
         current_time = context.timestamp.time()
+        if current_time >= time(15, 0):
+            return []
 
         if context.positions:
             return self._sell_intent(current, current_time)
@@ -206,7 +208,7 @@ class Etf159915MinuteStrategy:
         if (self._open - current) / self._open > 0.01 and self._open > self._previous_close(ref) * 1.02:
             self._sold_today = True
             self._sold_by_54 = True
-            return self._intent(Direction.SHORT, "5.4", ["5.4"])
+            return [self._intent(Direction.SHORT, "5.4", ["5.4"])]
         if self._protection_level == 3 and self._protection_days_left > 0 and current < self._protection_trigger:
             return self._mark_sell("5.3")
         if self._protection_level == 2 and self._protection_days_left > 0 and current < self._protection_trigger:
