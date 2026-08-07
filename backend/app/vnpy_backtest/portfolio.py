@@ -92,7 +92,7 @@ class PortfolioRunResult:
 
 
 class DailyContextBuilder:
-    """Build prior completed-day references from local minute bars only."""
+    """Build completed-day references from minute bars and official daily OHLC."""
 
     def __init__(self, signal_projector=None) -> None:
         self._history: dict[str, list[dict]] = defaultdict(list)
@@ -151,7 +151,11 @@ class DailyContextBuilder:
             )
         return result
 
-    def add_day(self, bars: Mapping[str, Sequence[BarData]]) -> None:
+    def add_day(
+        self,
+        bars: Mapping[str, Sequence[BarData]],
+        daily_prices: Mapping[str, Mapping[str, object]] | None = None,
+    ) -> None:
         for symbol, symbol_bars in bars.items():
             if not symbol_bars:
                 continue
@@ -160,13 +164,24 @@ class DailyContextBuilder:
             for bar in sorted(symbol_bars, key=lambda item: item.datetime):
                 cumulative_volume += float(bar.volume)
                 cumulative_volumes[bar.datetime.time()] = cumulative_volume
+            minute_prices = {
+                "open": float(symbol_bars[0].open_price),
+                "high": max(float(bar.high_price) for bar in symbol_bars),
+                "low": min(float(bar.low_price) for bar in symbol_bars),
+                "close": float(symbol_bars[-1].close_price),
+            }
+            official_prices = (daily_prices or {}).get(symbol, {})
+            for field in minute_prices:
+                try:
+                    value = float(official_prices.get(field, 0))
+                except (TypeError, ValueError):
+                    value = 0.0
+                if value > 0:
+                    minute_prices[field] = value
             self._history[symbol].append(
                 {
                     "date": symbol_bars[0].datetime.date(),
-                    "open": float(symbol_bars[0].open_price),
-                    "high": max(float(bar.high_price) for bar in symbol_bars),
-                    "low": min(float(bar.low_price) for bar in symbol_bars),
-                    "close": float(symbol_bars[-1].close_price),
+                    **minute_prices,
                     "volume": sum(float(bar.volume) for bar in symbol_bars),
                     "cumulative_volumes": cumulative_volumes,
                 }

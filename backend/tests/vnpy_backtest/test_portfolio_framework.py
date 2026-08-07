@@ -294,6 +294,41 @@ def test_daily_context_uses_completed_days_only() -> None:
     assert reference.previous_cumulative_volumes[start.time()] == 10_000
 
 
+def test_daily_context_uses_official_daily_ohlc_and_minute_cumulative_volume() -> None:
+    start = datetime(2026, 6, 2, 9, 30)
+    builder = DailyContextBuilder()
+    bars = {
+        "000938.SZ": [
+            _bar("000938.SZ", Exchange.SZSE, start, 28.29),
+            _bar("000938.SZ", Exchange.SZSE, start + timedelta(minutes=1), 28.64),
+        ],
+    }
+    bars["000938.SZ"][0].volume = 2_000
+    bars["000938.SZ"][1].volume = 3_000
+
+    builder.add_day(
+        bars,
+        daily_prices={
+            "000938.SZ": {
+                "open": 28.29,
+                "high": 28.69,
+                "low": 27.68,
+                "close": 28.21,
+            },
+        },
+    )
+    reference = builder.references(date(2026, 6, 3))["000938.SZ"]
+
+    assert reference.previous_open == 28.29
+    assert reference.previous_high == 28.69
+    assert reference.previous_low == 27.68
+    assert reference.previous_close == 28.21
+    assert reference.previous_cumulative_volumes == {
+        time(9, 30): 2_000,
+        time(9, 31): 5_000,
+    }
+
+
 def test_daily_context_keeps_raw_execution_pre_close_separate_from_signal_prices() -> None:
     start = datetime(2026, 1, 5, 9, 30)
     builder = DailyContextBuilder()

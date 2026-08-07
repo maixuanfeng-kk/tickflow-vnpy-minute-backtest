@@ -104,7 +104,7 @@ class VnpyMinuteBacktestService:
                 factor_dataset="adj_factor_tushare",
             )
         daily_context = DailyContextBuilder(signal_projector)
-        daily_limit_metadata = self._daily_limit_metadata(symbols, config.start, config.end)
+        daily_limit_metadata = self._daily_limit_metadata(symbols, warmup_start, config.end)
         days_seen = 0
         # Partitions exist for every market trading day, even when none of the
         # selected securities traded.  Keep that calendar separate from the
@@ -131,7 +131,10 @@ class VnpyMinuteBacktestService:
                 continue
             active_symbols_by_day[trading_day] = set(bars_by_symbol)
             if trading_day < config.start:
-                daily_context.add_day(bars_by_symbol)
+                daily_context.add_day(
+                    bars_by_symbol,
+                    daily_prices=daily_limit_metadata.get(trading_day, {}),
+                )
                 continue
             # Do not create a reference (and therefore do not request a qfq
             # factor) for a suspended security. Some local vendors represent a
@@ -145,7 +148,10 @@ class VnpyMinuteBacktestService:
                     execution_metadata=daily_limit_metadata.get(trading_day, {}),
                 ),
             )
-            daily_context.add_day(bars_by_symbol)
+            daily_context.add_day(
+                bars_by_symbol,
+                daily_prices=daily_limit_metadata.get(trading_day, {}),
+            )
             days_seen += 1
             if config.on_progress:
                 current_equity = engine.equity_curve[-1]["value"] if engine.equity_curve else config.initial_capital
@@ -383,6 +389,11 @@ class VnpyMinuteBacktestService:
             if not {"symbol", "date", "pre_close"}.issubset(columns):
                 return {}
             name_expr = pl.col("name").cast(pl.Utf8) if "name" in columns else pl.lit("")
+            optional_price_exprs = [
+                pl.col(field).cast(pl.Float64).alias(field)
+                if field in columns else pl.lit(None, dtype=pl.Float64).alias(field)
+                for field in ("open", "high", "low", "close")
+            ]
             rows = (
                 scan.filter(
                     pl.col("symbol").is_in(list(symbols))
@@ -394,6 +405,7 @@ class VnpyMinuteBacktestService:
                     pl.col("date").cast(pl.Date),
                     pl.col("pre_close").cast(pl.Float64),
                     name_expr.alias("name"),
+                    *optional_price_exprs,
                 )
                 .collect()
             )
@@ -409,6 +421,11 @@ class VnpyMinuteBacktestService:
             result[trading_day][symbol] = {
                 "pre_close": row["pre_close"],
                 "price_limit_pct": rule.price_limit_pct,
+                **{
+                    field: row[field]
+                    for field in ("open", "high", "low", "close")
+                    if row[field] is not None
+                },
             }
         return dict(result)
 

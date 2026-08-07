@@ -95,6 +95,10 @@ def test_daily_limit_metadata_uses_historical_raw_pre_close(tmp_path) -> None:
         "symbol": ["002938.SZ"],
         "date": [date(2026, 5, 22)],
         "pre_close": [94.48],
+        "open": [95.00],
+        "high": [103.93],
+        "low": [93.80],
+        "close": [101.20],
         "name": ["鹏鼎控股"],
     }).write_parquet(part / "part.parquet")
     repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
@@ -106,6 +110,13 @@ def test_daily_limit_metadata_uses_historical_raw_pre_close(tmp_path) -> None:
     )
     assert metadata == {
         date(2026, 5, 22): {
-            "002938.SZ": {"pre_close": 94.48, "price_limit_pct": 0.10},
+            "002938.SZ": {
+                "pre_close": 94.48,
+                "price_limit_pct": 0.10,
+                "open": 95.00,
+                "high": 103.93,
+                "low": 93.80,
+                "close": 101.20,
+            },
         },
     }
