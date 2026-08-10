@@ -57,6 +57,8 @@ class Etf159915MinuteStrategy:
             return []
 
         if context.positions:
+            if any(position.entry_date == context.timestamp.date() for position in context.positions.values()):
+                return []
             return self._sell_intent(current, current_time)
         if self._sold_today:
             if self._sold_by_54 and not self._rebuy_sent and self._open > 0 and current > self._open:
@@ -127,6 +129,8 @@ class Etf159915MinuteStrategy:
             self._special_trigger = c2
             self._special_days_left = 2
         else:
+            if self._special_level == 1 and self._special_days_left > 0:
+                return
             self._special_level = 2
             self._special_trigger = ref.previous_open
             self._special_days_left = max(self._special_days_left, 1)
@@ -161,26 +165,33 @@ class Etf159915MinuteStrategy:
                 return self._mark_buy("4.2.3-1")
             return []
         if self._special_level == 2 and self._special_days_left > 0:
-            if current_time <= MORNING_END and current > self._special_trigger and (current - self._open) / self._open > 0.005:
+            previous_close = self._previous_close(ref)
+            if (
+                current_time <= MORNING_END
+                and previous_close
+                and current > self._special_trigger
+                and (current - previous_close) / previous_close > 0.005
+            ):
                 return self._mark_buy("4.2.3-2")
             return []
 
         prev_close = self._previous_close(ref)
-        if prev_close is None or ref.previous_open is None or ref.previous_high is None:
+        previous_close_2 = self._previous_close(ref, 1)
+        if prev_close is None or previous_close_2 is None or ref.previous_open is None or ref.previous_high is None:
             return []
         if time(9, 31) <= current_time <= MORNING_END:
             if self._is_bullish(ref):
-                gap = (ref.previous_high - prev_close) / prev_close
-                close_gain = self._signed_change(ref)
-                if gap - close_gain > 0.003 and current > ref.previous_high and current > self._high_0931:
+                high_gain = (ref.previous_high - previous_close_2) / previous_close_2
+                close_gain = (prev_close - previous_close_2) / previous_close_2
+                if high_gain - close_gain > 0.003 and current > ref.previous_high and current > self._high_0931:
                     return self._mark_buy("4.1.1")
-                if gap - close_gain <= 0.003:
+                if high_gain - close_gain <= 0.003:
                     same_time = ref.previous_cumulative_volumes.get(current_time, 0.0)
                     if (current - self._open) / self._open > 0.003 and same_time > 0 and self._cum_volume > 1.2 * same_time and current > self._high_0931:
                         return self._mark_buy("4.1.2")
-            else:
-                open_change = (ref.previous_open - prev_close) / prev_close
-                close_change = self._signed_change(ref)
+            elif self._is_bearish(ref):
+                open_change = (ref.previous_open - previous_close_2) / previous_close_2
+                close_change = (prev_close - previous_close_2) / previous_close_2
                 if 0.005 < open_change - close_change < 0.015 and current > ref.previous_open and current > self._high_0931:
                     return self._mark_buy("4.2.1")
                 if 0 < open_change - close_change < 0.005 and current_time >= time(9, 32) and (current - self._open) / self._open > 0.005 and current > self._high_0932:
@@ -224,7 +235,7 @@ class Etf159915MinuteStrategy:
                 return self._mark_sell("5.1.3")
         if current_time >= time(14, 30) and (self._open - current) / self._open > 0.01 and (self._open - current) / self._open > self._entity_change(ref) and current < self._previous_close(ref) and self._signed_change(ref) > 0:
             return self._mark_sell("5.5")
-        if current < min(ref.previous_low or current, self._previous_low(ref) or current) or self._drop_from_previous_close(ref, current) > 0.01:
+        if current < min(ref.previous_low or current, self._previous_low(ref, 1) or current) or self._drop_from_previous_close(ref, current) > 0.01:
             return self._mark_sell("5.6")
         return []
 
@@ -265,8 +276,12 @@ class Etf159915MinuteStrategy:
             return 0.0
         return float(ref.opens[-1 - offset])
 
-    def _previous_low(self, ref: DailyReference) -> float | None:
-        return ref.previous_low
+    def _previous_low(self, ref: DailyReference, offset: int = 0) -> float | None:
+        if offset == 0:
+            return ref.previous_low
+        if len(ref.lows) <= offset:
+            return None
+        return ref.lows[-1 - offset]
 
     def _signed_change(self, ref: DailyReference) -> float:
         c1 = self._previous_close(ref)
@@ -283,3 +298,6 @@ class Etf159915MinuteStrategy:
 
     def _is_bullish(self, ref: DailyReference) -> bool:
         return bool(ref.previous_close is not None and ref.previous_open is not None and ref.previous_close > ref.previous_open)
+
+    def _is_bearish(self, ref: DailyReference) -> bool:
+        return bool(ref.previous_close is not None and ref.previous_open is not None and ref.previous_close < ref.previous_open)

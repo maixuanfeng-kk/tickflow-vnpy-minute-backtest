@@ -889,6 +889,7 @@ export function StrategyBacktest() {
     setMaxPositions('1')
     setPositionSizing('equal')
     setVolumeLimitEnabled(false)
+    setStampTax('0')
   }, [etf159915Strategy])
 
   const resetConfigFromDetail = (detail: StrategyDetail) => {
@@ -964,7 +965,7 @@ export function StrategyBacktest() {
       entry_fill: entryFill,
       exit_fill: exitFill,
       commission_pct: Number(fees) / 10000,
-      stamp_tax_pct: Number(stampTax) / 1000,
+      stamp_tax_pct: etf159915Strategy ? 0 : Number(stampTax) / 1000,
       slippage_bps: Number(slippage),
       max_positions: etf159915Strategy ? 1 : Number(maxPositions),
       max_exposure_pct: Number(maxExposure) / 100,
@@ -1455,7 +1456,7 @@ export function StrategyBacktest() {
               <div><label className="mb-1.5 block text-xs font-medium text-secondary">建仓口径</label><select value={entryFill} onChange={e => setEntryFill(e.target.value as any)} className={INPUT_CLS}><option value="open_t+1">次日开盘</option><option value="close_t">信号日收盘</option></select></div>
               <div><label className="mb-1.5 block text-xs font-medium text-secondary">清仓口径</label><select value={exitFill} onChange={e => setExitFill(e.target.value as any)} className={INPUT_CLS}><option value="close_t">信号日收盘</option><option value="open_t+1">次日开盘</option></select></div>
               <div><label className="mb-1.5 block text-xs font-medium text-secondary">佣金(万分之)</label><input type="number" min={0} value={fees} onChange={e => setFees(e.target.value)} className={INPUT_CLS} /></div>
-              <div><label className="mb-1.5 block text-xs font-medium text-secondary">印花税(千分之)</label><input type="number" min={0} value={stampTax} onChange={e => setStampTax(e.target.value)} className={INPUT_CLS} /></div>
+              <div><label className="mb-1.5 block text-xs font-medium text-secondary">印花税(千分之)</label><input type="number" min={0} value={etf159915Strategy ? '0' : stampTax} onChange={e => setStampTax(e.target.value)} disabled={etf159915Strategy} className={INPUT_CLS} /></div>
               <div className="col-span-2"><label className="mb-1.5 block text-xs font-medium text-secondary">滑点(万分之)</label><input type="number" min={0} value={slippage} onChange={e => setSlippage(e.target.value)} className={INPUT_CLS} /></div>
             </div>
             {highGranularity && <div className="space-y-2"><label className="block text-xs font-medium text-secondary">技术信号价格</label><select value={etf159915Strategy ? 'raw' : signalPriceBasis} onChange={e => setSignalPriceBasis(e.target.value as 'qfq' | 'raw')} disabled={etf159915Strategy} className={INPUT_CLS}><option value="qfq">前复权（推荐）</option><option value="raw">不复权（与旧结果对照）</option></select><button type="button" aria-pressed={etf159915Strategy ? false : volumeLimitEnabled} onClick={() => setVolumeLimitEnabled(value => !value)} disabled={etf159915Strategy} className={`w-full rounded-input border px-2 py-1.5 text-left text-[11px] ${volumeLimitEnabled && !etf159915Strategy ? 'border-accent/40 bg-accent/10 text-accent' : 'border-border text-secondary'}`}>单分钟成交量 10% 限制：{etf159915Strategy ? '关闭' : volumeLimitEnabled ? '开启' : '关闭'}</button></div>}

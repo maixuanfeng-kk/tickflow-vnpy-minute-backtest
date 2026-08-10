@@ -148,6 +148,7 @@ class DailyContextBuilder:
                 price_limit_pct=metadata_limit_pct if metadata_limit_pct > 0 else None,
                 closes=tuple(adjusted(row, "close") for row in rows[-10:]),
                 opens=tuple(adjusted(row, "open") for row in rows[-10:]),
+                lows=tuple(adjusted(row, "low") for row in rows[-10:]),
                 previous_cumulative_volumes=previous["cumulative_volumes"],
             )
         return result

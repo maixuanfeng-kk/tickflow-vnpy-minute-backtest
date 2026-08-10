@@ -60,6 +60,7 @@ class DailyReference:
     price_limit_pct: float | None = None
     closes: tuple[float, ...] = ()
     opens: tuple[float, ...] = ()
+    lows: tuple[float, ...] = ()
     # Cumulative volume at each minute of the previous completed trading day.
     previous_cumulative_volumes: Mapping[time, float] = field(default_factory=dict)
 

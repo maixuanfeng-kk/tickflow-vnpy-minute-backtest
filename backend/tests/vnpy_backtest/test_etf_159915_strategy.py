@@ -8,11 +8,20 @@ from app.vnpy_backtest.strategies.etf_159915_minute import Etf159915MinuteStrate
 from app.vnpy_backtest.strategies.registry import get_strategy
 
 
-def _bar(moment: datetime, close: float, volume: float = 100.0) -> BarData:
+def _bar(
+    moment: datetime,
+    close: float,
+    volume: float = 100.0,
+    *,
+    open_price: float | None = None,
+    high_price: float | None = None,
+) -> BarData:
+    open_price = close if open_price is None else open_price
+    high_price = close if high_price is None else high_price
     return BarData(
         gateway_name="TEST", symbol="159915", exchange=Exchange.SZSE, datetime=moment,
         interval=Interval.MINUTE, volume=volume, turnover=close * volume,
-        open_price=close, high_price=close, low_price=close, close_price=close,
+        open_price=open_price, high_price=high_price, low_price=close, close_price=close,
     )
 
 
@@ -69,3 +78,99 @@ def test_1500_bar_does_not_create_a_signal_without_a_next_bar():
     reference = DailyReference(previous_open=3.2, previous_close=3.4, previous_high=3.5, previous_low=3.1, closes=(3.3, 3.4))
     moment = datetime(2026, 7, 2, 15, 0)
     assert strategy.on_minute({"159915.SZ": _bar(moment, 3.2)}, _context(moment, reference)) == []
+
+
+def test_411_uses_c2_as_the_high_and_close_gain_base():
+    strategy = Etf159915MinuteStrategy({})
+    reference = DailyReference(
+        previous_open=109.0, previous_close=110.0, previous_high=110.4, previous_low=108.0,
+        closes=(100.0, 110.0),
+    )
+    early = datetime(2026, 7, 2, 9, 31)
+    moment = datetime(2026, 7, 2, 9, 32)
+    strategy.on_minute({"159915.SZ": _bar(early, 110.0)}, _context(early, reference))
+    intents = strategy.on_minute({"159915.SZ": _bar(moment, 110.5)}, _context(moment, reference))
+    assert [intent.reason for intent in intents] == ["4.1.1"]
+
+
+def test_421_uses_c2_as_the_open_and_close_gain_base():
+    strategy = Etf159915MinuteStrategy({})
+    reference = DailyReference(
+        previous_open=90.6, previous_close=90.0, previous_high=91.0, previous_low=89.0,
+        closes=(100.0, 90.0),
+    )
+    early = datetime(2026, 7, 2, 9, 31)
+    moment = datetime(2026, 7, 2, 9, 32)
+    strategy.on_minute({"159915.SZ": _bar(early, 90.8)}, _context(early, reference))
+    intents = strategy.on_minute({"159915.SZ": _bar(moment, 91.0)}, _context(moment, reference))
+    assert [intent.reason for intent in intents] == ["4.2.1"]
+
+
+def test_4232_uses_intraday_gain_from_previous_close_not_today_open():
+    strategy = Etf159915MinuteStrategy({})
+    reference = DailyReference(
+        previous_open=91.1, previous_close=90.0, previous_high=92.0, previous_low=89.0,
+        closes=(95.0, 94.0, 92.5, 92.0, 90.0),
+    )
+    moment = datetime(2026, 7, 2, 9, 30)
+    intents = strategy.on_minute(
+        {"159915.SZ": _bar(moment, 91.6, open_price=92.0)}, _context(moment, reference),
+    )
+    assert [intent.reason for intent in intents] == ["4.2.3-2"]
+
+
+def test_doji_day_does_not_enter_the_42_buy_rules():
+    strategy = Etf159915MinuteStrategy({})
+    reference = DailyReference(
+        previous_open=99.0, previous_close=99.0, previous_high=100.0, previous_low=98.0,
+        closes=(100.0, 99.0),
+    )
+    early = datetime(2026, 7, 2, 9, 31)
+    moment = datetime(2026, 7, 2, 9, 32)
+    strategy.on_minute({"159915.SZ": _bar(early, 100.0)}, _context(early, reference))
+    assert strategy.on_minute({"159915.SZ": _bar(moment, 100.1)}, _context(moment, reference)) == []
+
+
+def test_4231_remains_active_when_a_new_lower_priority_4232_state_appears():
+    strategy = Etf159915MinuteStrategy({})
+    first_reference = DailyReference(
+        previous_open=91.0, previous_close=90.0, previous_high=92.0, previous_low=89.0,
+        closes=(100.0, 97.0, 94.0, 92.0, 90.0),
+    )
+    first = datetime(2026, 7, 2, 9, 30)
+    strategy.on_minute(
+        {"159915.SZ": _bar(first, 89.0, open_price=89.0)}, _context(first, first_reference),
+    )
+
+    second_reference = DailyReference(
+        previous_open=93.0, previous_close=91.0, previous_high=94.0, previous_low=90.0,
+        closes=(100.0, 96.0, 93.0, 92.0, 91.0),
+    )
+    second = datetime(2026, 7, 3, 9, 30)
+    intents = strategy.on_minute(
+        {"159915.SZ": _bar(second, 92.5, open_price=92.0)}, _context(second, second_reference),
+    )
+    assert [intent.reason for intent in intents] == ["4.2.3-1"]
+
+
+def test_56_requires_breaking_both_previous_lows_when_lowest_is_two_days_old():
+    strategy = Etf159915MinuteStrategy({})
+    reference = DailyReference(
+        previous_open=10.0, previous_close=10.05, previous_high=10.2, previous_low=10.0,
+        closes=(10.1, 10.05), lows=(9.5, 10.0),
+    )
+    position = {"159915.SZ": PortfolioPositionView("159915.SZ", 100, 10.0, datetime(2026, 7, 1).date())}
+    moment = datetime(2026, 7, 2, 10, 0)
+    assert strategy.on_minute(
+        {"159915.SZ": _bar(moment, 9.99)}, _context(moment, reference, position),
+    ) == []
+
+
+def test_t_plus_one_position_does_not_emit_a_sell_signal_on_entry_day():
+    strategy = Etf159915MinuteStrategy({})
+    reference = DailyReference(previous_open=3.5, previous_close=3.4, previous_high=3.6, previous_low=3.2, closes=(3.3, 3.4))
+    position = {"159915.SZ": PortfolioPositionView("159915.SZ", 100, 3.5, datetime(2026, 7, 2).date())}
+    moment = datetime(2026, 7, 2, 10, 0)
+    assert strategy.on_minute(
+        {"159915.SZ": _bar(moment, 3.45, open_price=3.5)}, _context(moment, reference, position),
+    ) == []

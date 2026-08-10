@@ -83,6 +83,7 @@ class VnpyMinuteBacktestService:
                 "position_sizing": "equal",
                 "signal_price_basis": "raw",
                 "cash_reserve_ratio": 0.03,
+                "stamp_tax_rate": 0.0,
             })
         return settings
 
@@ -92,7 +93,7 @@ class VnpyMinuteBacktestService:
         engine = MultiSymbolNextBarOpenEngine(
             initial_cash=config.initial_capital,
             commission_rate=config.commission_pct,
-            stamp_tax_rate=config.stamp_tax_pct,
+            stamp_tax_rate=0.0 if etf_data else config.stamp_tax_pct,
             slippage_rate=config.slippage_bps / 10_000,
             min_commission=float(config.params.get("min_commission", 5.0)),
             max_volume_ratio=None if etf_data else config.max_volume_ratio,
