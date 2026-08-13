@@ -1,4 +1,4 @@
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from types import SimpleNamespace
 
 import polars as pl
@@ -66,6 +66,19 @@ def test_vnpy_service_rejects_empty_repository_data() -> None:
                 start=date(2026, 1, 5),
                 end=date(2026, 1, 5),
                 signal_price_basis="raw",
+            )
+        )
+
+
+def test_vnpy_service_rejects_partial_day_for_etf_strategy() -> None:
+    with pytest.raises(ValueError, match="完整交易日 09:30-15:00"):
+        VnpyMinuteBacktestService(SimpleNamespace()).run(
+            VnpyMinuteBacktestConfig(
+                symbols=("159915.SZ",),
+                strategy_id="etf_159915_minute",
+                start=date(2026, 1, 5),
+                end=date(2026, 1, 6),
+                start_time=time(10, 0),
             )
         )
 

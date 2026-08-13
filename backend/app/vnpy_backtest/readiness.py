@@ -19,13 +19,18 @@ class Etf159915ReadinessService:
         blocking: list[str] = []
         warnings: list[str] = []
         daily, daily_error = self._load_daily(symbol)
-        minute, minute_error = self._load_minute(symbol, start, end)
         if daily_error:
             blocking.append(daily_error)
+        daily_coverage = self._daily_coverage(daily, start, end)
+        required_days = [
+            *daily_coverage["warmup_required_days"],
+            *daily_coverage["requested_days"],
+        ]
+        minute_start = date.fromisoformat(required_days[0]) if required_days else start
+        minute, minute_error = self._load_minute(symbol, minute_start, end)
         if minute_error:
             blocking.append(minute_error)
 
-        daily_coverage = self._daily_coverage(daily, start, end)
         minute_coverage = self._minute_coverage(minute)
 
         if daily is not None:
@@ -39,13 +44,17 @@ class Etf159915ReadinessService:
                 )
 
         if minute is not None:
-            requested_days = daily_coverage["requested_days"]
             available_days = set(minute_coverage["available_days"])
-            missing_days = [day for day in requested_days if day not in available_days]
+            missing_days = [day for day in required_days if day not in available_days]
             minute_coverage["missing_days"] = missing_days[: self.SAMPLE_LIMIT]
             minute_coverage["missing_day_count"] = len(missing_days)
             if missing_days:
-                blocking.append(f"分钟数据缺少 {len(missing_days)} 个交易日。")
+                missing_warmup = set(daily_coverage["warmup_required_days"]) & set(missing_days)
+                if missing_warmup:
+                    blocking.append(f"分钟预热数据缺少 {len(missing_warmup)} 个交易日。")
+                missing_requested = set(daily_coverage["requested_days"]) & set(missing_days)
+                if missing_requested:
+                    blocking.append(f"分钟数据缺少 {len(missing_requested)} 个交易日。")
             if minute_coverage["missing_open_days"]:
                 blocking.append("分钟数据缺少关键的 09:30 开盘分钟线。")
             if minute_coverage["missing_close_days"]:
@@ -82,7 +91,8 @@ class Etf159915ReadinessService:
         try:
             scan = pl.scan_parquet(str(root / "**" / "*.parquet"))
             columns = set(scan.collect_schema().names())
-            if not {"symbol", "date"}.issubset(columns):
+            required = {"symbol", "date", "open", "high", "low", "close", "pre_close"}
+            if not required.issubset(columns):
                 return None, "ETF 日线数据字段不完整。"
             frame = (
                 scan.filter(pl.col("symbol") == symbol)
@@ -128,12 +138,14 @@ class Etf159915ReadinessService:
         dates = frame["date"].to_list() if frame is not None and not frame.is_empty() else []
         before = [value for value in dates if value < start]
         requested = [value for value in dates if start <= value <= end]
+        required_warmup = before[-Etf159915ReadinessService.REQUIRED_WARMUP_DAYS :]
         return {
             "first_date": dates[0].isoformat() if dates else None,
             "last_date": dates[-1].isoformat() if dates else None,
             "requested_days": [value.isoformat() for value in requested],
             "requested_day_count": len(requested),
             "warmup_days": len(before),
+            "warmup_required_days": [value.isoformat() for value in required_warmup],
         }
 
     def _minute_coverage(self, frame: pl.DataFrame | None) -> dict[str, object]:

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
 
 import {
@@ -41,6 +42,18 @@ test('ETF runs stay blocked while readiness is unavailable or not ready', () => 
     }),
     false,
   )
+})
+
+
+test('ETF strategy fixes the UI minute range to a complete trading day', () => {
+  const source = readFileSync(
+    new URL('../src/pages/backtest/StrategyBacktest.tsx', import.meta.url),
+    'utf8',
+  )
+
+  assert.match(source, /if \(!etf159915Strategy\) return[\s\S]*setStartTime\('09:30'\)[\s\S]*setEndTime\('15:00'\)/)
+  assert.match(source, /aria-label="开始时间"[\s\S]*disabled=\{etf159915Strategy\}/)
+  assert.match(source, /aria-label="结束时间"[\s\S]*disabled=\{etf159915Strategy\}/)
 })
 
 

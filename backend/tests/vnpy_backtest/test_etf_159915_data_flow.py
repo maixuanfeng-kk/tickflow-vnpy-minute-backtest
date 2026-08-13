@@ -70,6 +70,41 @@ def test_etf_strategy_is_identified_separately_from_stock_minute_data():
     assert VnpyMinuteBacktestService._is_etf_strategy("opening_breakout_pool") is False
 
 
+def test_etf_warmup_start_uses_tenth_prior_daily_trading_day(tmp_path):
+    trading_days = [date(2025, 1, day) for day in range(2, 12)]
+    for trading_day in trading_days:
+        path = tmp_path / "kline_etf_daily" / f"date={trading_day.isoformat()}"
+        path.mkdir(parents=True)
+        pl.DataFrame(
+            {
+                "symbol": ["159915.SZ"],
+                "date": [trading_day],
+                "open": [2.0],
+                "high": [2.1],
+                "low": [1.9],
+                "close": [2.0],
+                "pre_close": [2.0],
+            }
+        ).write_parquet(path / "part.parquet")
+    other_path = tmp_path / "kline_etf_daily" / "date=2024-12-01"
+    other_path.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "symbol": ["159916.SZ"],
+            "date": [date(2024, 12, 1)],
+            "open": [2.0],
+            "high": [2.1],
+            "low": [1.9],
+            "close": [2.0],
+            "pre_close": [2.0],
+        }
+    ).write_parquet(other_path / "part.parquet")
+
+    service = VnpyMinuteBacktestService(_repo(tmp_path))
+
+    assert service._etf_warmup_start(("159915.SZ",), date(2025, 2, 10)) == trading_days[0]
+
+
 def test_daily_context_can_seed_etf_history_before_minute_warmup():
     builder = DailyContextBuilder()
     builder.add_daily_history(

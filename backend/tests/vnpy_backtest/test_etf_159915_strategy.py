@@ -85,12 +85,53 @@ def test_54_sell_can_reenter_above_day_open_after_the_fill():
     )
     assert [intent.reason for intent in intents] == ["5_4"]
 
+    fill_time = datetime(2024, 9, 30, 9, 41)
+    assert strategy.on_minute(
+        {"159915.SZ": _bar(fill_time, 10.10)},
+        _context(fill_time, reference),
+    ) == []
+
     reentry_time = datetime(2024, 9, 30, 10, 21)
     intents = strategy.on_minute(
         {"159915.SZ": _bar(reentry_time, 10.31)},
         _context(reentry_time, reference),
     )
     assert [intent.reason for intent in intents] == ["5_4"]
+
+
+def test_rejected_54_sell_does_not_enable_reentry_after_another_sell() -> None:
+    strategy = Etf159915MinuteStrategy({})
+    reference = DailyReference(
+        previous_open=10.4,
+        previous_close=10.0,
+        previous_high=10.5,
+        previous_low=10.25,
+        closes=(9.9, 10.0),
+        lows=(9.8, 10.25),
+    )
+    position = {
+        "159915.SZ": PortfolioPositionView(
+            "159915.SZ", 100, 10.0, datetime(2024, 9, 27).date(),
+        )
+    }
+    sell_time = datetime(2024, 9, 30, 9, 40)
+    intents = strategy.on_minute(
+        {"159915.SZ": _bar(sell_time, 10.19, open_price=10.30)},
+        _context(sell_time, reference, position),
+    )
+    assert [intent.reason for intent in intents] == ["5_4"]
+
+    rejected_fill_time = datetime(2024, 9, 30, 9, 41)
+    assert strategy.on_minute(
+        {"159915.SZ": _bar(rejected_fill_time, 10.21)},
+        _context(rejected_fill_time, reference, position),
+    ) == []
+
+    after_other_fill = datetime(2024, 9, 30, 9, 42)
+    assert strategy.on_minute(
+        {"159915.SZ": _bar(after_other_fill, 10.31)},
+        _context(after_other_fill, reference),
+    ) == []
 
 
 def test_1500_bar_does_not_create_a_signal_without_a_next_bar():

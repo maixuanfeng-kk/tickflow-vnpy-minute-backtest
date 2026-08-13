@@ -51,6 +51,10 @@ def test_registry_exposes_only_portfolio_strategies() -> None:
     ]
 
 
+def test_159915_uses_etf_minimum_price_tick_without_metadata() -> None:
+    assert rule_for_symbol("159915.SZ").tick_size == 0.001
+
+
 def test_all_a_board_rules_cover_star_and_bse() -> None:
     assert rule_for_symbol("600000.SH").first_buy_minimum == 100
     assert rule_for_symbol("300001.SZ").price_limit_pct == 0.20
@@ -283,6 +287,44 @@ def test_buy_budget_excludes_commission_from_the_97_percent_security_amount() ->
     assert engine.fills[0].commission == 11.64
     assert engine.fills[0].entry_position_pct == 0.97
     assert round(engine.cash, 2) == 2_988.36
+
+
+def test_etf_slippage_prices_round_outward_to_the_minimum_tick() -> None:
+    first_day = datetime(2026, 1, 5, 9, 30)
+    second_day = datetime(2026, 1, 6, 9, 30)
+
+    class _RoundTrip:
+        def on_minute(self, _bars, context):
+            if context.timestamp == first_day:
+                return [OrderIntent("159915.SZ", Direction.LONG, "entry", volume=100)]
+            if context.timestamp == second_day and context.positions:
+                return [OrderIntent("159915.SZ", Direction.SHORT, "exit")]
+            return []
+
+    engine = MultiSymbolNextBarOpenEngine(
+        initial_cash=100_000,
+        commission_rate=0,
+        stamp_tax_rate=0,
+        slippage_rate=0.0005,
+        min_commission=0,
+        max_volume_ratio=None,
+        reserve_ratio=0,
+        instrument_tick_sizes={"159915.SZ": 0.001},
+    )
+    strategy = _RoundTrip()
+    for start in (first_day, second_day):
+        engine.run_day(
+            {
+                "159915.SZ": [
+                    _bar("159915.SZ", Exchange.SZSE, start, 3.841),
+                    _bar("159915.SZ", Exchange.SZSE, start + timedelta(minutes=1), 3.841),
+                ]
+            },
+            strategy,
+            {},
+        )
+
+    assert [fill.price for fill in engine.fills] == [3.843, 3.839]
 
 
 def test_portfolio_tied_priority_uses_symbol_order_despite_input_order() -> None:

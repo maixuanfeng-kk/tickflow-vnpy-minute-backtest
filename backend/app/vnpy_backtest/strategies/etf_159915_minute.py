@@ -40,6 +40,7 @@ class Etf159915MinuteStrategy:
         self._special_days_left = 0
         self._special_fresh = False
         self._observed_position: bool | None = None
+        self._pending_54_sell = False
         self._pending_53_setup: object = None
         self._consumed_53_setup: object = None
 
@@ -94,6 +95,7 @@ class Etf159915MinuteStrategy:
         self._sold_today = False
         self._sold_by_54 = False
         self._rebuy_sent = False
+        self._pending_54_sell = False
         self._special_fresh = False
         self._refresh_special_state(reference)
 
@@ -212,7 +214,7 @@ class Etf159915MinuteStrategy:
             return []
         if (self._open - current) / self._open > 0.01 and self._open > self._previous_close(ref) * 1.02:
             self._sold_today = True
-            self._sold_by_54 = True
+            self._pending_54_sell = True
             return [self._intent(Direction.SHORT, "5_4", ["5_4"])]
         protection = self._sell_protection(ref)
         if protection is not None:
@@ -299,6 +301,9 @@ class Etf159915MinuteStrategy:
         return ref.lows[-1 - offset]
 
     def _update_position_lifecycle(self, has_position: bool) -> None:
+        if self._observed_position is True and self._pending_54_sell:
+            self._sold_by_54 = not has_position
+            self._pending_54_sell = False
         if self._observed_position is True and self._pending_53_setup is not None:
             if not has_position:
                 self._consumed_53_setup = self._pending_53_setup

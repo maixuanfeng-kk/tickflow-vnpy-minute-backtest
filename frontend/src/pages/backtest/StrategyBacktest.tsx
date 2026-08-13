@@ -906,6 +906,8 @@ export function StrategyBacktest() {
     setPositionSizing('equal')
     setVolumeLimitEnabled(false)
     setStampTax('0')
+    setStartTime('09:30')
+    setEndTime('15:00')
   }, [etf159915Strategy])
 
   const resetConfigFromDetail = (detail: StrategyDetail) => {
@@ -1401,6 +1403,7 @@ export function StrategyBacktest() {
                   value={startTime}
                   onChange={event => setStartTime(event.target.value)}
                   aria-label="开始时间"
+                  disabled={etf159915Strategy}
                   className="min-w-0 rounded-input border border-border bg-base px-2 py-1.5 text-xs text-foreground outline-none transition-colors focus:border-accent"
                 />
               </div>
@@ -1421,6 +1424,7 @@ export function StrategyBacktest() {
                   value={endTime}
                   onChange={event => setEndTime(event.target.value)}
                   aria-label="结束时间"
+                  disabled={etf159915Strategy}
                   className="min-w-0 rounded-input border border-border bg-base px-2 py-1.5 text-xs text-foreground outline-none transition-colors focus:border-accent"
                 />
               </div>

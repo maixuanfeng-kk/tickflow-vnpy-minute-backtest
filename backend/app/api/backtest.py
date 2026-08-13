@@ -85,6 +85,13 @@ def _parse_vnpy_scope(
         raise HTTPException(status_code=400, detail="end 不能早于 start")
     start_time_value = _parse_vnpy_time(start_time, "09:30")
     end_time_value = _parse_vnpy_time(end_time, "15:00")
+    if strategy_id == "etf_159915_minute" and (
+        start_time_value != dt_time(9, 30) or end_time_value != dt_time(15, 0)
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="etf_159915_minute 只支持完整交易日 09:30-15:00",
+        )
     if start_date == end_date and start_time_value > end_time_value:
         raise HTTPException(status_code=400, detail="开始时间不能晚于结束时间")
     return spec, normalized_symbols, start_date, end_date, start_time_value, end_time_value
