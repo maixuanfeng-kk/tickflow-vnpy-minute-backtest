@@ -65,6 +65,10 @@ class VnpyMinuteBacktestService:
             raise ValueError(f"{spec.name} 支持 {spec.min_symbols}-{spec.max_symbols} 只股票")
         if self._is_etf_strategy(config.strategy_id) and symbols != ("159915.SZ",):
             raise ValueError("etf_159915_minute 只支持 159915.SZ")
+        if self._is_etf_strategy(config.strategy_id) and (
+            config.start_time != time(9, 30) or config.end_time != time(15, 0)
+        ):
+            raise ValueError("etf_159915_minute 只支持完整交易日 09:30-15:00")
         return self._run_portfolio(config, spec, symbols)
 
     def _settings(self, config: VnpyMinuteBacktestConfig) -> dict[str, Any]:
@@ -106,11 +110,16 @@ class VnpyMinuteBacktestService:
             position_sizing="equal" if etf_data else config.position_sizing,
             reserve_ratio=0.03 if etf_data else float(config.params.get("cash_reserve_ratio", 0.03)),
             commission_outside_budget=etf_data,
+            round_slippage_to_tick=etf_data,
             instrument_names=instrument_names,
             instrument_tick_sizes=instrument_tick_sizes,
         )
         strategy = spec.strategy_class(dict(config.params))
-        warmup_start = config.start - timedelta(days=20)
+        warmup_start = (
+            self._etf_warmup_start(symbols, config.start)
+            if etf_data
+            else config.start - timedelta(days=20)
+        )
         if etf_data or config.signal_price_basis == "raw":
             signal_projector = MinuteSignalPriceProjector("raw", {}, {})
         else:
@@ -409,6 +418,28 @@ class VnpyMinuteBacktestService:
             if start <= value <= end:
                 days.append(value)
         return sorted(days)
+
+    def _etf_warmup_start(self, symbols: tuple[str, ...], start: date) -> date:
+        store = getattr(self.repo, "store", None)
+        if store is None:
+            return start - timedelta(days=20)
+        root = store.data_dir / "kline_etf_daily"
+        if not root.exists():
+            return start - timedelta(days=20)
+        try:
+            prior_days = (
+                pl.scan_parquet(str(root / "**" / "*.parquet"))
+                .filter(pl.col("symbol").is_in(list(symbols)) & (pl.col("date") < start))
+                .select(pl.col("date").cast(pl.Date))
+                .unique()
+                .sort("date")
+                .tail(10)
+                .collect()["date"]
+                .to_list()
+            )
+        except Exception:  # noqa: BLE001
+            return start - timedelta(days=20)
+        return prior_days[0] if prior_days else start - timedelta(days=20)
 
     def _load_etf_daily_history(self, symbols: tuple[str, ...], before: date) -> dict[str, list[dict]]:
         store = getattr(self.repo, "store", None)

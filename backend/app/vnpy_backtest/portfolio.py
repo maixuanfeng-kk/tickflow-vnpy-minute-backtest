@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from math import floor
 from typing import Iterable, Mapping, Sequence
 
@@ -239,6 +240,7 @@ class MultiSymbolNextBarOpenEngine:
         position_sizing: str = "equal",
         reserve_ratio: float = 0.03,
         commission_outside_budget: bool = False,
+        round_slippage_to_tick: bool = False,
         instrument_names: Mapping[str, str] | None = None,
         instrument_tick_sizes: Mapping[str, float] | None = None,
     ) -> None:
@@ -255,6 +257,7 @@ class MultiSymbolNextBarOpenEngine:
         self.position_sizing = position_sizing
         self.reserve_ratio = max(float(reserve_ratio), 0.0)
         self.commission_outside_budget = bool(commission_outside_budget)
+        self.round_slippage_to_tick = bool(round_slippage_to_tick)
         # The reserve is calculated from currently available cash whenever a
         # new equal-size budget is established (day start or a completed exit).
         self._daily_equal_budget: float | None = None
@@ -574,7 +577,7 @@ class MultiSymbolNextBarOpenEngine:
         if volume < rule.first_buy_minimum:
             self._reject(order.symbol, bar.datetime, "below_minimum_lot", order.signal_id)
             return False
-        price = float(bar.open_price) * (1 + self.slippage_rate)
+        price = self._slippage_price(float(bar.open_price), rule, Direction.LONG)
         if upper_limit is not None:
             price = min(price, upper_limit)
         turnover = price * volume
@@ -609,7 +612,7 @@ class MultiSymbolNextBarOpenEngine:
             self._reject(order.symbol, bar.datetime, "below_lot_or_no_position", order.signal_id)
             return
         position = self.positions[order.symbol]
-        price = float(bar.open_price) * (1 - self.slippage_rate)
+        price = self._slippage_price(float(bar.open_price), rule, Direction.SHORT)
         if lower_limit is not None:
             price = max(price, lower_limit)
         turnover = price * volume
@@ -674,11 +677,26 @@ class MultiSymbolNextBarOpenEngine:
         return floor(float(bar.volume) * self.max_volume_ratio / rule.lot_size) * rule.lot_size
 
     def _buy_volume(self, budget: float, open_price: float, rule: AShareTradingRule) -> int:
-        effective = open_price * (1 + self.slippage_rate)
+        effective = self._slippage_price(open_price, rule, Direction.LONG)
         if effective <= 0:
             return 0
         commission_reserve = 0.0 if self.commission_outside_budget else self.min_commission
         return floor((budget - commission_reserve) / effective / rule.lot_size) * rule.lot_size
+
+    def _slippage_price(
+        self,
+        open_price: float,
+        rule: AShareTradingRule,
+        direction: Direction,
+    ) -> float:
+        factor = 1 + self.slippage_rate if direction == Direction.LONG else 1 - self.slippage_rate
+        value = Decimal(str(open_price)) * Decimal(str(factor))
+        if not self.round_slippage_to_tick:
+            return float(value)
+        tick = Decimal(str(rule.tick_size))
+        rounding = ROUND_CEILING if direction == Direction.LONG else ROUND_FLOOR
+        ticks = (value / tick).quantize(Decimal("1"), rounding=rounding)
+        return float(ticks * tick)
 
     @staticmethod
     def _price_limits(

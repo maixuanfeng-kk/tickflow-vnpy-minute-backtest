@@ -59,10 +59,22 @@ def test_vnpy_readiness_returns_etf_coverage(monkeypatch, tmp_path) -> None:
     assert response == expected
 
 
-def test_vnpy_scope_parses_minute_bounds() -> None:
+def test_vnpy_scope_rejects_custom_minute_bounds_for_etf_strategy() -> None:
+    with pytest.raises(HTTPException, match="完整交易日 09:30-15:00"):
+        backtest._parse_vnpy_scope(
+            "etf_159915_minute",
+            "159915.SZ",
+            "2026-07-01",
+            "2026-07-02",
+            "10:05",
+            "14:25",
+        )
+
+
+def test_vnpy_scope_parses_minute_bounds_for_stock_strategy() -> None:
     _, _, start, end, start_time, end_time = backtest._parse_vnpy_scope(
-        "etf_159915_minute",
-        "159915.SZ",
+        "opening_breakout_pool",
+        "600000.SH",
         "2026-07-01",
         "2026-07-02",
         "10:05",
@@ -76,8 +88,8 @@ def test_vnpy_scope_parses_minute_bounds() -> None:
 def test_vnpy_scope_rejects_reversed_same_day_minute_bounds() -> None:
     with pytest.raises(HTTPException, match="开始时间不能晚于结束时间"):
         backtest._parse_vnpy_scope(
-            "etf_159915_minute",
-            "159915.SZ",
+            "opening_breakout_pool",
+            "600000.SH",
             "2026-07-01",
             "2026-07-01",
             "14:25",

@@ -8,22 +8,30 @@ from app.vnpy_backtest.readiness import Etf159915ReadinessService
 SYMBOL = "159915.SZ"
 
 
-def _write_daily(root, days: list[date]) -> None:
+def _write_daily(
+    root,
+    days: list[date],
+    *,
+    include_strategy_fields: bool = True,
+    invalid_high: bool = False,
+) -> None:
     for trading_day in days:
         path = root / "kline_etf_daily" / f"date={trading_day.isoformat()}"
         path.mkdir(parents=True, exist_ok=True)
-        pl.DataFrame(
-            {
-                "symbol": [SYMBOL],
-                "date": [trading_day],
-                "open": [2.0],
-                "high": [2.1],
-                "low": [1.9],
-                "close": [2.05],
-                "volume": [1_000.0],
-                "amount": [2_050.0],
-            }
-        ).write_parquet(path / "part.parquet")
+        columns = {"symbol": [SYMBOL], "date": [trading_day]}
+        if include_strategy_fields:
+            columns.update(
+                {
+                    "open": [2.0],
+                    "high": [None if invalid_high else 2.1],
+                    "low": [1.9],
+                    "close": [2.05],
+                    "pre_close": [2.0],
+                    "volume": [1_000.0],
+                    "amount": [2_050.0],
+                }
+            )
+        pl.DataFrame(columns).write_parquet(path / "part.parquet")
 
 
 def _minute_times() -> list[time]:
@@ -64,7 +72,7 @@ def _days() -> tuple[list[date], list[date]]:
 def test_complete_etf_range_is_ready(tmp_path) -> None:
     warmup, requested = _days()
     _write_daily(tmp_path, [*warmup, *requested])
-    for trading_day in requested:
+    for trading_day in [*warmup, *requested]:
         _write_minute(tmp_path, trading_day)
 
     result = Etf159915ReadinessService(tmp_path).check(
@@ -77,13 +85,82 @@ def test_complete_etf_range_is_ready(tmp_path) -> None:
     assert result["blocking_reasons"] == []
     assert result["warnings"] == []
     assert result["coverage"]["daily"]["warmup_days"] == 10
-    assert result["coverage"]["minute"]["trading_days"] == 2
-    assert result["coverage"]["minute"]["row_count"] == 482
+    assert result["coverage"]["minute"]["trading_days"] == 12
+    assert result["coverage"]["minute"]["row_count"] == 2_892
+
+
+def test_missing_warmup_minute_day_blocks_readiness(tmp_path) -> None:
+    warmup, requested = _days()
+    _write_daily(tmp_path, [*warmup, *requested])
+    for trading_day in [*warmup[1:], *requested]:
+        _write_minute(tmp_path, trading_day)
+
+    result = Etf159915ReadinessService(tmp_path).check(
+        symbol=SYMBOL,
+        start=requested[0],
+        end=requested[-1],
+    )
+
+    assert result["ready"] is False
+    assert result["coverage"]["minute"]["missing_days"] == [warmup[0].isoformat()]
+    assert any("预热" in reason for reason in result["blocking_reasons"])
+
+
+def test_daily_schema_missing_strategy_prices_blocks_readiness(tmp_path) -> None:
+    warmup, requested = _days()
+    _write_daily(tmp_path, [*warmup, *requested], include_strategy_fields=False)
+    for trading_day in [*warmup, *requested]:
+        _write_minute(tmp_path, trading_day)
+
+    result = Etf159915ReadinessService(tmp_path).check(
+        symbol=SYMBOL,
+        start=requested[0],
+        end=requested[-1],
+    )
+
+    assert result["ready"] is False
+    assert "ETF 日线数据字段不完整。" in result["blocking_reasons"]
+
+
+def test_daily_invalid_strategy_prices_block_readiness(tmp_path) -> None:
+    warmup, requested = _days()
+    _write_daily(tmp_path, [*warmup, *requested], invalid_high=True)
+    for trading_day in [*warmup, *requested]:
+        _write_minute(tmp_path, trading_day)
+
+    result = Etf159915ReadinessService(tmp_path).check(
+        symbol=SYMBOL,
+        start=requested[0],
+        end=requested[-1],
+    )
+
+    assert result["ready"] is False
+    assert "ETF 日线数据包含无效价格。" in result["blocking_reasons"]
+
+
+def test_minute_schema_missing_execution_prices_blocks_readiness(tmp_path) -> None:
+    warmup, requested = _days()
+    _write_daily(tmp_path, [*warmup, *requested])
+    for trading_day in [*warmup, *requested]:
+        _write_minute(tmp_path, trading_day)
+    part = tmp_path / "kline_etf_minute" / f"date={requested[0].isoformat()}" / "part.parquet"
+    pl.read_parquet(part).drop("amount").write_parquet(part)
+
+    result = Etf159915ReadinessService(tmp_path).check(
+        symbol=SYMBOL,
+        start=requested[0],
+        end=requested[-1],
+    )
+
+    assert result["ready"] is False
+    assert "ETF 分钟数据字段不完整。" in result["blocking_reasons"]
 
 
 def test_missing_minute_day_blocks_readiness(tmp_path) -> None:
     warmup, requested = _days()
     _write_daily(tmp_path, [*warmup, *requested])
+    for trading_day in warmup:
+        _write_minute(tmp_path, trading_day)
     _write_minute(tmp_path, requested[0])
 
     result = Etf159915ReadinessService(tmp_path).check(
@@ -100,6 +177,8 @@ def test_missing_minute_day_blocks_readiness(tmp_path) -> None:
 def test_missing_essential_open_or_close_bar_blocks_readiness(tmp_path) -> None:
     warmup, requested = _days()
     _write_daily(tmp_path, [*warmup, *requested])
+    for trading_day in warmup:
+        _write_minute(tmp_path, trading_day)
     _write_minute(tmp_path, requested[0], omitted={time(9, 30)})
     _write_minute(tmp_path, requested[1], omitted={time(15, 0)})
 
@@ -117,7 +196,7 @@ def test_missing_essential_open_or_close_bar_blocks_readiness(tmp_path) -> None:
 def test_insufficient_daily_warmup_blocks_readiness(tmp_path) -> None:
     _, requested = _days()
     _write_daily(tmp_path, [date(2024, 12, 31), *requested])
-    for trading_day in requested:
+    for trading_day in [date(2024, 12, 31), *requested]:
         _write_minute(tmp_path, trading_day)
 
     result = Etf159915ReadinessService(tmp_path).check(
@@ -134,6 +213,8 @@ def test_insufficient_daily_warmup_blocks_readiness(tmp_path) -> None:
 def test_sparse_terminal_bar_and_zero_volume_only_warn(tmp_path) -> None:
     warmup, requested = _days()
     _write_daily(tmp_path, [*warmup, *requested])
+    for trading_day in warmup:
+        _write_minute(tmp_path, trading_day)
     _write_minute(tmp_path, requested[0], omitted={time(14, 59)})
     _write_minute(tmp_path, requested[1], zero_at=time(14, 59))
 
