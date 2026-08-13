@@ -96,11 +96,26 @@ class Etf159915ReadinessService:
                 return None, "ETF 日线数据字段不完整。"
             frame = (
                 scan.filter(pl.col("symbol") == symbol)
-                .select(pl.col("date").cast(pl.Date))
-                .unique()
+                .select(
+                    pl.col("date").cast(pl.Date),
+                    *[
+                        pl.col(name).cast(pl.Float64)
+                        for name in ("open", "high", "low", "close", "pre_close")
+                    ],
+                )
                 .sort("date")
                 .collect()
             )
+            invalid = frame.filter(
+                pl.any_horizontal(
+                    *[
+                        pl.col(name).is_null() | (pl.col(name) <= 0)
+                        for name in ("open", "high", "low", "close", "pre_close")
+                    ]
+                )
+            )
+            if not invalid.is_empty():
+                return None, "ETF 日线数据包含无效价格。"
             return frame, None
         except Exception:  # noqa: BLE001
             return None, "ETF 日线数据读取失败。"
@@ -112,9 +127,21 @@ class Etf159915ReadinessService:
         if not root.exists():
             return None, "ETF 分钟数据集不存在。"
         try:
+            required = {
+                "symbol", "datetime", "open", "high", "low", "close", "volume", "amount",
+            }
+            for part in root.glob("date=*/part.parquet"):
+                try:
+                    trading_day = date.fromisoformat(part.parent.name.removeprefix("date="))
+                except ValueError:
+                    continue
+                if start <= trading_day <= end and not required.issubset(
+                    set(pl.read_parquet_schema(part))
+                ):
+                    return None, "ETF 分钟数据字段不完整。"
             scan = pl.scan_parquet(str(root / "**" / "*.parquet"))
             columns = set(scan.collect_schema().names())
-            if not {"symbol", "datetime", "volume"}.issubset(columns):
+            if not required.issubset(columns):
                 return None, "ETF 分钟数据字段不完整。"
             frame = (
                 scan.filter(

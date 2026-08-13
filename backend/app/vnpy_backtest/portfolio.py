@@ -240,6 +240,7 @@ class MultiSymbolNextBarOpenEngine:
         position_sizing: str = "equal",
         reserve_ratio: float = 0.03,
         commission_outside_budget: bool = False,
+        round_slippage_to_tick: bool = False,
         instrument_names: Mapping[str, str] | None = None,
         instrument_tick_sizes: Mapping[str, float] | None = None,
     ) -> None:
@@ -256,6 +257,7 @@ class MultiSymbolNextBarOpenEngine:
         self.position_sizing = position_sizing
         self.reserve_ratio = max(float(reserve_ratio), 0.0)
         self.commission_outside_budget = bool(commission_outside_budget)
+        self.round_slippage_to_tick = bool(round_slippage_to_tick)
         # The reserve is calculated from currently available cash whenever a
         # new equal-size budget is established (day start or a completed exit).
         self._daily_equal_budget: float | None = None
@@ -689,6 +691,8 @@ class MultiSymbolNextBarOpenEngine:
     ) -> float:
         factor = 1 + self.slippage_rate if direction == Direction.LONG else 1 - self.slippage_rate
         value = Decimal(str(open_price)) * Decimal(str(factor))
+        if not self.round_slippage_to_tick:
+            return float(value)
         tick = Decimal(str(rule.tick_size))
         rounding = ROUND_CEILING if direction == Direction.LONG else ROUND_FLOOR
         ticks = (value / tick).quantize(Decimal("1"), rounding=rounding)

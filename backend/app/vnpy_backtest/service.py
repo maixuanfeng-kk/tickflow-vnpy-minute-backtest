@@ -110,6 +110,7 @@ class VnpyMinuteBacktestService:
             position_sizing="equal" if etf_data else config.position_sizing,
             reserve_ratio=0.03 if etf_data else float(config.params.get("cash_reserve_ratio", 0.03)),
             commission_outside_budget=etf_data,
+            round_slippage_to_tick=etf_data,
             instrument_names=instrument_names,
             instrument_tick_sizes=instrument_tick_sizes,
         )

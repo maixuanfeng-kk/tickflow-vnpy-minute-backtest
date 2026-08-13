@@ -310,6 +310,7 @@ def test_etf_slippage_prices_round_outward_to_the_minimum_tick() -> None:
         max_volume_ratio=None,
         reserve_ratio=0,
         instrument_tick_sizes={"159915.SZ": 0.001},
+        round_slippage_to_tick=True,
     )
     strategy = _RoundTrip()
     for start in (first_day, second_day):
@@ -325,6 +326,38 @@ def test_etf_slippage_prices_round_outward_to_the_minimum_tick() -> None:
         )
 
     assert [fill.price for fill in engine.fills] == [3.843, 3.839]
+
+
+def test_stock_slippage_keeps_legacy_unrounded_fill_price() -> None:
+    start = datetime(2026, 1, 5, 9, 30)
+
+    class _EntryOnly:
+        def on_minute(self, _bars, context):
+            if context.timestamp == start:
+                return [OrderIntent("600000.SH", Direction.LONG, "entry", volume=100)]
+            return []
+
+    engine = MultiSymbolNextBarOpenEngine(
+        initial_cash=100_000,
+        commission_rate=0,
+        stamp_tax_rate=0,
+        slippage_rate=0.0005,
+        min_commission=0,
+        max_volume_ratio=None,
+        reserve_ratio=0,
+    )
+    engine.run_day(
+        {
+            "600000.SH": [
+                _bar("600000.SH", Exchange.SSE, start, 10.01),
+                _bar("600000.SH", Exchange.SSE, start + timedelta(minutes=1), 10.01),
+            ]
+        },
+        _EntryOnly(),
+        {},
+    )
+
+    assert engine.fills[0].price == 10.015005
 
 
 def test_portfolio_tied_priority_uses_symbol_order_despite_input_order() -> None:

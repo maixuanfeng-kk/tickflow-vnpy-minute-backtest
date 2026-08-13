@@ -8,7 +8,13 @@ from app.vnpy_backtest.readiness import Etf159915ReadinessService
 SYMBOL = "159915.SZ"
 
 
-def _write_daily(root, days: list[date], *, include_strategy_fields: bool = True) -> None:
+def _write_daily(
+    root,
+    days: list[date],
+    *,
+    include_strategy_fields: bool = True,
+    invalid_high: bool = False,
+) -> None:
     for trading_day in days:
         path = root / "kline_etf_daily" / f"date={trading_day.isoformat()}"
         path.mkdir(parents=True, exist_ok=True)
@@ -17,7 +23,7 @@ def _write_daily(root, days: list[date], *, include_strategy_fields: bool = True
             columns.update(
                 {
                     "open": [2.0],
-                    "high": [2.1],
+                    "high": [None if invalid_high else 2.1],
                     "low": [1.9],
                     "close": [2.05],
                     "pre_close": [2.0],
@@ -114,6 +120,40 @@ def test_daily_schema_missing_strategy_prices_blocks_readiness(tmp_path) -> None
 
     assert result["ready"] is False
     assert "ETF 日线数据字段不完整。" in result["blocking_reasons"]
+
+
+def test_daily_invalid_strategy_prices_block_readiness(tmp_path) -> None:
+    warmup, requested = _days()
+    _write_daily(tmp_path, [*warmup, *requested], invalid_high=True)
+    for trading_day in [*warmup, *requested]:
+        _write_minute(tmp_path, trading_day)
+
+    result = Etf159915ReadinessService(tmp_path).check(
+        symbol=SYMBOL,
+        start=requested[0],
+        end=requested[-1],
+    )
+
+    assert result["ready"] is False
+    assert "ETF 日线数据包含无效价格。" in result["blocking_reasons"]
+
+
+def test_minute_schema_missing_execution_prices_blocks_readiness(tmp_path) -> None:
+    warmup, requested = _days()
+    _write_daily(tmp_path, [*warmup, *requested])
+    for trading_day in [*warmup, *requested]:
+        _write_minute(tmp_path, trading_day)
+    part = tmp_path / "kline_etf_minute" / f"date={requested[0].isoformat()}" / "part.parquet"
+    pl.read_parquet(part).drop("amount").write_parquet(part)
+
+    result = Etf159915ReadinessService(tmp_path).check(
+        symbol=SYMBOL,
+        start=requested[0],
+        end=requested[-1],
+    )
+
+    assert result["ready"] is False
+    assert "ETF 分钟数据字段不完整。" in result["blocking_reasons"]
 
 
 def test_missing_minute_day_blocks_readiness(tmp_path) -> None:
