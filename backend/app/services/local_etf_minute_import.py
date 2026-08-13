@@ -46,11 +46,14 @@ class LocalEtfMinuteCsvImporter:
 
     def run(self, *, dry_run: bool = False) -> LocalEtfMinuteImportSummary:
         source = self.source_dir.resolve()
-        if not source.is_dir():
-            raise ValueError(f"ETF minute source directory does not exist: {source}")
-        files = sorted(source.glob("*/[0-9]*.csv"))
-        if not files and source.name.upper().endswith(("_SZ", "_SH")):
-            files = sorted(source.glob("[0-9]*.csv"))
+        if source.is_file():
+            files = [source]
+        elif source.is_dir():
+            files = sorted(source.glob("*/[0-9]*.csv"))
+            if not files and source.name.upper().endswith(("_SZ", "_SH")):
+                files = sorted(source.glob("[0-9]*.csv"))
+        else:
+            raise ValueError(f"ETF minute source directory or file does not exist: {source}")
         summary = LocalEtfMinuteImportSummary(
             status="preview" if dry_run else "running",
             dry_run=dry_run,
@@ -83,25 +86,33 @@ class LocalEtfMinuteCsvImporter:
 
     def _read_file(self, path: Path, summary: LocalEtfMinuteImportSummary) -> pl.DataFrame | None:
         folder_code = path.parent.name.upper()
-        if not folder_code.endswith("_SZ") and not folder_code.endswith("_SH"):
-            summary.skipped_files.append({"file": str(path), "reason": "invalid ETF directory name"})
+        if folder_code.endswith(("_SZ", "_SH")):
+            expected_symbol = f"{folder_code[:-3]}.{folder_code[-2:]}"
+        elif path.stem.upper().endswith((".SZ", ".SH")):
+            expected_symbol = path.stem.upper()
+        else:
+            summary.skipped_files.append({"file": str(path), "reason": "invalid ETF code"})
             return None
-        expected_symbol = f"{folder_code[:-3]}.{folder_code[-2:]}"
         raw = pl.read_csv(path, encoding="utf8-lossy", infer_schema_length=1000)
-        required = {"ts_code", "trade_time", "open", "close", "high", "low", "vol", "amount"}
+        aliases = {
+            "symbol": "ts_code" if "ts_code" in raw.columns else "code",
+            "datetime": "trade_time" if "trade_time" in raw.columns else "datetime",
+            "volume": "vol" if "vol" in raw.columns else "volume",
+        }
+        required = {"open", "close", "high", "low", "amount", *aliases.values()}
         missing = required - set(raw.columns)
         if missing:
             summary.failed_files.append({"file": str(path), "reason": f"missing columns: {sorted(missing)}"})
             return None
         summary.rows_read += raw.height
         frame = raw.select(
-            pl.col("ts_code").cast(pl.Utf8).str.strip_chars().alias("_source_symbol"),
-            pl.col("trade_time").cast(pl.Utf8).str.strptime(pl.Datetime("us"), strict=False).alias("datetime"),
+            pl.col(aliases["symbol"]).cast(pl.Utf8).str.strip_chars().alias("_source_symbol"),
+            pl.col(aliases["datetime"]).cast(pl.Utf8).str.strptime(pl.Datetime("us"), strict=False).alias("datetime"),
             pl.col("open").cast(pl.Float64, strict=False),
             pl.col("high").cast(pl.Float64, strict=False),
             pl.col("low").cast(pl.Float64, strict=False),
             pl.col("close").cast(pl.Float64, strict=False),
-            pl.col("vol").cast(pl.Float64, strict=False).alias("volume"),
+            pl.col(aliases["volume"]).cast(pl.Float64, strict=False).alias("volume"),
             pl.col("amount").cast(pl.Float64, strict=False),
         )
         valid = (

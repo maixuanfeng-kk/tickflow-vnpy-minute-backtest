@@ -101,6 +101,8 @@ export const storage = {
     poolUpdatedAt?: string | null
     start: string
     end: string
+    startTime?: string
+    endTime?: string
     matching: 'close_t' | 'open_t+1'
     entryFill: 'close_t' | 'open_t+1'
     exitFill: 'close_t' | 'open_t+1' | 'signal_next_minute'

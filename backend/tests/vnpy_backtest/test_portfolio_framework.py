@@ -259,6 +259,32 @@ def test_portfolio_equal_sizing_uses_current_cash_reserve_after_a_sale() -> None
     assert engine.cash == 6_000
 
 
+def test_buy_budget_excludes_commission_from_the_97_percent_security_amount() -> None:
+    start = datetime(2026, 1, 5, 9, 30)
+
+    class _EntryOnly:
+        def on_minute(self, _bars, context):
+            if context.timestamp == start:
+                return [OrderIntent("159915.SZ", Direction.LONG, "entry")]
+            return []
+
+    engine = MultiSymbolNextBarOpenEngine(
+        initial_cash=100_000, commission_rate=0.00012, stamp_tax_rate=0,
+        slippage_rate=0, min_commission=5, max_volume_ratio=None,
+        reserve_ratio=0.03, max_positions=1, commission_outside_budget=True,
+    )
+    bars = {
+        "159915.SZ": [_bar("159915.SZ", Exchange.SZSE, start, 10), _bar("159915.SZ", Exchange.SZSE, start + timedelta(minutes=1), 10)],
+    }
+    engine.run_day(bars, _EntryOnly(), {})
+
+    assert engine.fills[0].volume == 9_700
+    assert engine.fills[0].price * engine.fills[0].volume == 97_000
+    assert engine.fills[0].commission == 11.64
+    assert engine.fills[0].entry_position_pct == 0.97
+    assert round(engine.cash, 2) == 2_988.36
+
+
 def test_portfolio_tied_priority_uses_symbol_order_despite_input_order() -> None:
     start = datetime(2026, 1, 5, 9, 30)
 
@@ -288,9 +314,11 @@ def test_daily_context_uses_completed_days_only() -> None:
     start = datetime(2026, 1, 5, 9, 30)
     builder = DailyContextBuilder()
     builder.add_day({"600000.SH": [_bar("600000.SH", Exchange.SSE, start, 10), _bar("600000.SH", Exchange.SSE, start + timedelta(minutes=1), 11)]})
-    reference = builder.references()["600000.SH"]
+    reference = builder.references(
+        daily_market_metadata={date(2026, 1, 5): {"600000.SH": {"high": 12.0}}},
+    )["600000.SH"]
     assert reference.previous_close == 11
-    assert reference.previous_high == 11
+    assert reference.previous_high == 12
     assert reference.closes == (11,)
     assert reference.previous_cumulative_volumes[start.time()] == 10_000
 
@@ -344,10 +372,29 @@ def test_daily_context_keeps_raw_execution_pre_close_separate_from_signal_prices
         execution_metadata={
             "600000.SH": {"pre_close": 10.25, "price_limit_pct": 0.10},
         },
+        daily_market_metadata={date(2026, 1, 5): {"600000.SH": {"high": 12.0}}},
     )["600000.SH"]
     assert reference.previous_close == 11
     assert reference.limit_reference_price == 10.25
     assert reference.price_limit_pct == 0.10
+
+
+def test_daily_context_uses_daily_k_high_instead_of_minute_high() -> None:
+    start = datetime(2026, 1, 5, 9, 30)
+    builder = DailyContextBuilder()
+    builder.add_day({
+        "600000.SH": [
+            _bar("600000.SH", Exchange.SSE, start, 10),
+            _bar("600000.SH", Exchange.SSE, start + timedelta(minutes=1), 11),
+        ],
+    })
+
+    reference = builder.references(
+        date(2026, 1, 6),
+        daily_market_metadata={date(2026, 1, 5): {"600000.SH": {"high": 12.34}}},
+    )["600000.SH"]
+
+    assert reference.previous_high == 12.34
 
 
 def test_opening_breakout_uses_close_breakout_and_dynamic_ma5() -> None:

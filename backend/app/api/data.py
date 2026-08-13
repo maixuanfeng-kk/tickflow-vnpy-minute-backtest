@@ -382,14 +382,17 @@ def _safe_aggregate_minute(repo) -> dict | None:
     分钟 K 按 date=YYYY-MM-DD 分区存储，直接数目录即可，
     无需 count(*) / count(DISTINCT ...) 等昂贵查询。
     """
-    minute_dir = repo.store.data_dir / "kline_minute"
+    data_dir = repo.store.data_dir
+    minute_dir = data_dir / "kline_minute"
+    if not minute_dir.exists() or not any(minute_dir.glob("date=*/part.parquet")):
+        minute_dir = data_dir / "kline_minute_tushare"
     if not minute_dir.exists():
         return None
 
     # 从 date=YYYY-MM-DD 目录名提取交易日
     dates: list[str] = []
     for d in minute_dir.iterdir():
-        if d.is_dir() and d.name.startswith("date="):
+        if d.is_dir() and d.name.startswith("date=") and (d / "part.parquet").exists():
             dates.append(d.name[5:])
 
     if not dates:
