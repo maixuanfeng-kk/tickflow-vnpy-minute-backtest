@@ -798,6 +798,7 @@ export interface StrategyBacktestResult {
   drawdown_curve: { date: string; value: number }[]
   benchmark_curve?: { date: string; value: number; close?: number; name?: string; symbol?: string }[]
   trades: StrategyBacktestTrade[]
+  fills?: StrategyBacktestTrade[]
   per_symbol_stats: {
     symbol: string
     name?: string
@@ -851,6 +852,20 @@ export interface VnpyStrategy {
     minimum?: number | null
     maximum?: number | null
   }>
+}
+
+export interface Etf159915Readiness {
+  strategy_id: string
+  symbol: string
+  start: string
+  end: string
+  ready: boolean
+  blocking_reasons: string[]
+  warnings: string[]
+  coverage: {
+    daily: Record<string, any>
+    minute: Record<string, any>
+  }
 }
 
 export interface StockPoolStrategy {
@@ -1673,6 +1688,24 @@ export const api = {
   },
 
   vnpyStrategies: () => request<{ strategies: VnpyStrategy[] }>('/api/backtest/vnpy/strategies'),
+  vnpyReadiness: (
+    strategyId: string,
+    symbols: string[],
+    start: string,
+    end: string,
+    startTime?: string,
+    endTime?: string,
+  ) => {
+    const params = new URLSearchParams({
+      strategy_id: strategyId,
+      symbols: symbols.join(','),
+      start,
+      end,
+    })
+    if (startTime) params.set('start_time', startTime)
+    if (endTime) params.set('end_time', endTime)
+    return request<Etf159915Readiness>(`/api/backtest/vnpy/readiness?${params.toString()}`)
+  },
 
   stockPoolStrategies: () => request<{ strategies: StockPoolStrategy[] }>('/api/stock-pools/strategies'),
   stockPoolReadiness: (strategyId: string, month: string) =>

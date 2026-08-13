@@ -46,3 +46,19 @@ def test_import_is_idempotent_and_rejects_wrong_code(tmp_path: Path) -> None:
     assert first.rows_valid == 0
     assert second.rows_valid == 0
     assert list((data / "kline_etf_minute").rglob("*.parquet")) == []
+
+
+def test_imports_flat_download_csv_schema(tmp_path: Path) -> None:
+    source = tmp_path / "159915.SZ.csv"
+    data = tmp_path / "data"
+    source.write_text(
+        "datetime,code,name,open,close,high,low,volume,amount,pct_chg,amplitude\n"
+        "2025-01-02 09:30:00,159915.SZ,创业板ETF,2.1,2.1,2.1,2.1,100,210,0,0\n",
+        encoding="utf-8",
+    )
+
+    summary = LocalEtfMinuteCsvImporter(source, data).run()
+
+    assert summary.rows_valid == 1
+    frame = pl.read_parquet(data / "kline_etf_minute" / "date=2025-01-02" / "part.parquet")
+    assert frame.select("symbol", "volume").to_dicts() == [{"symbol": "159915.SZ", "volume": 100.0}]

@@ -28,6 +28,7 @@ def test_etf_strategy_forces_raw_single_position_and_three_percent_reserve():
     assert settings["max_positions"] == 1
     assert settings["max_volume_ratio"] is None
     assert settings["cash_reserve_ratio"] == 0.03
+    assert settings["commission_outside_budget"] is True
 
 
 def test_etf_strategy_forces_zero_stamp_tax():

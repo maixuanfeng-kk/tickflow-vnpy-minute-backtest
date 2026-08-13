@@ -226,6 +226,7 @@ class MultiSymbolNextBarOpenEngine:
         max_positions: int = 10,
         position_sizing: str = "equal",
         reserve_ratio: float = 0.03,
+        commission_outside_budget: bool = False,
         instrument_names: Mapping[str, str] | None = None,
         instrument_tick_sizes: Mapping[str, float] | None = None,
     ) -> None:
@@ -241,6 +242,7 @@ class MultiSymbolNextBarOpenEngine:
             raise ValueError("position_sizing must be equal or score_weight")
         self.position_sizing = position_sizing
         self.reserve_ratio = max(float(reserve_ratio), 0.0)
+        self.commission_outside_budget = bool(commission_outside_budget)
         # The reserve is calculated from currently available cash whenever a
         # new equal-size budget is established (day start or a completed exit).
         self._daily_equal_budget: float | None = None
@@ -577,7 +579,7 @@ class MultiSymbolNextBarOpenEngine:
         self.cash -= turnover + commission
         self._fill(PortfolioFill(order.symbol, Direction.LONG, bar.datetime, price, volume, order.reason, commission, 0.0, abs(price - bar.open_price) * volume,
                                  portfolio_equity_before=equity_before,
-                                 entry_position_pct=(turnover + commission) / equity_before if equity_before > 0 else None,
+                                 entry_position_pct=(turnover if self.commission_outside_budget else turnover + commission) / equity_before if equity_before > 0 else None,
                                  signal_id=order.signal_id))
         return True
 
@@ -663,7 +665,8 @@ class MultiSymbolNextBarOpenEngine:
         effective = open_price * (1 + self.slippage_rate)
         if effective <= 0:
             return 0
-        return floor((budget - self.min_commission) / effective / rule.lot_size) * rule.lot_size
+        commission_reserve = 0.0 if self.commission_outside_budget else self.min_commission
+        return floor((budget - commission_reserve) / effective / rule.lot_size) * rule.lot_size
 
     @staticmethod
     def _price_limits(

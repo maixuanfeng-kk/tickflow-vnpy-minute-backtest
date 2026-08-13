@@ -25,6 +25,12 @@ import { ReturnDistributionChart } from './charts/ReturnDistributionChart'
 import { TradeKlineModal } from './components/TradeKlineModal'
 import { SignalTriggerActions } from '@/components/signals/SignalTriggerActions'
 import {
+  Etf159915DataReadiness,
+  Etf159915ExecutionTrace,
+  Etf159915RuleSummary,
+} from './strategy-extensions/Etf159915BacktestExtension'
+import { isEtf159915RunBlocked } from './strategy-extensions/etf159915'
+import {
   canRunBacktest,
   is159915Strategy,
   normalizeBacktestSymbols,
@@ -775,6 +781,8 @@ export function StrategyBacktest() {
   const [poolSymbols, setPoolSymbols] = useState<string[]>([])
   const [start, setStart] = useState(saved?.start ?? THREE_MONTHS_AGO)
   const [end, setEnd] = useState(saved?.end ?? TODAY)
+  const [startTime, setStartTime] = useState(saved?.startTime ?? '09:30')
+  const [endTime, setEndTime] = useState(saved?.endTime ?? '15:00')
   // 成交口径: 建仓/清仓可独立配置。向后兼容老 matching (派生为 entry=exit=matching)。
   const [matching] = useState<'close_t' | 'open_t+1'>(saved?.matching ?? 'open_t+1')
   const [entryFill, setEntryFill] = useState<'close_t' | 'open_t+1'>(saved?.entryFill ?? saved?.matching ?? 'open_t+1')
@@ -812,7 +820,7 @@ export function StrategyBacktest() {
   // 跨会话/拉新代码后自动渲染一个可能对应已失效策略的旧结果会造成困惑
   // (切页不卸载组件,内存中的 result 仍保留,无需靠 localStorage 恢复)。
   const [result, setResult] = useState<StrategyBacktestResult | null>(null)
-  const [resultTab, setResultTab] = useState<'daily' | 'trades' | 'signals' | 'positions'>('daily')
+  const [resultTab, setResultTab] = useState<'daily' | 'trades' | 'signals' | 'positions' | 'execution'>('daily')
   const [dailyPage, setDailyPage] = useState(0)
   const [tradePage, setTradePage] = useState(0)
   const [tradePageSize, setTradePageSize] = useState(10)
@@ -862,6 +870,14 @@ export function StrategyBacktest() {
     () => vnpyStrategies.data?.strategies.find(item => item.id === vnpyStrategyId),
     [vnpyStrategies.data, vnpyStrategyId],
   )
+  const etfReadiness = useQuery({
+    queryKey: ['vnpy-readiness', vnpyStrategyId, '159915.SZ', start, end, startTime, endTime],
+    queryFn: () => api.vnpyReadiness(vnpyStrategyId, ['159915.SZ'], start, end, startTime, endTime),
+    enabled: etf159915Strategy && Boolean(
+      start && end && startTime && endTime && start <= end && (start !== end || startTime <= endTime),
+    ),
+    retry: false,
+  })
   const earliestDate = dataStatus.data?.daily?.earliest_date ?? null
   const hasLocalMinuteData = !!dataStatus.data?.minute?.trading_days
 
@@ -928,6 +944,8 @@ export function StrategyBacktest() {
         symbols,
         start,
         end,
+        startTime,
+        endTime,
         matching,
         entryFill,
         exitFill,
@@ -955,12 +973,20 @@ export function StrategyBacktest() {
       poolSymbols,
       manualSymbols: symbols.split(','),
     })
-    if (requestSymbols.length === 0) return
+    if (
+      requestSymbols.length === 0
+      || !startTime
+      || !endTime
+      || (start === end && startTime > endTime)
+      || (etf159915Strategy && isEtf159915RunBlocked(etfReadiness))
+    ) return
     startBacktest({
       strategy_id: vnpyStrategyId,
       symbols: requestSymbols,
       start: start || null,
       end: end || undefined,
+      start_time: startTime,
+      end_time: endTime,
       matching,
       entry_fill: entryFill,
       exit_fill: exitFill,
@@ -985,11 +1011,15 @@ export function StrategyBacktest() {
     poolSymbols,
     manualSymbols: symbols.split(','),
   })
-  const canRunVnpy = canRunBacktest({
+  const hasRunnableSymbols = canRunBacktest({
     source: poolSource,
     poolSymbols,
     manualSymbols: symbols.split(','),
   })
+  const etfReadinessBlocked = etf159915Strategy && isEtf159915RunBlocked(etfReadiness)
+  const invalidMinuteRange = !startTime || !endTime || (start === end && startTime > endTime)
+  const canRunVnpy = hasRunnableSymbols && !etfReadinessBlocked && !invalidMinuteRange
+  const isEtfResult = result?.strategy_info?.id === 'etf_159915_minute'
 
   // 提取统计
   const s = result?.stats
@@ -1327,27 +1357,52 @@ export function StrategyBacktest() {
           <div className="mt-2 grid grid-cols-2 gap-2">
             <div>
               <label className="text-[11px] text-secondary block mb-1">开始</label>
-              <DatePicker
-                value={start}
-                onChange={setStart}
-                max={end || undefined}
-                placeholder="全部历史"
-                className="w-full"
-                buttonClassName="w-full justify-start"
-                align="left"
-              />
+              <div className="grid grid-cols-[minmax(0,1fr)_5.5rem] gap-1.5">
+                <DatePicker
+                  value={start}
+                  onChange={setStart}
+                  max={end || undefined}
+                  placeholder="全部历史"
+                  className="min-w-0"
+                  buttonClassName="w-full justify-start"
+                  align="left"
+                />
+                <input
+                  type="time"
+                  step={60}
+                  value={startTime}
+                  onChange={event => setStartTime(event.target.value)}
+                  aria-label="开始时间"
+                  className="min-w-0 rounded-input border border-border bg-base px-2 py-1.5 text-xs text-foreground outline-none transition-colors focus:border-accent"
+                />
+              </div>
             </div>
             <div>
               <label className="text-[11px] text-secondary block mb-1">结束</label>
-              <DatePicker
-                value={end}
-                onChange={setEnd}
-                min={start || undefined}
-                className="w-full"
-                buttonClassName="w-full justify-start"
-              />
+              <div className="grid grid-cols-[minmax(0,1fr)_5.5rem] gap-1.5">
+                <DatePicker
+                  value={end}
+                  onChange={setEnd}
+                  min={start || undefined}
+                  className="min-w-0"
+                  buttonClassName="w-full justify-start"
+                />
+                <input
+                  type="time"
+                  step={60}
+                  value={endTime}
+                  onChange={event => setEndTime(event.target.value)}
+                  aria-label="结束时间"
+                  className="min-w-0 rounded-input border border-border bg-base px-2 py-1.5 text-xs text-foreground outline-none transition-colors focus:border-accent"
+                />
+              </div>
             </div>
           </div>
+          {invalidMinuteRange && (
+            <p className="mt-1.5 text-[11px] text-danger">
+              {!startTime || !endTime ? '请选择开始和结束时间' : '同一天的开始时间不能晚于结束时间'}
+            </p>
+          )}
 
           <div className="mt-2 flex items-center gap-1">
             <div className="flex min-w-0 flex-1 rounded-input bg-base/60 p-0.5">
@@ -1472,6 +1527,12 @@ export function StrategyBacktest() {
             vn.py 组合回测会严格限制为最多 {Number(maxPositions) || 1} 只持仓。等权买入会在每个交易日开始按“可购买资金 ÷ 剩余仓位数”确定当日单仓额度，初始资金的 3% 始终保留；当天连续买入沿用该额度，只有完整卖出释放资金和仓位后才重新计算。评分加权则按策略评分分配，开盘突破策略目前以命中条件数作为评分。若同一分钟触发的买入信号超过剩余名额，先按命中条件数从多到少、再按股票代码从小到大形成候选队列；下一分钟主候选无法成交时，会在同一撮合时点继续尝试后续候选，直到填满空仓或候选耗尽。
           </div>
         )}
+        {etf159915Strategy && (
+          <>
+            <Etf159915RuleSummary />
+            <Etf159915DataReadiness query={etfReadiness} />
+          </>
+        )}
         {isPending ? (
           <button
             onClick={stopBacktest}
@@ -1497,7 +1558,19 @@ export function StrategyBacktest() {
             <span className="text-sm font-semibold tracking-wide">运行回测</span>
           </button>
         )}
-        {!canRunVnpy && <p className="text-center text-[11px] text-danger">{poolSource === 'pool' ? '所选自选池为空，无法运行回测' : '请先选择或输入至少一只股票'}</p>}
+        {!canRunVnpy && (
+          <p className="text-center text-[11px] text-danger">
+            {etfReadinessBlocked
+              ? '请先解决上方数据检查中的阻断问题'
+              : invalidMinuteRange
+                ? !startTime || !endTime
+                  ? '请选择开始和结束时间'
+                  : '同一天的开始时间不能晚于结束时间'
+              : poolSource === 'pool'
+                ? '所选自选池为空，无法运行回测'
+                : '请先选择或输入至少一只股票'}
+          </p>
+        )}
       </section>
 
       {/* 结果面板 */}
@@ -1763,7 +1836,13 @@ export function StrategyBacktest() {
             {(dailyLedger.length > 0 || result.trades.length > 0 || signalDiagnostics.length > 0 || (result.positions?.length ?? 0) > 0) && (
               <div className="rounded-card border border-border overflow-hidden">
                 <div className="flex items-center gap-1 border-b border-border px-4 pt-2">
-                  {(['daily', 'trades', 'signals', 'positions'] as const).map(t => (
+                  {([
+                    'daily',
+                    'trades',
+                    'signals',
+                    'positions',
+                    ...(isEtfResult ? ['execution' as const] : []),
+                  ] as const).map(t => (
                     <button
                       key={t}
                       onClick={() => setResultTab(t)}
@@ -1779,7 +1858,9 @@ export function StrategyBacktest() {
                           ? `交易明细 (${sortedTrades.length})`
                           : t === 'signals'
                             ? `信号诊断 (${signalDiagnostics.length})`
-                            : `期末持仓 (${result.positions?.length ?? 0})`}
+                            : t === 'positions'
+                              ? `期末持仓 (${result.positions?.length ?? 0})`
+                              : `执行追踪 (${signalDiagnostics.length})`}
                     </button>
                   ))}
                 </div>
@@ -1959,6 +2040,10 @@ export function StrategyBacktest() {
 
                 {resultTab === 'positions' && (
                   <div className="overflow-x-auto"><table className="w-full min-w-[1040px] text-sm"><thead className="bg-elevated"><tr className="text-left text-secondary"><th className="px-4 py-2.5 font-medium">股票代码</th><th className="px-4 py-2.5 font-medium">股票名称</th><th className="px-4 py-2.5 font-medium text-right">持仓股数</th><th className="px-4 py-2.5 font-medium text-right">成本 / 收盘</th><th className="px-4 py-2.5 font-medium text-right">市值 / 仓位</th><th className="px-4 py-2.5 font-medium text-right">浮动盈亏</th><th className="px-4 py-2.5 font-medium">建仓 / 持有</th></tr></thead><tbody>{(result.positions ?? []).map(item => <tr key={item.symbol} className="border-t border-border hover:bg-elevated/50"><td className="px-4 py-2 font-mono">{item.symbol}</td><td className="px-4 py-2 font-medium">{item.name || '名称未知'}</td><td className="px-4 py-2 text-right num">{fmtShares(item.volume)}</td><td className="px-4 py-2 text-right num"><div>{fmtPrice(item.average_cost)}</div><div className="mt-0.5 text-xs text-muted">{fmtPrice(item.mark_price)}</div></td><td className="px-4 py-2 text-right num"><div>{fmtMoney(item.market_value)}</div><div className="mt-0.5 text-xs text-muted">{fmtPct(item.position_pct)}</div></td><td className={`px-4 py-2 text-right num ${priceColorClass(item.unrealized_pnl)}`}><div>{fmtSignedMoney(item.unrealized_pnl)}</div><div className="mt-0.5 text-xs">{fmtPct(item.unrealized_pnl_pct)}</div></td><td className="px-4 py-2 text-xs text-secondary"><div>{item.entry_date || '—'}</div><div className="mt-0.5">{item.holding_days} 个交易日 · {item.holding_minutes} 个有效分钟</div></td></tr>)}</tbody></table>{!(result.positions?.length) && <div className="p-8 text-center text-sm text-muted">回测结束时没有未平仓持仓。</div>}</div>
+                )}
+
+                {resultTab === 'execution' && isEtfResult && (
+                  <Etf159915ExecutionTrace result={result} />
                 )}
               </div>
             )}

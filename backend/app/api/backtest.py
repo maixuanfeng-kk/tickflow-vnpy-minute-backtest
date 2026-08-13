@@ -7,7 +7,7 @@ import json
 import logging
 import threading
 import time
-from datetime import date
+from datetime import date, time as dt_time
 from typing import Literal
 from urllib.parse import parse_qs
 
@@ -46,6 +46,71 @@ def _normalize_symbols(value: str | None) -> tuple[str, ...]:
     )
 
 
+def _parse_vnpy_time(value: str | None, default: str) -> dt_time:
+    raw = default if value is None else value
+    try:
+        if len(raw) != 5 or raw[2] != ":":
+            raise ValueError
+        parsed = dt_time.fromisoformat(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="start_time 和 end_time 必须是 HH:MM 时间") from exc
+    return parsed
+
+
+def _parse_vnpy_scope(
+    strategy_id: str,
+    symbols: str | None,
+    start: str,
+    end: str,
+    start_time: str | None = None,
+    end_time: str | None = None,
+):
+    from app.vnpy_backtest.strategies.registry import get_strategy
+
+    spec = get_strategy(strategy_id)
+    if spec is None:
+        raise HTTPException(status_code=400, detail=f"不支持的 vn.py 策略: {strategy_id}")
+    normalized_symbols = _normalize_symbols(symbols)
+    if not spec.min_symbols <= len(normalized_symbols) <= spec.max_symbols:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{spec.name} 支持 {spec.min_symbols}-{spec.max_symbols} 只股票",
+        )
+    try:
+        start_date = date.fromisoformat(start)
+        end_date = date.fromisoformat(end)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="start 和 end 必须是 ISO 日期") from exc
+    if end_date < start_date:
+        raise HTTPException(status_code=400, detail="end 不能早于 start")
+    start_time_value = _parse_vnpy_time(start_time, "09:30")
+    end_time_value = _parse_vnpy_time(end_time, "15:00")
+    if start_date == end_date and start_time_value > end_time_value:
+        raise HTTPException(status_code=400, detail="开始时间不能晚于结束时间")
+    return spec, normalized_symbols, start_date, end_date, start_time_value, end_time_value
+
+
+def _readiness_for_scope(
+    request: Request,
+    strategy_id: str,
+    symbols: tuple[str, ...],
+    start: date,
+    end: date,
+) -> dict:
+    if strategy_id != "etf_159915_minute":
+        return {
+            "strategy_id": strategy_id,
+            "ready": True,
+            "blocking_reasons": [],
+            "warnings": [],
+            "coverage": {},
+        }
+    from app.vnpy_backtest.readiness import Etf159915ReadinessService
+
+    service = Etf159915ReadinessService(request.app.state.repo.store.data_dir)
+    return service.check(symbol=symbols[0], start=start, end=end)
+
+
 def _job_key(
     *,
     strategy_id: str,
@@ -61,9 +126,11 @@ def _job_key(
     volume_limit_enabled: bool,
     signal_price_basis: str,
     params: str | None,
+    start_time: str = "09:30",
+    end_time: str = "15:00",
 ) -> str:
     raw = (
-        f"vnpy|{strategy_id}|{','.join(symbols)}|{start}|{end}|{initial_capital}|"
+        f"vnpy|{strategy_id}|{','.join(symbols)}|{start}|{end}|{start_time}|{end_time}|{initial_capital}|"
         f"{commission_pct}|{stamp_tax_pct}|{slippage_bps}|{max_positions}|"
         f"{position_sizing}|{volume_limit_enabled}|{signal_price_basis}|{params}"
     )
@@ -97,6 +164,24 @@ def vnpy_strategies() -> dict:
     return {"strategies": [strategy.to_public_dict() for strategy in list_strategies()]}
 
 
+@router.get("/vnpy/readiness")
+def vnpy_readiness(
+    request: Request,
+    strategy_id: str,
+    symbols: str,
+    start: str,
+    end: str,
+    start_time: str | None = None,
+    end_time: str | None = None,
+) -> dict:
+    spec, normalized_symbols, start_date, end_date, _, _ = _parse_vnpy_scope(
+        strategy_id, symbols, start, end, start_time, end_time,
+    )
+    return _readiness_for_scope(
+        request, spec.id, normalized_symbols, start_date, end_date,
+    )
+
+
 @router.get("/vnpy/stream")
 async def vnpy_stream(
     request: Request,
@@ -113,26 +198,21 @@ async def vnpy_stream(
     volume_limit_enabled: bool = True,
     signal_price_basis: Literal["qfq", "raw"] = "qfq",
     params: str | None = None,
+    start_time: str | None = None,
+    end_time: str | None = None,
 ):
     """使用本地分钟 K 数据运行 vn.py 股票池组合回测。"""
-    from app.vnpy_backtest.strategies.registry import get_strategy
-
-    spec = get_strategy(strategy_id)
-    if spec is None:
-        raise HTTPException(status_code=400, detail=f"不支持的 vn.py 策略: {strategy_id}")
-    normalized_symbols = _normalize_symbols(symbols)
-    if not spec.min_symbols <= len(normalized_symbols) <= spec.max_symbols:
+    spec, normalized_symbols, start_date, end_date, start_time_value, end_time_value = _parse_vnpy_scope(
+        strategy_id, symbols, start, end, start_time, end_time,
+    )
+    readiness = _readiness_for_scope(
+        request, spec.id, normalized_symbols, start_date, end_date,
+    )
+    if not readiness["ready"]:
         raise HTTPException(
             status_code=400,
-            detail=f"{spec.name} 支持 {spec.min_symbols}-{spec.max_symbols} 只股票",
+            detail="；".join(readiness["blocking_reasons"]),
         )
-    try:
-        start_date = date.fromisoformat(start)
-        end_date = date.fromisoformat(end)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail="start 和 end 必须是 ISO 日期") from exc
-    if end_date < start_date:
-        raise HTTPException(status_code=400, detail="end 不能早于 start")
     if initial_capital <= 0:
         raise HTTPException(status_code=400, detail="initial_capital 必须大于 0")
     if max_positions < 1:
@@ -151,6 +231,8 @@ async def vnpy_stream(
         symbols=normalized_symbols,
         start=start,
         end=end,
+        start_time=start_time_value.isoformat(timespec="minutes"),
+        end_time=end_time_value.isoformat(timespec="minutes"),
         initial_capital=initial_capital,
         commission_pct=commission_pct,
         stamp_tax_pct=stamp_tax_pct,
@@ -197,6 +279,8 @@ async def vnpy_stream(
                     strategy_id=strategy_id,
                     start=start_date,
                     end=end_date,
+                    start_time=start_time_value,
+                    end_time=end_time_value,
                     initial_capital=initial_capital,
                     commission_pct=commission_pct,
                     stamp_tax_pct=stamp_tax_pct,
@@ -270,6 +354,8 @@ async def strategy_cancel(request: Request) -> dict:
             symbols=_normalize_symbols(get("symbols")),
             start=get("start"),
             end=get("end"),
+            start_time=get("start_time", "09:30"),
+            end_time=get("end_time", "15:00"),
             initial_capital=float(get("initial_capital", "100000")),
             commission_pct=float(get("commission_pct", "0.0002")),
             stamp_tax_pct=float(get("stamp_tax_pct", "0.001")),

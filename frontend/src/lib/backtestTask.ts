@@ -164,6 +164,8 @@ export function startBacktest(params: {
   symbols?: string[] | null
   start?: string | null
   end?: string | null
+  start_time?: string | null
+  end_time?: string | null
   matching?: string
   entry_fill?: string
   exit_fill?: string
@@ -212,6 +214,8 @@ export function startBacktest(params: {
     symbols: symbols.join(','),
     start: params.start ?? undefined,
     end: params.end ?? undefined,
+    start_time: params.start_time ?? undefined,
+    end_time: params.end_time ?? undefined,
     matching: params.matching,
     entry_fill: params.entry_fill,
     exit_fill: params.exit_fill,
