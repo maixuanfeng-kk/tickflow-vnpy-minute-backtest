@@ -43,11 +43,16 @@ def test_registry_exposes_only_portfolio_strategies() -> None:
     assert get_strategy("opening_breakout_condition_3") is not None
     assert get_strategy("minute_double_ma_volume") is None
     assert [item.id for item in list_strategies()] == [
+        "etf_159915_minute",
         "opening_breakout_pool",
         "opening_breakout_condition_1",
         "opening_breakout_condition_2",
         "opening_breakout_condition_3",
     ]
+
+
+def test_159915_uses_etf_minimum_price_tick_without_metadata() -> None:
+    assert rule_for_symbol("159915.SZ").tick_size == 0.001
 
 
 def test_all_a_board_rules_cover_star_and_bse() -> None:
@@ -258,6 +263,103 @@ def test_portfolio_equal_sizing_uses_current_cash_reserve_after_a_sale() -> None
     assert engine.cash == 6_000
 
 
+def test_buy_budget_excludes_commission_from_the_97_percent_security_amount() -> None:
+    start = datetime(2026, 1, 5, 9, 30)
+
+    class _EntryOnly:
+        def on_minute(self, _bars, context):
+            if context.timestamp == start:
+                return [OrderIntent("159915.SZ", Direction.LONG, "entry")]
+            return []
+
+    engine = MultiSymbolNextBarOpenEngine(
+        initial_cash=100_000, commission_rate=0.00012, stamp_tax_rate=0,
+        slippage_rate=0, min_commission=5, max_volume_ratio=None,
+        reserve_ratio=0.03, max_positions=1, commission_outside_budget=True,
+    )
+    bars = {
+        "159915.SZ": [_bar("159915.SZ", Exchange.SZSE, start, 10), _bar("159915.SZ", Exchange.SZSE, start + timedelta(minutes=1), 10)],
+    }
+    engine.run_day(bars, _EntryOnly(), {})
+
+    assert engine.fills[0].volume == 9_700
+    assert engine.fills[0].price * engine.fills[0].volume == 97_000
+    assert engine.fills[0].commission == 11.64
+    assert engine.fills[0].entry_position_pct == 0.97
+    assert round(engine.cash, 2) == 2_988.36
+
+
+def test_etf_slippage_prices_round_outward_to_the_minimum_tick() -> None:
+    first_day = datetime(2026, 1, 5, 9, 30)
+    second_day = datetime(2026, 1, 6, 9, 30)
+
+    class _RoundTrip:
+        def on_minute(self, _bars, context):
+            if context.timestamp == first_day:
+                return [OrderIntent("159915.SZ", Direction.LONG, "entry", volume=100)]
+            if context.timestamp == second_day and context.positions:
+                return [OrderIntent("159915.SZ", Direction.SHORT, "exit")]
+            return []
+
+    engine = MultiSymbolNextBarOpenEngine(
+        initial_cash=100_000,
+        commission_rate=0,
+        stamp_tax_rate=0,
+        slippage_rate=0.0005,
+        min_commission=0,
+        max_volume_ratio=None,
+        reserve_ratio=0,
+        instrument_tick_sizes={"159915.SZ": 0.001},
+        round_slippage_to_tick=True,
+    )
+    strategy = _RoundTrip()
+    for start in (first_day, second_day):
+        engine.run_day(
+            {
+                "159915.SZ": [
+                    _bar("159915.SZ", Exchange.SZSE, start, 3.841),
+                    _bar("159915.SZ", Exchange.SZSE, start + timedelta(minutes=1), 3.841),
+                ]
+            },
+            strategy,
+            {},
+        )
+
+    assert [fill.price for fill in engine.fills] == [3.843, 3.839]
+
+
+def test_stock_slippage_keeps_legacy_unrounded_fill_price() -> None:
+    start = datetime(2026, 1, 5, 9, 30)
+
+    class _EntryOnly:
+        def on_minute(self, _bars, context):
+            if context.timestamp == start:
+                return [OrderIntent("600000.SH", Direction.LONG, "entry", volume=100)]
+            return []
+
+    engine = MultiSymbolNextBarOpenEngine(
+        initial_cash=100_000,
+        commission_rate=0,
+        stamp_tax_rate=0,
+        slippage_rate=0.0005,
+        min_commission=0,
+        max_volume_ratio=None,
+        reserve_ratio=0,
+    )
+    engine.run_day(
+        {
+            "600000.SH": [
+                _bar("600000.SH", Exchange.SSE, start, 10.01),
+                _bar("600000.SH", Exchange.SSE, start + timedelta(minutes=1), 10.01),
+            ]
+        },
+        _EntryOnly(),
+        {},
+    )
+
+    assert engine.fills[0].price == 10.015005
+
+
 def test_portfolio_tied_priority_uses_symbol_order_despite_input_order() -> None:
     start = datetime(2026, 1, 5, 9, 30)
 
@@ -294,6 +396,41 @@ def test_daily_context_uses_completed_days_only() -> None:
     assert reference.previous_high == 12
     assert reference.closes == (11,)
     assert reference.previous_cumulative_volumes[start.time()] == 10_000
+
+
+def test_daily_context_uses_official_daily_ohlc_and_minute_cumulative_volume() -> None:
+    start = datetime(2026, 6, 2, 9, 30)
+    builder = DailyContextBuilder()
+    bars = {
+        "000938.SZ": [
+            _bar("000938.SZ", Exchange.SZSE, start, 28.29),
+            _bar("000938.SZ", Exchange.SZSE, start + timedelta(minutes=1), 28.64),
+        ],
+    }
+    bars["000938.SZ"][0].volume = 2_000
+    bars["000938.SZ"][1].volume = 3_000
+
+    builder.add_day(
+        bars,
+        daily_prices={
+            "000938.SZ": {
+                "open": 28.29,
+                "high": 28.69,
+                "low": 27.68,
+                "close": 28.21,
+            },
+        },
+    )
+    reference = builder.references(date(2026, 6, 3))["000938.SZ"]
+
+    assert reference.previous_open == 28.29
+    assert reference.previous_high == 28.69
+    assert reference.previous_low == 27.68
+    assert reference.previous_close == 28.21
+    assert reference.previous_cumulative_volumes == {
+        time(9, 30): 2_000,
+        time(9, 31): 5_000,
+    }
 
 
 def test_daily_context_keeps_raw_execution_pre_close_separate_from_signal_prices() -> None:

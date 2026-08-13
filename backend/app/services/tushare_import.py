@@ -180,10 +180,10 @@ class TushareLocalImporter:
         for year in years:
             directory = root / str(year)
             archive = root / f"{year}.zip"
-            if directory.is_dir():
-                sources.append((year, directory, False))
-            elif archive.is_file():
+            if archive.is_file():
                 sources.append((year, archive, True))
+            elif directory.is_dir():
+                sources.append((year, directory, False))
         summary = TushareImportSummary("kline_minute_tushare", "preview" if dry_run else "running", dry_run, years)
         stage = self.data_dir / ".tushare-minute-stage" / uuid4().hex
         dates: set[str] = set()
@@ -354,7 +354,7 @@ class TushareLocalImporter:
                 self._publish_directory(stage / "raw", self.data_dir / "financial_tushare" / "raw")
                 self._publish_single(income, self.data_dir / "financial_tushare" / "income" / "part.parquet", {
                     "dataset": "financial_tushare/income", "version": self.VERSION, "source": "local_tushare",
-                    "revenue_primary": "inc_revenue", "revenue_fallback": "inc_total_revenue", "net_profit": "inc_n_income",
+                    "revenue_primary": "inc_revenue", "revenue_yoy": "fi_q_sales_yoy / 100", "revenue_fallback": "inc_total_revenue", "net_profit": "inc_n_income",
                 })
                 summary.partitions_published = 1
                 self._write_manifest("tushare_financial_import.json", summary)
@@ -416,7 +416,18 @@ class TushareLocalImporter:
         frames = []
         for label, payload in batch:
             try:
-                raw = pl.read_csv(BytesIO(payload) if isinstance(payload, bytes) else payload, null_values=["", "None", "nan"])
+                raw = pl.read_csv(
+                    BytesIO(payload) if isinstance(payload, bytes) else payload,
+                    null_values=["", "None", "nan"],
+                    schema_overrides={
+                        "open": pl.Float64,
+                        "close": pl.Float64,
+                        "high": pl.Float64,
+                        "low": pl.Float64,
+                        "vol": pl.Float64,
+                        "amount": pl.Float64,
+                    },
+                )
                 required = {"ts_code", "trade_time", "open", "close", "high", "low", "vol", "amount"}
                 if not required.issubset(raw.columns):
                     raise ValueError(f"missing columns: {', '.join(sorted(required - set(raw.columns)))}")
@@ -473,6 +484,7 @@ class TushareLocalImporter:
             pl.col("end_date").cast(pl.Utf8).str.strptime(pl.Date, "%Y%m%d", strict=False).alias("period_end"),
             pl.col(announce).cast(pl.Utf8).str.strptime(pl.Date, "%Y%m%d", strict=False).alias("announce_date"),
             pl.coalesce([column_or_null("inc_revenue"), column_or_null("inc_total_revenue")]).alias("revenue"),
+            (column_or_null("fi_q_sales_yoy") / 100).alias("revenue_yoy"),
             pl.when(column_or_null("inc_revenue").is_not_null()).then(pl.lit("inc_revenue"))
             .when(column_or_null("inc_total_revenue").is_not_null()).then(pl.lit("inc_total_revenue"))
             .otherwise(pl.lit(None, dtype=pl.Utf8)).alias("revenue_source"),

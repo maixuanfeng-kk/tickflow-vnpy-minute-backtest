@@ -48,6 +48,39 @@ def test_local_financial_import_publishes_point_in_time_income(tmp_path: Path) -
     ] == 1
 
 
+def test_local_financial_import_publishes_tushare_income_even_without_update_flag(tmp_path: Path) -> None:
+    source = tmp_path / "source" / "2026"
+    source.mkdir(parents=True)
+    (source / "000001_SZ.csv").write_text(
+        "ts_code,end_date,inc_ann_date,inc_revenue,inc_total_revenue,inc_n_income_attr_p,fi_q_sales_yoy,inc_update_flag\n"
+        "000001.SZ,20251231,20260425,100,110,12,17.5,0\n",
+        encoding="utf-8",
+    )
+
+    summary = LocalFinancialCsvImporter(source.parent, tmp_path / "data").run()
+
+    assert summary.status == "succeeded"
+    income = pl.read_parquet(tmp_path / "data" / "financials" / "income" / "part.parquet")
+    assert income.select(["symbol", "revenue", "net_income", "revenue_yoy"]).rows() == [
+        ("000001.SZ", 100.0, 12.0, 0.175),
+    ]
+
+
+def test_local_financial_import_prefers_total_net_income_over_attributable_profit(tmp_path: Path) -> None:
+    source = tmp_path / "source" / "2026"
+    source.mkdir(parents=True)
+    (source / "000001_SZ.csv").write_text(
+        "ts_code,end_date,inc_ann_date,inc_revenue,inc_n_income,inc_n_income_attr_p,inc_update_flag\n"
+        "000001.SZ,20251231,20260425,100,60000001,30000000,1\n",
+        encoding="utf-8",
+    )
+
+    LocalFinancialCsvImporter(source.parent, tmp_path / "data").run()
+
+    income = pl.read_parquet(tmp_path / "data" / "financials" / "income" / "part.parquet")
+    assert income["net_income"].to_list() == [60_000_001.0]
+
+
 def test_local_financial_import_keeps_previous_publish_when_no_valid_rows(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     source = tmp_path / "source"

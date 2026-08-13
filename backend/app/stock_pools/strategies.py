@@ -19,7 +19,8 @@ class MonthlyGrowthTrendStrategy:
         self.high_window = int(params.get("high_window", 200))
         self.high_days = int(params.get("high_days", 20))
         self.listing_days_min = int(params.get("listing_days_min", 250))
-        self.market_cap_min = float(params.get("market_cap_min", 10_000_000_000))
+        self.market_cap_min = float(params.get("market_cap_min", 30_000_000_000))
+        self.net_profit_min = float(params.get("net_profit_min", 50_000_000))
         self.ma60_basis = "static_as_of"
         self.high_200_basis = "static_as_of_touch"
 
@@ -38,7 +39,7 @@ class MonthlyGrowthTrendStrategy:
                 continue
             ordered = symbol_frame.sort("date")
             symbol = str(ordered["symbol"][0])
-            # The full-history XBX dataset also contains delisted securities.
+            # The full-history Tushare dataset also contains delisted securities.
             # A candidate must still have a bar at the monthly as-of date.
             if ordered["date"][-1] != data.as_of_date:
                 continue
@@ -51,27 +52,37 @@ class MonthlyGrowthTrendStrategy:
             if listing_trading_days < self.listing_days_min:
                 continue
             closes = [float(value) for value in ordered["close"].to_list()]
+            opens = [float(value) for value in ordered["open"].to_list()] if "open" in ordered.columns else closes
             highs = [float(value) for value in ordered["high"].to_list()]
             market_cap = ordered["total_mv"][-1]
             latest = financial_by_symbol.get(symbol)
             if latest is None or market_cap is None:
                 continue
-            recent_close = closes[-self.ma_days:]
             static_ma = sum(closes[-self.ma_window:]) / self.ma_window
-            static_above_ma = len(recent_close) == self.ma_days and all(price > static_ma for price in recent_close)
-            above_ma = static_above_ma
+            recent_open_close = zip(opens[-self.ma_days:], closes[-self.ma_days:], strict=True)
+            above_ma = len(opens) >= self.ma_days and all(
+                open_price > static_ma or close_price > static_ma
+                for open_price, close_price in recent_open_close
+            )
 
-            # Static mode: compare the most recent 20 sessions with the single
-            # 200-session high known at the monthly as-of date. A touch counts.
+            # A touch of the static 200-session high in the recent window
+            # qualifies, so a breakout is not discarded after a short pullback.
             static_high_200 = max(highs[-self.high_window:])
-            static_trigger_indices = [index for index in range(len(highs) - self.high_days, len(highs))
-                                      if highs[index] >= static_high_200]
-            recent_trigger_indices = static_trigger_indices
+            recent_trigger_indices = [
+                index
+                for index in range(len(highs) - self.high_days, len(highs))
+                if highs[index] >= static_high_200
+            ]
             revenue_yoy = latest.get("revenue_yoy")
             net_profit = latest.get("net_profit")
             market_cap_passed = float(market_cap) > self.market_cap_min
             condition_1 = bool(market_cap_passed and revenue_yoy is not None and float(revenue_yoy) > self.revenue_yoy_min and above_ma)
-            condition_2 = bool(market_cap_passed and net_profit is not None and float(net_profit) > 0 and recent_trigger_indices)
+            condition_2 = bool(
+                market_cap_passed
+                and net_profit is not None
+                and float(net_profit) > self.net_profit_min
+                and recent_trigger_indices
+            )
             if not (condition_1 or condition_2):
                 continue
             trigger_date = ordered["date"][recent_trigger_indices[-1]].isoformat() if recent_trigger_indices else None

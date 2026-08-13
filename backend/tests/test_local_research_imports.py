@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import date
 
 import polars as pl
 import pytest
@@ -8,7 +9,6 @@ import pytest
 from app.services.local_daily_pro_import import LocalDailyProCsvImporter
 from app.services.local_daily_xbx_import import LocalDailyXbxCsvImporter
 from app.services.local_financial_import import LocalFinancialCsvImporter
-
 
 DAILY_HEADER = "ts_code,trade_date,open,high,low,close,pre_close,change,pct_chg,vol,amount,total_mv,circ_mv,turnover_rate,volume_ratio,pe,pb,total_share,float_share,free_share\n"
 
@@ -29,10 +29,10 @@ def test_daily_pro_import_preserves_fields_normalises_units_and_rebuilds_partiti
     importer = LocalDailyProCsvImporter(source, tmp_path / "data", years=[2025], batch_size=1)
     preview = importer.run(dry_run=True)
     assert preview.status == "preview"
-    assert not (tmp_path / "data" / "kline_daily_pro").exists()
+    assert not (tmp_path / "data" / "kline_daily_tushare").exists()
 
     summary = importer.run()
-    output = tmp_path / "data" / "kline_daily_pro" / "date=2025-01-02" / "part.parquet"
+    output = tmp_path / "data" / "kline_daily_tushare" / "date=2025-01-02" / "part.parquet"
     frame = pl.read_parquet(output)
     assert summary.partitions_rebuilt == 1
     assert frame["symbol"].to_list() == ["000001.SZ"]
@@ -44,7 +44,7 @@ def test_daily_pro_import_preserves_fields_normalises_units_and_rebuilds_partiti
     _daily_csv(file, close="12.0")
     importer.run()
     assert pl.read_parquet(output)["close"].to_list() == [12.0]
-    metadata = json.loads((tmp_path / "data" / "kline_daily_pro" / "_metadata.json").read_text("utf-8"))
+    metadata = json.loads((tmp_path / "data" / "kline_daily_tushare" / "_metadata.json").read_text("utf-8"))
     assert metadata["units"]["total_mv"] == "CNY (normalised from source ten-thousand CNY x10000)"
 
 
@@ -59,8 +59,26 @@ def test_daily_pro_import_accepts_compact_tushare_daily_csv_and_converts_market_
 
     LocalDailyProCsvImporter(source, tmp_path / "data", years=[2026], batch_size=1).run()
 
-    daily = pl.read_parquet(tmp_path / "data" / "kline_daily_pro" / "date=2026-01-05" / "part.parquet")
+    daily = pl.read_parquet(tmp_path / "data" / "kline_daily_tushare" / "date=2026-01-05" / "part.parquet")
     assert daily["total_mv"].to_list() == pytest.approx([223_168_059_277.0])
+
+
+def test_daily_pro_import_migrates_legacy_tushare_daily_dataset(tmp_path) -> None:
+    source = tmp_path / "source"
+    (source / "2026").mkdir(parents=True)
+    _daily_csv(source / "2026" / "000001_SZ.csv")
+    legacy = tmp_path / "data" / "kline_daily_pro" / "date=2025-01-02"
+    legacy.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["000001.SZ"], "date": [date(2025, 1, 2)],
+        "open": [10.0], "high": [12.0], "low": [9.0], "close": [11.0], "pre_close": [10.0],
+        "total_mv": [10_000_000_000.0],
+    }).write_parquet(legacy / "part.parquet")
+
+    LocalDailyProCsvImporter(source, tmp_path / "data", years=[2026]).run()
+
+    assert not (tmp_path / "data" / "kline_daily_pro").exists()
+    assert (tmp_path / "data" / "kline_daily_tushare" / "date=2025-01-02" / "part.parquet").exists()
 
 
 def _financial_csv(path) -> None:

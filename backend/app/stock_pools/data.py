@@ -23,7 +23,7 @@ class DataReadiness:
     daily_imported_at: str | None = None
     financial_imported_at: str | None = None
     factor_built_at: str | None = None
-    daily_dataset: str = "kline_daily_pro"
+    daily_dataset: str = "kline_daily_tushare"
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -63,16 +63,16 @@ class StockPoolDataAdapter:
         factor_path = self.data_dir / "adj_factor_tushare"
         income_path = self._financial_path()
         if not daily_path.exists() or not any(daily_path.rglob("*.parquet")):
-            return DataReadiness(month, None, False, ("缺少专业日K数据（kline_daily_pro）",), ())
+            return DataReadiness(month, None, False, ("缺少本地 Tushare 日K数据",), ())
         daily_scan = pl.scan_parquet(str(daily_path / "**" / "*.parquet"))
         try:
             daily_columns = set(daily_scan.collect_schema().names())
         except Exception:  # noqa: BLE001
-            return DataReadiness(month, None, False, ("无法读取专业日K Parquet 数据",), ())
+            return DataReadiness(month, None, False, ("无法读取本地 Tushare 日K数据",), ())
         required_daily = {"symbol", "date", "high", "close", "total_mv"}
         if not required_daily.issubset(daily_columns):
             missing_columns = ", ".join(sorted(required_daily - daily_columns))
-            return DataReadiness(month, None, False, (f"专业日K缺少字段: {missing_columns}",), ())
+            return DataReadiness(month, None, False, (f"本地 Tushare 日K缺少字段: {missing_columns}",), ())
         dates = (
             daily_scan
             .select(pl.col("date").cast(pl.Date).alias("date"))
@@ -83,7 +83,7 @@ class StockPoolDataAdapter:
         )
         target_dates = [item for item in dates if item >= first_of_month]
         if not target_dates:
-            return DataReadiness(month, None, False, ("目标月份没有专业日K交易日",), ())
+            return DataReadiness(month, None, False, ("目标月份没有本地 Tushare 日K交易日",), ())
         first_trade_date = target_dates[0]
         prior_dates = [item for item in dates if item < first_trade_date]
         as_of_date = prior_dates[-1] if prior_dates else None
@@ -101,14 +101,14 @@ class StockPoolDataAdapter:
         ):
             missing.append("月初前一交易日缺少历史总市值（total_mv）")
         if not factor_path.exists() or not any(factor_path.rglob("*.parquet")):
-            missing.append("缺少本地 XBX 复权因子，请先运行 build_local_adj_factor_xbx")
+            missing.append("缺少本地 Tushare 复权因子，请先导入 Tushare 日K并构建复权因子")
         elif as_of_date is not None:
             try:
                 factor_scan = pl.scan_parquet(str(factor_path / "**" / "*.parquet"))
                 factor_columns = set(factor_scan.collect_schema().names())
                 required_factor = {"symbol", "trade_date", "cum_factor", "quality_status"}
                 if not required_factor.issubset(factor_columns):
-                    missing.append("本地 XBX 复权因子字段不完整，请重新构建")
+                    missing.append("本地 Tushare 复权因子字段不完整，请重新导入日K")
                 else:
                     daily_at_reference = daily_scan.filter(
                         pl.col("date").cast(pl.Date) == as_of_date
@@ -118,9 +118,9 @@ class StockPoolDataAdapter:
                         & (pl.col("quality_status") == "ok")
                     ).select(pl.col("symbol").n_unique()).collect().item()
                     if at_reference < daily_at_reference:
-                        missing.append("本地 XBX 复权因子未完整覆盖月初前一交易日")
+                        missing.append("本地 Tushare 复权因子未完整覆盖月初前一交易日")
             except Exception:  # noqa: BLE001
-                missing.append("无法读取本地 XBX 复权因子")
+                missing.append("无法读取本地 Tushare 复权因子")
         if not income_path.exists():
             missing.append("缺少标准化财务利润表数据")
         else:
@@ -141,7 +141,7 @@ class StockPoolDataAdapter:
         return DataReadiness(
             month, as_of_date, not missing, tuple(missing), (), daily_days,
             self._manifest_value(
-                "local_daily_pro_import.json" if daily_dataset == "kline_daily_pro" else "tushare_daily_import.json",
+                "local_daily_pro_import.json",
                 "imported_at",
             ),
             self._manifest_value("tushare_financial_import.json", "imported_at"),
@@ -157,9 +157,10 @@ class StockPoolDataAdapter:
         daily_columns = set(daily_scan.collect_schema().names())
         name = pl.col("name").cast(pl.Utf8) if "name" in daily_columns else pl.col("symbol").cast(pl.Utf8)
         is_st = pl.col("is_st") if "is_st" in daily_columns else pl.lit(False)
+        open_price = pl.col("open") if "open" in daily_columns else pl.col("close").alias("open")
         raw_daily = (
             daily_scan
-            .select(pl.col("symbol").cast(pl.Utf8), name.alias("name"), is_st.alias("is_st"), "date", "high", "close", "total_mv")
+            .select(pl.col("symbol").cast(pl.Utf8), name.alias("name"), is_st.alias("is_st"), "date", open_price, "high", "close", "total_mv")
             .with_columns(pl.col("date").cast(pl.Date))
             .filter(pl.col("date") <= readiness.as_of_date)
             .sort(["symbol", "date"])
@@ -168,7 +169,7 @@ class StockPoolDataAdapter:
             .sort(["symbol", "date"])
             .collect()
         )
-        # Full-history XBX also keeps delisted securities.  The strategy
+        # Local Tushare history also keeps delisted securities.  The strategy
         # excludes symbols without an as-of bar, so remove them before the qfq
         # projection instead of requiring a factor at a date they no longer
         # traded.
@@ -182,15 +183,17 @@ class StockPoolDataAdapter:
             dataset="adj_factor_tushare",
         )
         try:
-            daily = project_to_reference(raw_daily, factors, readiness.as_of_date, price_columns=("high", "close"))
+            daily = project_to_reference(raw_daily, factors, readiness.as_of_date, price_columns=("open", "high", "close"))
         except AdjustmentDataError as exc:
             raise ValueError(f"股票池前复权价格不可用: {exc}") from exc
         daily = daily.with_columns(
+            pl.col("open").alias("raw_open"),
             pl.col("close").alias("raw_close"),
             pl.col("high").alias("raw_high"),
+            pl.col("signal_open").alias("open"),
             pl.col("signal_close").alias("close"),
             pl.col("signal_high").alias("high"),
-        ).drop(["signal_close", "signal_high"])
+        ).drop(["signal_open", "signal_close", "signal_high"])
         income = pl.read_parquet(self._financial_path())
         instruments = raw_daily.group_by("symbol").agg(pl.col("date").min().alias("listing_date"))
         financials = self._normalise_financials(income)
@@ -207,12 +210,18 @@ class StockPoolDataAdapter:
     def _normalise_financials(df: pl.DataFrame) -> pl.DataFrame:
         period = "period_end" if "period_end" in df.columns else "report_date"
         publish = "announce_date" if "announce_date" in df.columns else "publish_date"
+        revenue_yoy = (
+            pl.col("revenue_yoy").cast(pl.Float64, strict=False)
+            if "revenue_yoy" in df.columns
+            else pl.lit(None, dtype=pl.Float64)
+        )
         normalized = df.select(
             pl.col("symbol").cast(pl.Utf8),
             pl.col(period).cast(pl.Date, strict=False).alias("report_date"),
             pl.col(publish).cast(pl.Date, strict=False).alias("publish_date"),
             pl.col("revenue").cast(pl.Float64, strict=False),
             pl.col("net_income").cast(pl.Float64, strict=False).alias("net_profit"),
+            revenue_yoy.alias("revenue_yoy"),
         ).drop_nulls(["symbol", "report_date", "publish_date"])
         rows: list[dict[str, object]] = []
         for frame in normalized.partition_by("symbol", maintain_order=False):
@@ -221,11 +230,13 @@ class StockPoolDataAdapter:
                 prior = by_report.get(date(row["report_date"].year - 1, row["report_date"].month, row["report_date"].day))
                 revenue = row.get("revenue")
                 prior_revenue = prior.get("revenue") if prior else None
-                row["revenue_yoy"] = (
+                calculated_revenue_yoy = (
                     float(revenue) / float(prior_revenue) - 1
                     if revenue is not None and prior_revenue is not None and float(prior_revenue) != 0
                     else None
                 )
+                if row.get("revenue_yoy") is None:
+                    row["revenue_yoy"] = calculated_revenue_yoy
                 rows.append(row)
         return pl.DataFrame(rows, schema={
             "symbol": pl.Utf8, "report_date": pl.Date, "publish_date": pl.Date,
@@ -240,11 +251,11 @@ class StockPoolDataAdapter:
             return None
 
     def _daily_dataset(self) -> tuple[str, Path]:
-        for dataset in ("kline_daily_pro", "kline_daily_tushare", "kline_daily_xbx"):
+        for dataset in ("kline_daily_tushare", "kline_daily_pro"):
             path = self.data_dir / dataset
             if path.exists() and any(path.rglob("*.parquet")):
                 return dataset, path
-        return "kline_daily_pro", self.data_dir / "kline_daily_pro"
+        return "kline_daily_tushare", self.data_dir / "kline_daily_tushare"
 
     def _financial_path(self) -> Path:
         for path in (

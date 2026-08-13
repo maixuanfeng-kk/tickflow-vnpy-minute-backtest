@@ -24,6 +24,20 @@ import { StrategyNavChart } from './charts/StrategyNavChart'
 import { ReturnDistributionChart } from './charts/ReturnDistributionChart'
 import { TradeKlineModal } from './components/TradeKlineModal'
 import { SignalTriggerActions } from '@/components/signals/SignalTriggerActions'
+import {
+  Etf159915DataReadiness,
+  Etf159915ExecutionTrace,
+  Etf159915RuleSummary,
+} from './strategy-extensions/Etf159915BacktestExtension'
+import { isEtf159915RunBlocked } from './strategy-extensions/etf159915'
+import {
+  canRunBacktest,
+  is159915Strategy,
+  normalizeBacktestSymbols,
+  resolveBacktestSymbols,
+  symbolsFromPoolEntries,
+  type BacktestPoolSource,
+} from '@/lib/backtest-pools'
 
 const formatDate = (date: Date) => date.toISOString().slice(0, 10)
 const monthsAgo = (months: number) => {
@@ -509,7 +523,15 @@ function parseBulkPoolSymbols(raw: string): { symbols: string[]; invalid: number
   return { symbols: [...seen], invalid }
 }
 
-function StockPoolPicker({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+function StockPoolPicker({
+  value,
+  onChange,
+  onPoolStateChange,
+}: {
+  value: string
+  onChange: (value: string) => void
+  onPoolStateChange?: (state: { source: BacktestPoolSource; poolKey: string | null; symbols: string[] }) => void
+}) {
   const symbols = useMemo(() => value.split(',').map(s => s.trim()).filter(Boolean), [value])
   const [query, setQuery] = useState('')
   const [open, setOpen] = useState(false)
@@ -518,7 +540,14 @@ function StockPoolPicker({ value, onChange }: { value: string; onChange: (value:
   const [bulkMessage, setBulkMessage] = useState<string | null>(null)
   const [showAllSymbols, setShowAllSymbols] = useState(false)
   const [symbolNames, setSymbolNames] = useState<Record<string, string>>({})
+  const [poolSource, setPoolSource] = useState<BacktestPoolSource>('manual')
+  const [selectedPoolKey, setSelectedPoolKey] = useState<string | null>(null)
   const ref = useRef<HTMLDivElement>(null)
+  const pools = useQuery({
+    queryKey: QK.watchlistPools,
+    queryFn: api.watchlistPools,
+    staleTime: 30_000,
+  })
   const search = useQuery({
     queryKey: QK.instrumentSearch(query),
     queryFn: () => api.instrumentSearch(query),
@@ -552,21 +581,27 @@ function StockPoolPicker({ value, onChange }: { value: string; onChange: (value:
     return () => document.removeEventListener('mousedown', onClick)
   }, [])
 
-  const setSymbols = (next: string[]) => onChange(Array.from(new Set(next)).join(','))
+  const setManualSymbols = (next: string[]) => {
+    setPoolSource('manual')
+    setSelectedPoolKey(null)
+    const normalized = normalizeBacktestSymbols(next)
+    onChange(normalized.join(','))
+    onPoolStateChange?.({ source: 'manual', poolKey: null, symbols: normalized })
+  }
   const addSymbol = (symbol: string, name?: string | null) => {
     if (name) setSymbolNames(prev => ({ ...prev, [symbol]: name }))
-    setSymbols([...symbols, symbol])
+    setManualSymbols([...symbols, symbol])
     setQuery('')
     setOpen(false)
   }
-  const removeSymbol = (symbol: string) => setSymbols(symbols.filter(s => s !== symbol))
+  const removeSymbol = (symbol: string) => setManualSymbols(symbols.filter(s => s !== symbol))
   const applyBulkPool = () => {
     const parsed = parseBulkPoolSymbols(bulkText)
     if (parsed.symbols.length === 0) {
       setBulkMessage('未识别到有效股票代码。')
       return
     }
-    setSymbols(parsed.symbols)
+    setManualSymbols(parsed.symbols)
     setBulkMessage(`已导入 ${parsed.symbols.length} 只${parsed.invalid ? `；跳过 ${parsed.invalid} 项` : ''}`)
     setShowAllSymbols(false)
   }
@@ -579,12 +614,55 @@ function StockPoolPicker({ value, onChange }: { value: string; onChange: (value:
       entries.forEach(e => { if (e.name) next[e.symbol] = e.name })
       return next
     })
-    setSymbols([...symbols, ...entries.map(e => e.symbol)])
+    setManualSymbols([...symbols, ...entries.map(e => e.symbol)])
   }
   const watchlistCount = watchlist.data?.symbols?.length ?? 0
+  const selectedPoolQuery = useQuery({
+    queryKey: QK.watchlist(selectedPoolKey ?? undefined, selectedPoolKey === 'all' ? 'all' : undefined),
+    queryFn: () => selectedPoolKey === 'all' ? api.watchlistList(undefined, 'all') : api.watchlistList(selectedPoolKey ?? undefined),
+    enabled: poolSource === 'pool' && selectedPoolKey !== null,
+    staleTime: 30_000,
+  })
+  const selectedPoolSymbols = useMemo(
+    () => symbolsFromPoolEntries(selectedPoolQuery.data?.symbols ?? []),
+    [selectedPoolQuery.data?.symbols],
+  )
+
+  useEffect(() => {
+    if (poolSource !== 'pool' || selectedPoolKey === null || !selectedPoolQuery.data) return
+    onChange(selectedPoolSymbols.join(','))
+    onPoolStateChange?.({ source: 'pool', poolKey: selectedPoolKey, symbols: selectedPoolSymbols })
+  }, [onChange, onPoolStateChange, poolSource, selectedPoolKey, selectedPoolQuery.data, selectedPoolSymbols])
+
+  const selectPool = (poolKey: string | null) => {
+    setPoolSource(poolKey === null ? 'manual' : 'pool')
+    setSelectedPoolKey(poolKey)
+    if (poolKey === null) {
+      onPoolStateChange?.({ source: 'manual', poolKey: null, symbols: normalizeBacktestSymbols(symbols) })
+    } else {
+      onPoolStateChange?.({ source: 'pool', poolKey, symbols: [] })
+    }
+  }
 
   return (
     <div className="space-y-2" ref={ref}>
+      <div className="flex flex-wrap items-center gap-1.5 rounded-input border border-border/70 bg-surface/50 p-1.5">
+        <span className="px-1 text-[10px] font-medium uppercase tracking-wide text-muted">股票池</span>
+        <button type="button" onClick={() => selectPool(null)} className={`rounded-input px-2 py-1 text-[11px] transition-colors ${poolSource === 'manual' ? 'bg-accent/15 text-accent' : 'text-secondary hover:bg-elevated'}`}>手动编辑</button>
+        <button type="button" onClick={() => selectPool('all')} className={`rounded-input px-2 py-1 text-[11px] transition-colors ${selectedPoolKey === 'all' ? 'bg-accent/15 text-accent' : 'text-secondary hover:bg-elevated'}`}>全部自选</button>
+        {pools.data?.pools.map(pool => (
+          <button key={pool.pool_key} type="button" onClick={() => selectPool(pool.pool_key)} className={`rounded-input px-2 py-1 text-[11px] transition-colors ${selectedPoolKey === pool.pool_key ? 'bg-accent/15 text-accent' : 'text-secondary hover:bg-elevated'}`}>
+            {pool.label ?? pool.month ?? '未分组'} · {pool.member_count}
+          </button>
+        ))}
+        {pools.isError && <span className="px-1 text-[10px] text-danger">自选池加载失败，可手动编辑</span>}
+      </div>
+      {poolSource === 'pool' && selectedPoolKey !== null && (
+        <div className="flex items-center justify-between rounded-input border border-accent/20 bg-accent/5 px-2 py-1.5 text-[11px]">
+          <span className="text-secondary">{selectedPoolQuery.isLoading ? '正在加载股票池…' : selectedPoolSymbols.length ? `已选择 ${selectedPoolSymbols.length} 只股票` : '所选自选池为空'}</span>
+          <span className="font-mono text-accent">{selectedPoolKey === 'all' ? 'all' : selectedPoolKey}</span>
+        </div>
+      )}
       <div className="flex items-center gap-2">
         <div className="relative flex-1">
           <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" />
@@ -643,7 +721,7 @@ function StockPoolPicker({ value, onChange }: { value: string; onChange: (value:
           </button>
           <button
             type="button"
-            onClick={() => setSymbols([])}
+            onClick={() => setManualSymbols([])}
             disabled={symbols.length === 0}
             className="inline-flex items-center gap-1 whitespace-nowrap rounded-input border border-border bg-surface px-2 py-1.5 text-[11px] text-secondary transition-colors hover:border-danger/50 hover:text-danger disabled:cursor-not-allowed disabled:opacity-50"
             title="清空回测范围"
@@ -699,8 +777,12 @@ export function StrategyBacktest() {
   const [selectedStrategy, setSelectedStrategy] = useState<string | null>(saved?.selectedStrategy ?? null)
   const [strategyGroup, setStrategyGroup] = useState<StrategyGroup>('all')
   const [symbols, setSymbols] = useState(saved?.symbols ?? '')
+  const [poolSource, setPoolSource] = useState<BacktestPoolSource>('manual')
+  const [poolSymbols, setPoolSymbols] = useState<string[]>([])
   const [start, setStart] = useState(saved?.start ?? THREE_MONTHS_AGO)
   const [end, setEnd] = useState(saved?.end ?? TODAY)
+  const [startTime, setStartTime] = useState(saved?.startTime ?? '09:30')
+  const [endTime, setEndTime] = useState(saved?.endTime ?? '15:00')
   // 成交口径: 建仓/清仓可独立配置。向后兼容老 matching (派生为 entry=exit=matching)。
   const [matching] = useState<'close_t' | 'open_t+1'>(saved?.matching ?? 'open_t+1')
   const [entryFill, setEntryFill] = useState<'close_t' | 'open_t+1'>(saved?.entryFill ?? saved?.matching ?? 'open_t+1')
@@ -725,8 +807,8 @@ export function StrategyBacktest() {
   // but is no longer reachable from the UI.
   const highGranularity = true
   const [vnpyStrategyId, setVnpyStrategyId] = useState('opening_breakout_pool')
+  const etf159915Strategy = is159915Strategy(vnpyStrategyId)
   const [vnpyParams, setVnpyParams] = useState<Record<string, unknown>>(VNPY_PORTFOLIO_DEFAULT_PARAMS)
-  const [vnpyPoolOpen, setVnpyPoolOpen] = useState(false)
   const [rangeSettingsOpen, setRangeSettingsOpen] = useState(false)
   const [quickRanges, setQuickRanges] = useState(loadQuickRanges)
   const [settingsTab, setSettingsTab] = useState<AdvancedSettingsTab>('params')
@@ -738,7 +820,7 @@ export function StrategyBacktest() {
   // 跨会话/拉新代码后自动渲染一个可能对应已失效策略的旧结果会造成困惑
   // (切页不卸载组件,内存中的 result 仍保留,无需靠 localStorage 恢复)。
   const [result, setResult] = useState<StrategyBacktestResult | null>(null)
-  const [resultTab, setResultTab] = useState<'daily' | 'trades' | 'signals' | 'positions'>('daily')
+  const [resultTab, setResultTab] = useState<'daily' | 'trades' | 'signals' | 'positions' | 'execution'>('daily')
   const [dailyPage, setDailyPage] = useState(0)
   const [tradePage, setTradePage] = useState(0)
   const [tradePageSize, setTradePageSize] = useState(10)
@@ -788,6 +870,14 @@ export function StrategyBacktest() {
     () => vnpyStrategies.data?.strategies.find(item => item.id === vnpyStrategyId),
     [vnpyStrategies.data, vnpyStrategyId],
   )
+  const etfReadiness = useQuery({
+    queryKey: ['vnpy-readiness', vnpyStrategyId, '159915.SZ', start, end, startTime, endTime],
+    queryFn: () => api.vnpyReadiness(vnpyStrategyId, ['159915.SZ'], start, end, startTime, endTime),
+    enabled: etf159915Strategy && Boolean(
+      start && end && startTime && endTime && start <= end && (start !== end || startTime <= endTime),
+    ),
+    retry: false,
+  })
   const earliestDate = dataStatus.data?.daily?.earliest_date ?? null
   const hasLocalMinuteData = !!dataStatus.data?.minute?.trading_days
 
@@ -805,6 +895,20 @@ export function StrategyBacktest() {
       ...Object.fromEntries(vnpyStrategy.parameters.map(param => [param.name, param.default])),
     })
   }, [vnpyStrategyId, vnpyStrategy])
+
+  useEffect(() => {
+    if (!etf159915Strategy) return
+    setSymbols('159915.SZ')
+    setPoolSource('manual')
+    setPoolSymbols([])
+    setSignalPriceBasis('raw')
+    setMaxPositions('1')
+    setPositionSizing('equal')
+    setVolumeLimitEnabled(false)
+    setStampTax('0')
+    setStartTime('09:30')
+    setEndTime('15:00')
+  }, [etf159915Strategy])
 
   const resetConfigFromDetail = (detail: StrategyDetail) => {
     setStrategyParams(strategyDefaultParams(detail))
@@ -842,6 +946,8 @@ export function StrategyBacktest() {
         symbols,
         start,
         end,
+        startTime,
+        endTime,
         matching,
         entryFill,
         exitFill,
@@ -864,23 +970,37 @@ export function StrategyBacktest() {
   }, [backtestTask])
 
   const handleRun = () => {
+    const requestSymbols = etf159915Strategy ? ['159915.SZ'] : resolveBacktestSymbols({
+      source: poolSource,
+      poolSymbols,
+      manualSymbols: symbols.split(','),
+    })
+    if (
+      requestSymbols.length === 0
+      || !startTime
+      || !endTime
+      || (start === end && startTime > endTime)
+      || (etf159915Strategy && isEtf159915RunBlocked(etfReadiness))
+    ) return
     startBacktest({
       strategy_id: vnpyStrategyId,
-      symbols: symbols ? symbols.split(',').map(s => s.trim()).filter(Boolean) : null,
+      symbols: requestSymbols,
       start: start || null,
       end: end || undefined,
+      start_time: startTime,
+      end_time: endTime,
       matching,
       entry_fill: entryFill,
       exit_fill: exitFill,
       commission_pct: Number(fees) / 10000,
-      stamp_tax_pct: Number(stampTax) / 1000,
+      stamp_tax_pct: etf159915Strategy ? 0 : Number(stampTax) / 1000,
       slippage_bps: Number(slippage),
-      max_positions: Number(maxPositions),
+      max_positions: etf159915Strategy ? 1 : Number(maxPositions),
       max_exposure_pct: Number(maxExposure) / 100,
       initial_capital: Number(initialCapital),
-      position_sizing: positionSizing,
-      volume_limit_enabled: volumeLimitEnabled,
-      signal_price_basis: signalPriceBasis,
+      position_sizing: etf159915Strategy ? 'equal' : positionSizing,
+      volume_limit_enabled: etf159915Strategy ? false : volumeLimitEnabled,
+      signal_price_basis: etf159915Strategy ? 'raw' : signalPriceBasis,
       params: vnpyParams,
       overrides: {},
       mode: simMode,
@@ -888,6 +1008,20 @@ export function StrategyBacktest() {
       engine: 'vnpy',
     })
   }
+  const requestSymbols = resolveBacktestSymbols({
+    source: poolSource,
+    poolSymbols,
+    manualSymbols: symbols.split(','),
+  })
+  const hasRunnableSymbols = canRunBacktest({
+    source: poolSource,
+    poolSymbols,
+    manualSymbols: symbols.split(','),
+  })
+  const etfReadinessBlocked = etf159915Strategy && isEtf159915RunBlocked(etfReadiness)
+  const invalidMinuteRange = !startTime || !endTime || (start === end && startTime > endTime)
+  const canRunVnpy = hasRunnableSymbols && !etfReadinessBlocked && !invalidMinuteRange
+  const isEtfResult = result?.strategy_info?.id === 'etf_159915_minute'
 
   // 提取统计
   const s = result?.stats
@@ -1088,7 +1222,7 @@ export function StrategyBacktest() {
     : '选择策略后可调整参数 / 过滤 / 买卖触发器 / 评分 / 风控'
   const selectedStrategyName = detail?.name ?? strategyList.find(st => st.id === selectedStrategy)?.name ?? '未选择策略'
   const selectedStrategySource = detail?.source ?? strategyList.find(st => st.id === selectedStrategy)?.source
-  const stockPoolCount = symbols.split(',').map(s => s.trim()).filter(Boolean).length
+  const stockPoolCount = requestSymbols.length
   const stockPoolSummary = stockPoolCount > 0 ? `股票池 已限定 ${stockPoolCount} 只` : '股票池 全市场'
   const resultStartDate = result?.config?.start ?? result?.equity_curve?.[0]?.date ?? start
   const resultEndDate = result?.config?.end ?? result?.equity_curve?.[result.equity_curve.length - 1]?.date ?? end
@@ -1111,6 +1245,20 @@ export function StrategyBacktest() {
     <div className="h-full min-h-0 overflow-hidden rounded-card border border-border bg-surface/80 grid grid-cols-1 xl:grid-cols-[18rem_minmax(0,1fr)]">
       {/* 配置面板 */}
       <section className="space-y-3 border-b xl:border-b-0 xl:border-r border-border bg-base/25 px-3 py-3 xl:overflow-y-auto">
+        {highGranularity && (
+          <div className="rounded-btn border border-accent/25 bg-accent/5 p-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <div className="text-xs font-semibold text-foreground">股票池</div>
+                <div className="mt-0.5 text-[10px] text-muted">从自选分组选择，或手动编辑回测标的</div>
+              </div>
+              <span className="rounded-full border border-accent/25 bg-accent/10 px-2 py-0.5 text-[10px] font-medium text-accent">
+                {poolSource === 'pool' ? `已选 ${poolSymbols.length} 只` : `手动 ${requestSymbols.length} 只`}
+              </span>
+            </div>
+            <div className="mt-2"><StockPoolPicker value={symbols} onChange={setSymbols} onPoolStateChange={state => { setPoolSource(state.source); setPoolSymbols(state.symbols) }} /></div>
+          </div>
+        )}
         <div>
           <div className="mb-1.5">
             <label className="text-xs font-medium text-secondary">vn.py 分钟策略</label>
@@ -1137,14 +1285,6 @@ export function StrategyBacktest() {
                   </select>
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={() => setVnpyPoolOpen(value => !value)}
-                className="mt-2 rounded border border-amber-400/30 bg-base px-2 py-1 text-[10px] text-amber-200 hover:bg-elevated"
-              >
-                股票池：{stockPoolCount || 0} 只 · {vnpyPoolOpen ? '收起' : '编辑'}
-              </button>
-              {vnpyPoolOpen && <div className="mt-2 border-t border-amber-400/20 pt-2"><StockPoolPicker value={symbols} onChange={setSymbols} /></div>}
               {(vnpyStrategy?.parameters.length ?? 0) > 0 && (
                 <div className="mt-2 grid grid-cols-2 gap-2 border-t border-amber-400/20 pt-2">
                   {vnpyStrategy!.parameters.map(param => (
@@ -1247,27 +1387,54 @@ export function StrategyBacktest() {
           <div className="mt-2 grid grid-cols-2 gap-2">
             <div>
               <label className="text-[11px] text-secondary block mb-1">开始</label>
-              <DatePicker
-                value={start}
-                onChange={setStart}
-                max={end || undefined}
-                placeholder="全部历史"
-                className="w-full"
-                buttonClassName="w-full justify-start"
-                align="left"
-              />
+              <div className="grid grid-cols-[minmax(0,1fr)_5.5rem] gap-1.5">
+                <DatePicker
+                  value={start}
+                  onChange={setStart}
+                  max={end || undefined}
+                  placeholder="全部历史"
+                  className="min-w-0"
+                  buttonClassName="w-full justify-start"
+                  align="left"
+                />
+                <input
+                  type="time"
+                  step={60}
+                  value={startTime}
+                  onChange={event => setStartTime(event.target.value)}
+                  aria-label="开始时间"
+                  disabled={etf159915Strategy}
+                  className="min-w-0 rounded-input border border-border bg-base px-2 py-1.5 text-xs text-foreground outline-none transition-colors focus:border-accent"
+                />
+              </div>
             </div>
             <div>
               <label className="text-[11px] text-secondary block mb-1">结束</label>
-              <DatePicker
-                value={end}
-                onChange={setEnd}
-                min={start || undefined}
-                className="w-full"
-                buttonClassName="w-full justify-start"
-              />
+              <div className="grid grid-cols-[minmax(0,1fr)_5.5rem] gap-1.5">
+                <DatePicker
+                  value={end}
+                  onChange={setEnd}
+                  min={start || undefined}
+                  className="min-w-0"
+                  buttonClassName="w-full justify-start"
+                />
+                <input
+                  type="time"
+                  step={60}
+                  value={endTime}
+                  onChange={event => setEndTime(event.target.value)}
+                  aria-label="结束时间"
+                  disabled={etf159915Strategy}
+                  className="min-w-0 rounded-input border border-border bg-base px-2 py-1.5 text-xs text-foreground outline-none transition-colors focus:border-accent"
+                />
+              </div>
             </div>
           </div>
+          {invalidMinuteRange && (
+            <p className="mt-1.5 text-[11px] text-danger">
+              {!startTime || !endTime ? '请选择开始和结束时间' : '同一天的开始时间不能晚于结束时间'}
+            </p>
+          )}
 
           <div className="mt-2 flex items-center gap-1">
             <div className="flex min-w-0 flex-1 rounded-input bg-base/60 p-0.5">
@@ -1343,24 +1510,6 @@ export function StrategyBacktest() {
           )}
         </div>
 
-        <div className="grid grid-cols-2 gap-2">
-          <div>
-            <label className="text-xs font-medium text-secondary block mb-1.5">建仓口径</label>
-            <select value={entryFill} onChange={e => setEntryFill(e.target.value as any)} className={INPUT_CLS}>
-              <option value="open_t+1">次日开盘成交（推荐）</option>
-              <option value="close_t">信号日收盘成交</option>
-            </select>
-          </div>
-          <div>
-            <label className="text-xs font-medium text-secondary block mb-1.5">清仓口径</label>
-            <select value={exitFill} onChange={e => setExitFill(e.target.value as any)} className={INPUT_CLS}>
-              <option value="close_t">到期/信号日收盘成交（推荐）</option>
-              <option value="open_t+1">次日开盘成交</option>
-            </select>
-          </div>
-        </div>
-        <div className="mt-1 text-[10px] leading-4 text-muted">建仓默认次日开盘（避免未来函数），清仓默认当日收盘（持仓中可盘中/收盘卖）；买卖点由策略触发器决定，这里只决定成交价。</div>
-
         {simMode === 'position' && (
         <div className="grid grid-cols-2 gap-2">
           <div>
@@ -1377,7 +1526,7 @@ export function StrategyBacktest() {
           </div>
           <div>
             <label className="text-xs font-medium text-secondary block mb-1.5">最大持仓数</label>
-            <input type="number" value={maxPositions} onChange={e => setMaxPositions(e.target.value)}
+            <input type="number" value={etf159915Strategy ? '1' : maxPositions} onChange={e => setMaxPositions(e.target.value)} disabled={etf159915Strategy}
               className={INPUT_CLS} />
           </div>
           <div>
@@ -1385,52 +1534,21 @@ export function StrategyBacktest() {
             <input type="number" min={0} max={100} value={maxExposure} onChange={e => setMaxExposure(e.target.value)}
               className={INPUT_CLS} />
           </div>
-          <div>
-            <label className="text-xs font-medium text-secondary block mb-1.5">佣金(万分之)</label>
-            <input type="number" min={0} value={fees} onChange={e => setFees(e.target.value)} className={INPUT_CLS} />
-          </div>
-          <div>
-            <label className="text-xs font-medium text-secondary block mb-1.5">印花税(千分之)</label>
-            <input type="number" min={0} value={stampTax} onChange={e => setStampTax(e.target.value)} className={INPUT_CLS} />
-          </div>
-          <div>
-            <label className="text-xs font-medium text-secondary block mb-1.5">滑点(万分之)</label>
-            <input type="number" min={0} value={slippage} onChange={e => setSlippage(e.target.value)} className={INPUT_CLS} />
-          </div>
-          {highGranularity && (
-            <div className="col-span-2 flex items-center justify-between rounded-btn border border-border bg-base px-3 py-2.5">
-              <div>
-                <div className="text-xs font-medium text-secondary">单分钟成交量10%限制</div>
-                <div className="mt-0.5 text-[10px] leading-4 text-muted">
-                  开启后每只股票每分钟最多成交该分钟成交量的10%；关闭后不限制成交量。
-                </div>
-              </div>
-              <button
-                type="button"
-                aria-pressed={volumeLimitEnabled}
-                onClick={() => setVolumeLimitEnabled(value => !value)}
-                className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${
-                  volumeLimitEnabled ? 'bg-accent' : 'bg-elevated'
-                }`}
-              >
-                <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${
-                  volumeLimitEnabled ? 'translate-x-[18px]' : 'translate-x-0.5'
-                }`} />
-              </button>
-            </div>
-          )}
-        {highGranularity && (
-          <div className="col-span-2 rounded-btn border border-border bg-base p-2.5">
-            <label className="text-xs font-medium text-secondary block mb-1.5">技术信号价格</label>
-            <select value={signalPriceBasis} onChange={e => setSignalPriceBasis(e.target.value as 'qfq' | 'raw')} className={INPUT_CLS}>
-              <option value="qfq">前复权（推荐）</option>
-              <option value="raw">不复权（与旧结果对照）</option>
-            </select>
-            <p className="mt-1 text-[10px] leading-4 text-muted">仅影响昨日高点、跨日涨幅和动态均线等信号；分钟 K 撮合、成交量、资金和成交价格始终使用原始价格。</p>
-          </div>
-        )}
         </div>
         )}
+        <details className="rounded-btn border border-border bg-base/40">
+          <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-secondary marker:text-accent">高级成交与费用设置</summary>
+          <div className="space-y-3 border-t border-border/70 p-3">
+            <div className="grid grid-cols-2 gap-2">
+              <div><label className="mb-1.5 block text-xs font-medium text-secondary">建仓口径</label><select value={entryFill} onChange={e => setEntryFill(e.target.value as any)} className={INPUT_CLS}><option value="open_t+1">次日开盘</option><option value="close_t">信号日收盘</option></select></div>
+              <div><label className="mb-1.5 block text-xs font-medium text-secondary">清仓口径</label><select value={exitFill} onChange={e => setExitFill(e.target.value as any)} className={INPUT_CLS}><option value="close_t">信号日收盘</option><option value="open_t+1">次日开盘</option></select></div>
+              <div><label className="mb-1.5 block text-xs font-medium text-secondary">佣金(万分之)</label><input type="number" min={0} value={fees} onChange={e => setFees(e.target.value)} className={INPUT_CLS} /></div>
+              <div><label className="mb-1.5 block text-xs font-medium text-secondary">印花税(千分之)</label><input type="number" min={0} value={etf159915Strategy ? '0' : stampTax} onChange={e => setStampTax(e.target.value)} disabled={etf159915Strategy} className={INPUT_CLS} /></div>
+              <div className="col-span-2"><label className="mb-1.5 block text-xs font-medium text-secondary">滑点(万分之)</label><input type="number" min={0} value={slippage} onChange={e => setSlippage(e.target.value)} className={INPUT_CLS} /></div>
+            </div>
+            {highGranularity && <div className="space-y-2"><label className="block text-xs font-medium text-secondary">技术信号价格</label><select value={etf159915Strategy ? 'raw' : signalPriceBasis} onChange={e => setSignalPriceBasis(e.target.value as 'qfq' | 'raw')} disabled={etf159915Strategy} className={INPUT_CLS}><option value="qfq">前复权（推荐）</option><option value="raw">不复权（与旧结果对照）</option></select><button type="button" aria-pressed={etf159915Strategy ? false : volumeLimitEnabled} onClick={() => setVolumeLimitEnabled(value => !value)} disabled={etf159915Strategy} className={`w-full rounded-input border px-2 py-1.5 text-left text-[11px] ${volumeLimitEnabled && !etf159915Strategy ? 'border-accent/40 bg-accent/10 text-accent' : 'border-border text-secondary'}`}>单分钟成交量 10% 限制：{etf159915Strategy ? '关闭' : volumeLimitEnabled ? '开启' : '关闭'}</button></div>}
+          </div>
+        </details>
         {simMode === 'position' && (
         <div className="text-[10px] leading-4 text-muted">
           单票目标约 {Number.isFinite(targetPositionPct) ? targetPositionPct.toFixed(1) : '—'}%。最大总仓位控制资金投入；剩余现金不是新增持仓名额，只有实际卖出成功才释放持仓数。
@@ -1440,6 +1558,12 @@ export function StrategyBacktest() {
           <div className="rounded-btn border border-accent/20 bg-accent/5 px-3 py-2 text-[11px] leading-4 text-secondary">
             vn.py 组合回测会严格限制为最多 {Number(maxPositions) || 1} 只持仓。等权买入会在每个交易日开始按“可购买资金 ÷ 剩余仓位数”确定当日单仓额度，初始资金的 3% 始终保留；当天连续买入沿用该额度，只有完整卖出释放资金和仓位后才重新计算。评分加权则按策略评分分配，开盘突破策略目前以命中条件数作为评分。若同一分钟触发的买入信号超过剩余名额，先按命中条件数从多到少、再按股票代码从小到大形成候选队列；下一分钟主候选无法成交时，会在同一撮合时点继续尝试后续候选，直到填满空仓或候选耗尽。
           </div>
+        )}
+        {etf159915Strategy && (
+          <>
+            <Etf159915RuleSummary />
+            <Etf159915DataReadiness query={etfReadiness} />
+          </>
         )}
         {isPending ? (
           <button
@@ -1454,7 +1578,7 @@ export function StrategyBacktest() {
         ) : (
           <button
             onClick={handleRun}
-            disabled={vnpyStrategies.isLoading || !vnpyStrategyId}
+            disabled={vnpyStrategies.isLoading || !vnpyStrategyId || !canRunVnpy}
             className="group w-full inline-flex items-center justify-center gap-2.5 rounded-btn border border-accent/40
               bg-gradient-to-r from-accent to-blue-500 px-3 py-2.5 text-white shadow-[0_10px_24px_rgba(59,130,246,0.22)]
               transition-all duration-150 ease-smooth hover:-translate-y-0.5 hover:shadow-[0_14px_28px_rgba(59,130,246,0.28)]
@@ -1465,6 +1589,19 @@ export function StrategyBacktest() {
             </span>
             <span className="text-sm font-semibold tracking-wide">运行回测</span>
           </button>
+        )}
+        {!canRunVnpy && (
+          <p className="text-center text-[11px] text-danger">
+            {etfReadinessBlocked
+              ? '请先解决上方数据检查中的阻断问题'
+              : invalidMinuteRange
+                ? !startTime || !endTime
+                  ? '请选择开始和结束时间'
+                  : '同一天的开始时间不能晚于结束时间'
+              : poolSource === 'pool'
+                ? '所选自选池为空，无法运行回测'
+                : '请先选择或输入至少一只股票'}
+          </p>
         )}
       </section>
 
@@ -1731,7 +1868,13 @@ export function StrategyBacktest() {
             {(dailyLedger.length > 0 || result.trades.length > 0 || signalDiagnostics.length > 0 || (result.positions?.length ?? 0) > 0) && (
               <div className="rounded-card border border-border overflow-hidden">
                 <div className="flex items-center gap-1 border-b border-border px-4 pt-2">
-                  {(['daily', 'trades', 'signals', 'positions'] as const).map(t => (
+                  {([
+                    'daily',
+                    'trades',
+                    'signals',
+                    'positions',
+                    ...(isEtfResult ? ['execution' as const] : []),
+                  ] as const).map(t => (
                     <button
                       key={t}
                       onClick={() => setResultTab(t)}
@@ -1747,7 +1890,9 @@ export function StrategyBacktest() {
                           ? `交易明细 (${sortedTrades.length})`
                           : t === 'signals'
                             ? `信号诊断 (${signalDiagnostics.length})`
-                            : `期末持仓 (${result.positions?.length ?? 0})`}
+                            : t === 'positions'
+                              ? `期末持仓 (${result.positions?.length ?? 0})`
+                              : `执行追踪 (${signalDiagnostics.length})`}
                     </button>
                   ))}
                   {resultTab === 'daily' && dailyLedger.length > 0 && (
@@ -1939,6 +2084,10 @@ export function StrategyBacktest() {
                 {resultTab === 'positions' && (
                   <div className="overflow-x-auto"><table className="w-full min-w-[1040px] text-sm"><thead className="bg-elevated"><tr className="text-left text-secondary"><th className="px-4 py-2.5 font-medium">股票代码</th><th className="px-4 py-2.5 font-medium">股票名称</th><th className="px-4 py-2.5 font-medium text-right">持仓股数</th><th className="px-4 py-2.5 font-medium text-right">成本 / 收盘</th><th className="px-4 py-2.5 font-medium text-right">市值 / 仓位</th><th className="px-4 py-2.5 font-medium text-right">浮动盈亏</th><th className="px-4 py-2.5 font-medium">建仓 / 持有</th></tr></thead><tbody>{(result.positions ?? []).map(item => <tr key={item.symbol} className="border-t border-border hover:bg-elevated/50"><td className="px-4 py-2 font-mono">{item.symbol}</td><td className="px-4 py-2 font-medium">{item.name || '名称未知'}</td><td className="px-4 py-2 text-right num">{fmtShares(item.volume)}</td><td className="px-4 py-2 text-right num"><div>{fmtPrice(item.average_cost)}</div><div className="mt-0.5 text-xs text-muted">{fmtPrice(item.mark_price)}</div></td><td className="px-4 py-2 text-right num"><div>{fmtMoney(item.market_value)}</div><div className="mt-0.5 text-xs text-muted">{fmtPct(item.position_pct)}</div></td><td className={`px-4 py-2 text-right num ${priceColorClass(item.unrealized_pnl)}`}><div>{fmtSignedMoney(item.unrealized_pnl)}</div><div className="mt-0.5 text-xs">{fmtPct(item.unrealized_pnl_pct)}</div></td><td className="px-4 py-2 text-xs text-secondary"><div>{item.entry_date || '—'}</div><div className="mt-0.5">{item.holding_days} 个交易日 · {item.holding_minutes} 个有效分钟</div></td></tr>)}</tbody></table>{!(result.positions?.length) && <div className="p-8 text-center text-sm text-muted">回测结束时没有未平仓持仓。</div>}</div>
                 )}
+
+                {resultTab === 'execution' && isEtfResult && (
+                  <Etf159915ExecutionTrace result={result} />
+                )}
               </div>
             )}
 
@@ -2013,7 +2162,14 @@ export function StrategyBacktest() {
 
               {settingsTab === 'range' && (
                 <ConfigSection title="回测范围">
-                  <StockPoolPicker value={symbols} onChange={setSymbols} />
+                  <StockPoolPicker
+                    value={symbols}
+                    onChange={setSymbols}
+                    onPoolStateChange={state => {
+                      setPoolSource(state.source)
+                      setPoolSymbols(state.symbols)
+                    }}
+                  />
                   <div className="text-[11px] leading-5 text-muted">默认全市场回测，由基础过滤、策略条件和买卖触发器筛选；需要单票调试或自选池回测时再限定股票池。</div>
                 </ConfigSection>
               )}

@@ -111,6 +111,7 @@ class Settings(BaseSettings):
 
     # Only read by the server-side import command; never exposed through Web APIs.
     local_minute_csv_dir: Path | None = None
+    local_etf_minute_csv_dir: Path | None = None
 
     # tiers.yaml 路径 — frozen: 资源目录内; 非 frozen: 项目根目录
     tiers_yaml: Path = _RESOURCE_ROOT / "tiers.yaml" if _IS_FROZEN else _PROJECT_ROOT / "tiers.yaml"
@@ -132,6 +133,10 @@ class Settings(BaseSettings):
         if self.local_minute_csv_dir and not self.local_minute_csv_dir.is_absolute():
             self.local_minute_csv_dir = (
                 _PROJECT_ROOT / self.local_minute_csv_dir
+            ).resolve()
+        if self.local_etf_minute_csv_dir and not self.local_etf_minute_csv_dir.is_absolute():
+            self.local_etf_minute_csv_dir = (
+                _PROJECT_ROOT / self.local_etf_minute_csv_dir
             ).resolve()
         if self.finsight_root is not None and not self.finsight_root.is_absolute():
             self.finsight_root = (_RUNTIME_ROOT / self.finsight_root).resolve()

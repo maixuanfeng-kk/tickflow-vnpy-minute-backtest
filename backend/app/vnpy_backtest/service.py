@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from collections import defaultdict
 from collections.abc import Callable
 from statistics import stdev
@@ -24,6 +24,8 @@ from app.vnpy_backtest.strategies.registry import get_strategy
 class VnpyMinuteBacktestConfig:
     start: date
     end: date
+    start_time: time = time(9, 30)
+    end_time: time = time(15, 0)
     symbols: tuple[str, ...] = ()
     strategy_id: str = "opening_breakout_pool"
     initial_capital: float = 100_000.0
@@ -53,16 +55,24 @@ class VnpyMinuteBacktestService:
     def run(self, config: VnpyMinuteBacktestConfig) -> dict:
         if config.end < config.start:
             raise ValueError("end date must not precede start date")
+        if config.start == config.end and config.start_time > config.end_time:
+            raise ValueError("开始时间不能晚于结束时间")
         spec = get_strategy(config.strategy_id)
         if spec is None:
             raise ValueError(f"不支持的 vn.py 策略: {config.strategy_id}")
         symbols = config.normalized_symbols
         if not spec.min_symbols <= len(symbols) <= spec.max_symbols:
-            raise ValueError(f"{spec.name} 支持 {spec.min_symbols}–{spec.max_symbols} 只股票")
+            raise ValueError(f"{spec.name} 支持 {spec.min_symbols}-{spec.max_symbols} 只股票")
+        if self._is_etf_strategy(config.strategy_id) and symbols != ("159915.SZ",):
+            raise ValueError("etf_159915_minute 只支持 159915.SZ")
+        if self._is_etf_strategy(config.strategy_id) and (
+            config.start_time != time(9, 30) or config.end_time != time(15, 0)
+        ):
+            raise ValueError("etf_159915_minute 只支持完整交易日 09:30-15:00")
         return self._run_portfolio(config, spec, symbols)
 
     def _settings(self, config: VnpyMinuteBacktestConfig) -> dict[str, Any]:
-        return {
+        settings = {
             **config.params,
             "initial_cash": config.initial_capital,
             "default_lot_size": config.lot_size,
@@ -74,25 +84,43 @@ class VnpyMinuteBacktestService:
             "stamp_tax_rate": config.stamp_tax_pct,
             "slippage_rate": config.slippage_bps / 10_000,
         }
+        if self._is_etf_strategy(config.strategy_id):
+            settings.update({
+                "max_volume_ratio": None,
+                "max_positions": 1,
+                "position_sizing": "equal",
+                "signal_price_basis": "raw",
+                "cash_reserve_ratio": 0.03,
+                "commission_outside_budget": True,
+                "stamp_tax_rate": 0.0,
+            })
+        return settings
 
     def _run_portfolio(self, config: VnpyMinuteBacktestConfig, spec: StrategySpec, symbols: tuple[str, ...]) -> dict:
+        etf_data = self._is_etf_strategy(config.strategy_id)
         instrument_names, instrument_tick_sizes = self._instrument_metadata(symbols)
         engine = MultiSymbolNextBarOpenEngine(
             initial_cash=config.initial_capital,
             commission_rate=config.commission_pct,
-            stamp_tax_rate=config.stamp_tax_pct,
+            stamp_tax_rate=0.0 if etf_data else config.stamp_tax_pct,
             slippage_rate=config.slippage_bps / 10_000,
             min_commission=float(config.params.get("min_commission", 5.0)),
-            max_volume_ratio=config.max_volume_ratio,
-            max_positions=config.max_positions,
-            position_sizing=config.position_sizing,
-            reserve_ratio=float(config.params.get("cash_reserve_ratio", 0.03)),
+            max_volume_ratio=None if etf_data else config.max_volume_ratio,
+            max_positions=1 if etf_data else config.max_positions,
+            position_sizing="equal" if etf_data else config.position_sizing,
+            reserve_ratio=0.03 if etf_data else float(config.params.get("cash_reserve_ratio", 0.03)),
+            commission_outside_budget=etf_data,
+            round_slippage_to_tick=etf_data,
             instrument_names=instrument_names,
             instrument_tick_sizes=instrument_tick_sizes,
         )
         strategy = spec.strategy_class(dict(config.params))
-        warmup_start = config.start - timedelta(days=20)
-        if config.signal_price_basis == "raw":
+        warmup_start = (
+            self._etf_warmup_start(symbols, config.start)
+            if etf_data
+            else config.start - timedelta(days=20)
+        )
+        if etf_data or config.signal_price_basis == "raw":
             signal_projector = MinuteSignalPriceProjector("raw", {}, {})
         else:
             signal_projector = MinuteSignalPriceProjector.load(
@@ -104,7 +132,11 @@ class VnpyMinuteBacktestService:
                 factor_dataset="adj_factor_tushare",
             )
         daily_context = DailyContextBuilder(signal_projector)
-        daily_market_metadata = self._daily_market_metadata(symbols, warmup_start, config.end)
+        if etf_data:
+            daily_context.add_daily_history(self._load_etf_daily_history(symbols, warmup_start))
+        daily_market_metadata = self._daily_market_metadata(
+            symbols, warmup_start, config.end, etf_data=etf_data,
+        )
         days_seen = 0
         # Partitions exist for every market trading day, even when none of the
         # selected securities traded.  Keep that calendar separate from the
@@ -112,7 +144,11 @@ class VnpyMinuteBacktestService:
         # frames.  This lets the result distinguish a temporary suspension
         # from a market closure.
         try:
-            market_days = self._tushare_minute_trading_days(warmup_start, config.end)
+            market_days = (
+                self._etf_minute_trading_days(warmup_start, config.end)
+                if etf_data
+                else self._tushare_minute_trading_days(warmup_start, config.end)
+            )
         except AttributeError:
             market_days = []
         active_symbols_by_day: dict[date, set[str]] = defaultdict(set)
@@ -120,19 +156,46 @@ class VnpyMinuteBacktestService:
         # opening-breakout strategy needs yesterday's same-minute cumulative
         # volume and four prior daily closes on the first requested trade day.
         try:
-            total_days = len(self._tushare_minute_trading_days(config.start, config.end))
+            total_days = len(
+                self._etf_minute_trading_days(config.start, config.end)
+                if etf_data
+                else self._tushare_minute_trading_days(config.start, config.end)
+            )
         except AttributeError:
             total_days = max((config.end - config.start).days + 1, 1)
-        for trading_day, frame in self._iter_tushare_minute_days(list(symbols), warmup_start, config.end):
+        day_iterator = (
+            self._iter_etf_minute_days(list(symbols), warmup_start, config.end)
+            if etf_data
+            else self._iter_tushare_minute_days(list(symbols), warmup_start, config.end)
+        )
+        for trading_day, frame in day_iterator:
             if config.is_cancelled and config.is_cancelled():
                 raise RuntimeError("回测已取消")
-            bars_by_symbol = self._active_bars_by_symbol(self._bars_by_symbol(frame, symbols))
-            if not bars_by_symbol:
+            full_bars_by_symbol = self._active_bars_by_symbol(self._bars_by_symbol(frame, symbols))
+            if not full_bars_by_symbol:
                 continue
-            active_symbols_by_day[trading_day] = set(bars_by_symbol)
+            active_symbols_by_day[trading_day] = set(full_bars_by_symbol)
             if trading_day < config.start:
-                daily_context.add_day(bars_by_symbol)
+                daily_context.add_day(
+                    full_bars_by_symbol,
+                    daily_prices=daily_market_metadata.get(trading_day, {}),
+                )
                 continue
+            bars_by_symbol = full_bars_by_symbol
+            if trading_day == config.start or trading_day == config.end:
+                filtered = self._filter_requested_minutes(
+                    frame,
+                    trading_day=trading_day,
+                    start_time=config.start_time if trading_day == config.start else time(0, 0),
+                    end_time=config.end_time if trading_day == config.end else time(23, 59, 59),
+                )
+                bars_by_symbol = self._active_bars_by_symbol(self._bars_by_symbol(filtered, symbols))
+                if not bars_by_symbol:
+                    daily_context.add_day(
+                        full_bars_by_symbol,
+                        daily_prices=daily_market_metadata.get(trading_day, {}),
+                    )
+                    continue
             # Do not create a reference (and therefore do not request a qfq
             # factor) for a suspended security. Some local vendors represent a
             # suspension with a full day of zero-volume minute bars.
@@ -146,7 +209,10 @@ class VnpyMinuteBacktestService:
                     daily_market_metadata=daily_market_metadata,
                 ),
             )
-            daily_context.add_day(bars_by_symbol)
+            daily_context.add_day(
+                full_bars_by_symbol,
+                daily_prices=daily_market_metadata.get(trading_day, {}),
+            )
             days_seen += 1
             if config.on_progress:
                 current_equity = engine.equity_curve[-1]["value"] if engine.equity_curve else config.initial_capital
@@ -289,6 +355,20 @@ class VnpyMinuteBacktestService:
         return result
 
     @staticmethod
+    def _filter_requested_minutes(
+        frame: pl.DataFrame,
+        *,
+        trading_day: date,
+        start_time: time,
+        end_time: time,
+    ) -> pl.DataFrame:
+        return frame.filter(
+            (pl.col("datetime").dt.date() == trading_day)
+            & (pl.col("datetime").dt.time() >= start_time)
+            & (pl.col("datetime").dt.time() <= end_time)
+        )
+
+    @staticmethod
     def _active_bars_by_symbol(bars_by_symbol: dict[str, list]) -> dict[str, list]:
         """Exclude all-zero-volume minute series used by vendors for suspensions."""
         return {
@@ -318,6 +398,84 @@ class VnpyMinuteBacktestService:
                 days.append(value)
         return sorted(days)
 
+    @staticmethod
+    def _is_etf_strategy(strategy_id: str) -> bool:
+        return strategy_id == "etf_159915_minute"
+
+    def _etf_minute_trading_days(self, start: date, end: date) -> list[date]:
+        store = getattr(self.repo, "store", None)
+        if store is None:
+            return []
+        root = store.data_dir / "kline_etf_minute"
+        days: list[date] = []
+        for directory in root.glob("date=*") if root.exists() else []:
+            if not directory.is_dir() or not (directory / "part.parquet").exists():
+                continue
+            try:
+                value = date.fromisoformat(directory.name.removeprefix("date="))
+            except ValueError:
+                continue
+            if start <= value <= end:
+                days.append(value)
+        return sorted(days)
+
+    def _etf_warmup_start(self, symbols: tuple[str, ...], start: date) -> date:
+        store = getattr(self.repo, "store", None)
+        if store is None:
+            return start - timedelta(days=20)
+        root = store.data_dir / "kline_etf_daily"
+        if not root.exists():
+            return start - timedelta(days=20)
+        try:
+            prior_days = (
+                pl.scan_parquet(str(root / "**" / "*.parquet"))
+                .filter(pl.col("symbol").is_in(list(symbols)) & (pl.col("date") < start))
+                .select(pl.col("date").cast(pl.Date))
+                .unique()
+                .sort("date")
+                .tail(10)
+                .collect()["date"]
+                .to_list()
+            )
+        except Exception:  # noqa: BLE001
+            return start - timedelta(days=20)
+        return prior_days[0] if prior_days else start - timedelta(days=20)
+
+    def _load_etf_daily_history(self, symbols: tuple[str, ...], before: date) -> dict[str, list[dict]]:
+        store = getattr(self.repo, "store", None)
+        if store is None:
+            return {}
+        root = store.data_dir / "kline_etf_daily"
+        if not root.exists():
+            return {}
+        try:
+            columns = pl.scan_parquet(str(root / "**" / "*.parquet")).collect_schema().names()
+            required = {"symbol", "date", "open", "high", "low", "close"}
+            if not required.issubset(columns):
+                return {}
+            volume_expr = pl.col("volume") if "volume" in columns else pl.lit(0.0)
+            rows = (
+                pl.scan_parquet(str(root / "**" / "*.parquet"))
+                .filter(pl.col("symbol").is_in(list(symbols)) & (pl.col("date") < before))
+                .select(
+                    pl.col("symbol").cast(pl.Utf8),
+                    pl.col("date").cast(pl.Date),
+                    pl.col("open").cast(pl.Float64),
+                    pl.col("high").cast(pl.Float64),
+                    pl.col("low").cast(pl.Float64),
+                    pl.col("close").cast(pl.Float64),
+                    volume_expr.cast(pl.Float64).alias("volume"),
+                )
+                .sort(["symbol", "date"])
+                .collect()
+            )
+        except Exception:  # noqa: BLE001
+            return {}
+        result: dict[str, list[dict]] = defaultdict(list)
+        for row in rows.iter_rows(named=True):
+            result[str(row["symbol"])].append(row)
+        return dict(result)
+
     def _iter_tushare_minute_days(self, symbols: list[str], start: date, end: date):
         store = getattr(self.repo, "store", None)
         if store is None:
@@ -332,6 +490,25 @@ class VnpyMinuteBacktestService:
             frame = (
                 pl.scan_parquet(str(part))
                 .filter(pl.col("symbol").is_in(symbols))
+                .select("symbol", "datetime", "open", "high", "low", "close", "volume", "amount")
+                .sort(["symbol", "datetime"])
+                .collect()
+            )
+            if not frame.is_empty():
+                yield trading_day, frame
+
+    def _iter_etf_minute_days(self, symbols: list[str], start: date, end: date):
+        store = getattr(self.repo, "store", None)
+        if store is None:
+            return
+        for trading_day in self._etf_minute_trading_days(start, end):
+            part = store.data_dir / "kline_etf_minute" / f"date={trading_day.isoformat()}" / "part.parquet"
+            frame = (
+                pl.scan_parquet(str(part))
+                .filter(
+                    pl.col("symbol").is_in(symbols)
+                    & (pl.col("datetime").dt.time() <= time(15, 0))
+                )
                 .select("symbol", "datetime", "open", "high", "low", "close", "volume", "amount")
                 .sort(["symbol", "datetime"])
                 .collect()
@@ -366,6 +543,8 @@ class VnpyMinuteBacktestService:
         symbols: tuple[str, ...],
         start: date,
         end: date,
+        *,
+        etf_data: bool = False,
     ) -> dict[date, dict[str, dict[str, object]]]:
         """Load historical raw pre-close/high and point-in-time price-limit ratios.
 
@@ -374,8 +553,10 @@ class VnpyMinuteBacktestService:
         from historical execution rules.
         """
         try:
-            source = self.repo.store.data_dir / "kline_daily_tushare"
-            if not source.exists():
+            source = self.repo.store.data_dir / (
+                "kline_etf_daily" if etf_data else "kline_daily_tushare"
+            )
+            if not etf_data and not source.exists():
                 source = self.repo.store.data_dir / "kline_daily_xbx"
             if not source.exists():
                 return {}
@@ -384,6 +565,11 @@ class VnpyMinuteBacktestService:
             if not {"symbol", "date", "pre_close", "high"}.issubset(columns):
                 return {}
             name_expr = pl.col("name").cast(pl.Utf8) if "name" in columns else pl.lit("")
+            optional_price_exprs = [
+                pl.col(field).cast(pl.Float64).alias(field)
+                if field in columns else pl.lit(None, dtype=pl.Float64).alias(field)
+                for field in ("open", "low", "close")
+            ]
             rows = (
                 scan.filter(
                     pl.col("symbol").is_in(list(symbols))
@@ -396,6 +582,7 @@ class VnpyMinuteBacktestService:
                     pl.col("pre_close").cast(pl.Float64),
                     pl.col("high").cast(pl.Float64),
                     name_expr.alias("name"),
+                    *optional_price_exprs,
                 )
                 .collect()
             )
@@ -412,6 +599,11 @@ class VnpyMinuteBacktestService:
                 "pre_close": row["pre_close"],
                 "high": row["high"],
                 "price_limit_pct": rule.price_limit_pct,
+                **{
+                    field: row[field]
+                    for field in ("open", "high", "low", "close")
+                    if row[field] is not None
+                },
             }
         return dict(result)
 
@@ -649,4 +841,6 @@ class VnpyMinuteBacktestService:
     @staticmethod
     def _result_config(config: VnpyMinuteBacktestConfig, spec: StrategySpec, symbols: list[str], settings: dict) -> dict:
         return {"engine": "vnpy", "frequency": "1m", "strategy_id": spec.id, "symbols": symbols,
-                "start": str(config.start), "end": str(config.end), "initial_capital": config.initial_capital, "params": settings}
+                "start": str(config.start), "end": str(config.end),
+                "start_time": config.start_time.isoformat(), "end_time": config.end_time.isoformat(),
+                "initial_capital": config.initial_capital, "params": settings}

@@ -32,7 +32,9 @@ def rule_for_symbol(
     tick_size: float | None = None,
 ) -> AShareTradingRule:
     code, _, exchange = symbol.upper().partition(".")
-    if exchange == "BJ":
+    if code == "159915" and exchange == "SZ":
+        rule = AShareTradingRule("etf", 100, 100, 0.10, 0.001)
+    elif exchange == "BJ":
         rule = AShareTradingRule("bse", 100, 100, 0.30)
     elif code.startswith(("300", "301")):
         rule = AShareTradingRule("chinext", 100, 100, 0.20)

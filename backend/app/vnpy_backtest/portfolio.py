@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from math import floor
 from typing import Iterable, Mapping, Sequence
 
@@ -92,7 +93,7 @@ class PortfolioRunResult:
 
 
 class DailyContextBuilder:
-    """Build prior completed-day references from minute bars and daily K data."""
+    """Build completed-day references from minute bars and official daily OHLC."""
 
     def __init__(self, signal_projector=None) -> None:
         self._history: dict[str, list[dict]] = defaultdict(list)
@@ -141,7 +142,7 @@ class DailyContextBuilder:
                 metadata_limit_pct = 0.0
             previous_daily_metadata = (daily_market_metadata or {}).get(previous["date"], {}).get(symbol, {})
             try:
-                raw_previous_high = float(previous_daily_metadata.get("high", 0))
+                raw_previous_high = float(previous_daily_metadata.get("high", previous.get("high", 0)))
             except (TypeError, ValueError):
                 raw_previous_high = 0.0
             if raw_previous_high <= 0:
@@ -158,12 +159,18 @@ class DailyContextBuilder:
                 previous_volume=previous["volume"],
                 limit_reference_price=metadata_pre_close if metadata_pre_close > 0 else raw_previous_close,
                 price_limit_pct=metadata_limit_pct if metadata_limit_pct > 0 else None,
-                closes=tuple(adjusted(row, "close") for row in rows[-5:]),
+                closes=tuple(adjusted(row, "close") for row in rows[-10:]),
+                opens=tuple(adjusted(row, "open") for row in rows[-10:]),
+                lows=tuple(adjusted(row, "low") for row in rows[-10:]),
                 previous_cumulative_volumes=previous["cumulative_volumes"],
             )
         return result
 
-    def add_day(self, bars: Mapping[str, Sequence[BarData]]) -> None:
+    def add_day(
+        self,
+        bars: Mapping[str, Sequence[BarData]],
+        daily_prices: Mapping[str, Mapping[str, object]] | None = None,
+    ) -> None:
         for symbol, symbol_bars in bars.items():
             if not symbol_bars:
                 continue
@@ -172,17 +179,49 @@ class DailyContextBuilder:
             for bar in sorted(symbol_bars, key=lambda item: item.datetime):
                 cumulative_volume += float(bar.volume)
                 cumulative_volumes[bar.datetime.time()] = cumulative_volume
+            minute_prices = {
+                "open": float(symbol_bars[0].open_price),
+                "high": max(float(bar.high_price) for bar in symbol_bars),
+                "low": min(float(bar.low_price) for bar in symbol_bars),
+                "close": float(symbol_bars[-1].close_price),
+            }
+            official_prices = (daily_prices or {}).get(symbol, {})
+            for field in minute_prices:
+                try:
+                    value = float(official_prices.get(field, 0))
+                except (TypeError, ValueError):
+                    value = 0.0
+                if value > 0:
+                    minute_prices[field] = value
             self._history[symbol].append(
                 {
                     "date": symbol_bars[0].datetime.date(),
-                    "open": float(symbol_bars[0].open_price),
-                    "high": max(float(bar.high_price) for bar in symbol_bars),
-                    "low": min(float(bar.low_price) for bar in symbol_bars),
-                    "close": float(symbol_bars[-1].close_price),
+                    **minute_prices,
                     "volume": sum(float(bar.volume) for bar in symbol_bars),
                     "cumulative_volumes": cumulative_volumes,
                 }
             )
+
+    def add_daily_history(self, history: Mapping[str, Sequence[Mapping[str, object]]]) -> None:
+        """Seed completed daily OHLC history before minute warmup begins."""
+        for symbol, rows in history.items():
+            for row in sorted(rows, key=lambda item: item["date"]):
+                trading_day = row["date"]
+                if isinstance(trading_day, str):
+                    trading_day = date.fromisoformat(trading_day)
+                if self._history[symbol] and self._history[symbol][-1]["date"] >= trading_day:
+                    continue
+                self._history[symbol].append(
+                    {
+                        "date": trading_day,
+                        "open": float(row["open"]),
+                        "high": float(row["high"]),
+                        "low": float(row["low"]),
+                        "close": float(row["close"]),
+                        "volume": float(row.get("volume", 0.0) or 0.0),
+                        "cumulative_volumes": {},
+                    }
+                )
 
 
 class MultiSymbolNextBarOpenEngine:
@@ -200,6 +239,8 @@ class MultiSymbolNextBarOpenEngine:
         max_positions: int = 10,
         position_sizing: str = "equal",
         reserve_ratio: float = 0.03,
+        commission_outside_budget: bool = False,
+        round_slippage_to_tick: bool = False,
         instrument_names: Mapping[str, str] | None = None,
         instrument_tick_sizes: Mapping[str, float] | None = None,
     ) -> None:
@@ -215,6 +256,8 @@ class MultiSymbolNextBarOpenEngine:
             raise ValueError("position_sizing must be equal or score_weight")
         self.position_sizing = position_sizing
         self.reserve_ratio = max(float(reserve_ratio), 0.0)
+        self.commission_outside_budget = bool(commission_outside_budget)
+        self.round_slippage_to_tick = bool(round_slippage_to_tick)
         # The reserve is calculated from currently available cash whenever a
         # new equal-size budget is established (day start or a completed exit).
         self._daily_equal_budget: float | None = None
@@ -534,7 +577,7 @@ class MultiSymbolNextBarOpenEngine:
         if volume < rule.first_buy_minimum:
             self._reject(order.symbol, bar.datetime, "below_minimum_lot", order.signal_id)
             return False
-        price = float(bar.open_price) * (1 + self.slippage_rate)
+        price = self._slippage_price(float(bar.open_price), rule, Direction.LONG)
         if upper_limit is not None:
             price = min(price, upper_limit)
         turnover = price * volume
@@ -551,7 +594,7 @@ class MultiSymbolNextBarOpenEngine:
         self.cash -= turnover + commission
         self._fill(PortfolioFill(order.symbol, Direction.LONG, bar.datetime, price, volume, order.reason, commission, 0.0, abs(price - bar.open_price) * volume,
                                  portfolio_equity_before=equity_before,
-                                 entry_position_pct=(turnover + commission) / equity_before if equity_before > 0 else None,
+                                 entry_position_pct=(turnover if self.commission_outside_budget else turnover + commission) / equity_before if equity_before > 0 else None,
                                  signal_id=order.signal_id))
         return True
 
@@ -569,7 +612,7 @@ class MultiSymbolNextBarOpenEngine:
             self._reject(order.symbol, bar.datetime, "below_lot_or_no_position", order.signal_id)
             return
         position = self.positions[order.symbol]
-        price = float(bar.open_price) * (1 - self.slippage_rate)
+        price = self._slippage_price(float(bar.open_price), rule, Direction.SHORT)
         if lower_limit is not None:
             price = max(price, lower_limit)
         turnover = price * volume
@@ -634,10 +677,26 @@ class MultiSymbolNextBarOpenEngine:
         return floor(float(bar.volume) * self.max_volume_ratio / rule.lot_size) * rule.lot_size
 
     def _buy_volume(self, budget: float, open_price: float, rule: AShareTradingRule) -> int:
-        effective = open_price * (1 + self.slippage_rate)
+        effective = self._slippage_price(open_price, rule, Direction.LONG)
         if effective <= 0:
             return 0
-        return floor((budget - self.min_commission) / effective / rule.lot_size) * rule.lot_size
+        commission_reserve = 0.0 if self.commission_outside_budget else self.min_commission
+        return floor((budget - commission_reserve) / effective / rule.lot_size) * rule.lot_size
+
+    def _slippage_price(
+        self,
+        open_price: float,
+        rule: AShareTradingRule,
+        direction: Direction,
+    ) -> float:
+        factor = 1 + self.slippage_rate if direction == Direction.LONG else 1 - self.slippage_rate
+        value = Decimal(str(open_price)) * Decimal(str(factor))
+        if not self.round_slippage_to_tick:
+            return float(value)
+        tick = Decimal(str(rule.tick_size))
+        rounding = ROUND_CEILING if direction == Direction.LONG else ROUND_FLOOR
+        ticks = (value / tick).quantize(Decimal("1"), rounding=rounding)
+        return float(ticks * tick)
 
     @staticmethod
     def _price_limits(

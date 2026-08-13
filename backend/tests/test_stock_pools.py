@@ -19,19 +19,20 @@ def _strategy_input() -> StockPoolInput:
     for offset in range(273):
         day = start + timedelta(days=offset)
         rows.append({
-            "symbol": "600000.SH", "name": "测试甲", "date": day, "close": 12.0 if offset >= 268 else 10.0,
-            "high": 12.0 if offset >= 268 else 10.0, "total_mv": 10_000_000_001.0,
+            "symbol": "600000.SH", "name": "测试甲", "date": day, "open": 12.0 if offset >= 268 else 10.0,
+            "close": 12.0 if offset >= 268 else 10.0,
+            "high": 12.0 if offset >= 268 else 10.0, "total_mv": 30_000_000_001.0,
         })
         rows.append({
-            "symbol": "000001.SZ", "name": "测试乙", "date": day, "close": 10.0,
-            "high": 20.0 if offset == 272 else 10.0, "total_mv": 10_000_000_001.0,
+            "symbol": "000001.SZ", "name": "测试乙", "date": day, "open": 10.0, "close": 10.0,
+            "high": 20.0 if offset == 272 else 10.0, "total_mv": 30_000_000_001.0,
         })
     financials = pl.DataFrame({
         "symbol": ["600000.SH", "000001.SZ", "600000.SH"],
         "report_date": [date(2025, 3, 31), date(2025, 3, 31), date(2026, 3, 31)],
         "publish_date": [date(2025, 4, 25), date(2025, 4, 25), date(2026, 5, 2)],
         "revenue_yoy": [0.20, 0.0, 0.99],
-        "net_profit": [0.0, 1.0, 9.0],
+        "net_profit": [0.0, 60_000_000.0, 9.0],
     })
     return StockPoolInput(
         month="2026-05",
@@ -54,30 +55,95 @@ def test_monthly_growth_trend_uses_announced_financials_and_union_rules() -> Non
     assert evidence["600000.SH"]["condition_2"] is False
     assert evidence["000001.SZ"]["condition_1"] is False
     assert evidence["000001.SZ"]["condition_2"] is True
-    assert evidence["000001.SZ"]["market_cap"] == 10_000_000_001.0
+    assert evidence["000001.SZ"]["market_cap"] == 30_000_000_001.0
     # 2026Q1 was announced after the as-of date, therefore it cannot replace 2025Q1.
     assert evidence["600000.SH"]["financial_publish_date"] == date(2025, 4, 25)
 
 
-def test_market_cap_must_be_strictly_above_100_billion() -> None:
+def test_market_cap_must_be_strictly_above_300_billion() -> None:
     source = _strategy_input()
     members = MonthlyGrowthTrendStrategy({}).build(
-        StockPoolInput(source.month, source.as_of_date, source.daily.with_columns(pl.lit(10_000_000_000.0).alias("total_mv")), source.financials, source.instruments)
+        StockPoolInput(source.month, source.as_of_date, source.daily.with_columns(pl.lit(30_000_000_000.0).alias("total_mv")), source.financials, source.instruments)
     )
     assert members.is_empty()
 
 
-def test_static_ma60_requires_each_recent_close_to_beat_the_as_of_ma() -> None:
+def test_condition_one_accepts_open_above_ma60_when_close_is_not() -> None:
+    source = _strategy_input()
+    daily = source.daily.with_columns(
+        pl.when((pl.col("symbol") == "600000.SH") & (pl.col("date") >= date(2026, 4, 24)))
+        .then(pl.lit(12.0)).otherwise(pl.col("open")).alias("open"),
+        pl.when((pl.col("symbol") == "600000.SH") & (pl.col("date") >= date(2026, 4, 24)))
+        .then(pl.lit(10.0)).otherwise(pl.col("close")).alias("close"),
+    )
+    members = MonthlyGrowthTrendStrategy({}).build(
+        StockPoolInput(source.month, source.as_of_date, daily, source.financials, source.instruments)
+    )
+    evidence = {row["symbol"]: row for row in members.to_dicts()}
+    assert evidence["600000.SH"]["condition_1"] is True
+
+
+def test_condition_one_requires_all_last_five_days_to_qualify() -> None:
+    source = _strategy_input()
+    dates = source.daily.filter(pl.col("symbol") == "600000.SH").sort("date")["date"].to_list()
+    daily = source.daily.with_columns(
+        pl.when((pl.col("symbol") == "600000.SH") & (pl.col("date") >= dates[-5]))
+        .then(pl.lit(10.0)).otherwise(pl.col("open")).alias("open"),
+        pl.when((pl.col("symbol") == "600000.SH") & (pl.col("date") >= dates[-5]))
+        .then(pl.lit(10.0)).otherwise(pl.col("close")).alias("close"),
+    ).with_columns(
+        pl.when((pl.col("symbol") == "600000.SH") & (pl.col("date") == dates[-1]))
+        .then(pl.lit(12.0)).otherwise(pl.col("open")).alias("open"),
+    )
+    members = MonthlyGrowthTrendStrategy({}).build(
+        StockPoolInput(source.month, source.as_of_date, daily, source.financials, source.instruments)
+    )
+    assert "600000.SH" not in members["symbol"].to_list()
+
+
+def test_condition_two_does_not_limit_price_when_profit_exceeds_50m() -> None:
+    source = _strategy_input()
+    daily = source.daily.with_columns(
+        pl.when(pl.col("symbol") == "000001.SZ").then(pl.lit(21.0)).otherwise(pl.col("close")).alias("close"),
+    )
+    members = MonthlyGrowthTrendStrategy({}).build(
+        StockPoolInput(source.month, source.as_of_date, daily, source.financials, source.instruments)
+    )
+    assert "000001.SZ" in members["symbol"].to_list()
+
+
+def test_condition_two_accepts_a_200_day_high_touched_within_the_last_20_days() -> None:
+    source = _strategy_input()
+    dates = source.daily.filter(pl.col("symbol") == "000001.SZ").sort("date")["date"].to_list()
+    daily = source.daily.with_columns(
+        pl.when((pl.col("symbol") == "000001.SZ") & (pl.col("date") == dates[-2]))
+        .then(pl.lit(20.0))
+        .when((pl.col("symbol") == "000001.SZ") & (pl.col("date") == dates[-1]))
+        .then(pl.lit(19.0))
+        .otherwise(pl.col("high"))
+        .alias("high"),
+    )
+    members = MonthlyGrowthTrendStrategy({}).build(
+        StockPoolInput(source.month, source.as_of_date, daily, source.financials, source.instruments)
+    )
+    assert "000001.SZ" in members["symbol"].to_list()
+
+
+def test_static_ma60_requires_one_recent_open_or_close_to_beat_the_as_of_ma() -> None:
     source = _strategy_input()
     members = MonthlyGrowthTrendStrategy({}).build(source)
     assert "600000.SH" in members["symbol"].to_list()
 
     dates = source.daily.filter(pl.col("symbol") == "600000.SH").sort("date")["date"].to_list()
     daily = source.daily.with_columns(
-        pl.when((pl.col("symbol") == "600000.SH") & (pl.col("date") == dates[-2]))
+        pl.when((pl.col("symbol") == "600000.SH") & (pl.col("date") >= dates[-5]))
         .then(pl.lit(10.0))
         .otherwise(pl.col("close"))
-        .alias("close")
+        .alias("close"),
+        pl.when((pl.col("symbol") == "600000.SH") & (pl.col("date") >= dates[-5]))
+        .then(pl.lit(10.0))
+        .otherwise(pl.col("open"))
+        .alias("open")
     )
     members = MonthlyGrowthTrendStrategy({}).build(
         StockPoolInput(source.month, source.as_of_date, daily, source.financials, source.instruments)
@@ -110,11 +176,11 @@ def test_static_200_day_high_accepts_a_recent_touch_but_legacy_does_not() -> Non
 def test_strategy_params_default_and_reject_invalid_values() -> None:
     strategy = get_strategy("monthly_growth_trend")
     assert strategy is not None
-    assert strategy.resolve_params({}) == {}
+    assert strategy.resolve_params({"market_cap_min": 30_000_000_000})["market_cap_min"] == 30_000_000_000
     try:
-        strategy.resolve_params({"ma60_basis": "invalid"})
+        strategy.resolve_params({"unknown": 1})
     except ValueError as exc:
-        assert "ma60_basis" in str(exc)
+        assert "unknown" in str(exc)
     else:
         raise AssertionError("invalid parameter must be rejected")
 
@@ -204,7 +270,11 @@ def test_manual_save_writes_members_and_manifest(tmp_path) -> None:
     assert saved["member_count"] == 2
     assert manifest["member_count"] == 2
     assert manifest["data_coverage"]["daily_trading_days_before_as_of"] == 200
-    assert manifest["params"] == {}
+    assert manifest["params"] == {
+        "market_cap_min": 30_000_000_000,
+        "revenue_yoy_min": 0.15,
+        "net_profit_min": 50_000_000,
+    }
     assert saved["generated_pool_key"] == "generated:monthly_growth_trend:2026-05"
     assert (tmp_path / "user_data" / "watchlist_pools" / "generated=monthly_growth_trend--2026-05" / "members.parquet").exists()
     loaded = service.get_run(saved["run_id"])

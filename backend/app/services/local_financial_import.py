@@ -93,16 +93,17 @@ class LocalFinancialCsvImporter:
                 pass
 
     def _read_file(self, path: Path, source_dir: Path, summary: LocalFinancialImportSummary) -> pl.DataFrame | None:
+        is_tushare = self._is_tushare_file(path)
         try:
             try:
                 raw = pl.read_csv(
-                    path, skip_rows=1, infer_schema_length=500, null_values=["", "None", "nan"],
+                    path, skip_rows=0 if is_tushare else 1, infer_schema_length=500, null_values=["", "None", "nan"],
                     truncate_ragged_lines=True, encoding="utf8",
                 )
             except Exception as utf8_error:  # Some archive files are GBK encoded.
                 try:
                     raw = pl.read_csv(
-                        path, skip_rows=1, infer_schema_length=500, null_values=["", "None", "nan"],
+                        path, skip_rows=0 if is_tushare else 1, infer_schema_length=500, null_values=["", "None", "nan"],
                         truncate_ragged_lines=True, encoding="gbk",
                     )
                 except Exception as gbk_error:  # noqa: BLE001
@@ -110,7 +111,11 @@ class LocalFinancialCsvImporter:
         except Exception as exc:  # noqa: BLE001
             self._record(summary.failed_files, str(path.relative_to(source_dir)), f"CSV 读取失败: {exc}")
             return None
-        required = {"stock_code", "report_date", "publish_date", "statement_format"}
+        required = (
+            {"ts_code", "end_date", "inc_ann_date", "inc_n_income_attr_p", "inc_update_flag"}
+            if is_tushare
+            else {"stock_code", "report_date", "publish_date", "statement_format"}
+        )
         missing = required - set(raw.columns)
         if missing:
             self._record(summary.failed_files, str(path.relative_to(source_dir)), f"缺少字段: {', '.join(sorted(missing))}")
@@ -118,6 +123,16 @@ class LocalFinancialCsvImporter:
         summary.rows_read += raw.height
         summary.files_imported += 1
         return raw.with_columns(pl.lit(path.relative_to(source_dir).as_posix()).alias("source_file"))
+
+    @staticmethod
+    def _is_tushare_file(path: Path) -> bool:
+        for encoding in ("utf-8-sig", "gbk"):
+            try:
+                with path.open("r", encoding=encoding) as file:
+                    return file.readline().lstrip("\ufeff").startswith("ts_code,")
+            except UnicodeDecodeError:
+                continue
+        return False
 
     def _stage_batch(self, raw: pl.DataFrame, stage_root: Path, batch_index: int) -> None:
         raw_path = stage_root / "raw_xbx" / f"batch={batch_index:05d}" / "part.parquet"
@@ -133,7 +148,8 @@ class LocalFinancialCsvImporter:
         def col_or_null(name: str) -> pl.Expr:
             return pl.col(name).cast(pl.Float64, strict=False) if name in raw.columns else pl.lit(None, dtype=pl.Float64)
 
-        code = pl.col("stock_code").cast(pl.Utf8).str.strip_chars().str.to_lowercase()
+        is_tushare = "ts_code" in raw.columns
+        code = pl.col("ts_code" if is_tushare else "stock_code").cast(pl.Utf8).str.strip_chars().str.to_lowercase()
         symbol = (
             pl.when(code.str.contains(r"^(sh|sz|bj)\d{6}$"))
             .then(pl.concat_str([code.str.slice(2), pl.lit("."), code.str.slice(0, 2).str.to_uppercase()]))
@@ -141,10 +157,22 @@ class LocalFinancialCsvImporter:
             .then(code.str.to_uppercase())
             .otherwise(pl.lit(None, dtype=pl.Utf8))
         )
-        report_text = pl.col("report_date").cast(pl.Utf8).str.strip_chars()
-        announce_text = pl.col("publish_date").cast(pl.Utf8).str.strip_chars()
-        revenue_primary = col_or_null("R_revenue@xbx")
-        revenue_fallback = col_or_null("R_operating_total_revenue@xbx")
+        report_text = pl.col("end_date" if is_tushare else "report_date").cast(pl.Utf8).str.strip_chars()
+        announce_text = pl.col("inc_ann_date" if is_tushare else "publish_date").cast(pl.Utf8).str.strip_chars()
+        revenue_primary = col_or_null("inc_revenue" if is_tushare else "R_revenue@xbx")
+        revenue_fallback = col_or_null("inc_total_revenue" if is_tushare else "R_operating_total_revenue@xbx")
+        revenue_primary_source = "inc_revenue" if is_tushare else "R_revenue@xbx"
+        revenue_fallback_source = "inc_total_revenue" if is_tushare else "R_operating_total_revenue@xbx"
+        revenue_yoy = (
+            col_or_null("fi_q_sales_yoy") / 100
+            if is_tushare
+            else pl.lit(None, dtype=pl.Float64)
+        )
+        net_income = (
+            pl.coalesce([col_or_null("inc_n_income"), col_or_null("inc_n_income_attr_p")])
+            if is_tushare
+            else col_or_null("R_np@xbx")
+        )
         return raw.select(
             symbol.alias("symbol"),
             pl.coalesce([
@@ -156,11 +184,18 @@ class LocalFinancialCsvImporter:
                 announce_text.str.strptime(pl.Date, "%Y%m%d", strict=False),
             ]).alias("announce_date"),
             pl.coalesce([revenue_primary, revenue_fallback]).alias("revenue"),
-            pl.when(revenue_primary.is_not_null()).then(pl.lit("R_revenue@xbx"))
-            .when(revenue_fallback.is_not_null()).then(pl.lit("R_operating_total_revenue@xbx"))
+            revenue_yoy.alias("revenue_yoy"),
+            pl.when(revenue_primary.is_not_null()).then(pl.lit(revenue_primary_source))
+            .when(revenue_fallback.is_not_null()).then(pl.lit(revenue_fallback_source))
             .otherwise(pl.lit(None, dtype=pl.Utf8)).alias("revenue_source"),
-            col_or_null("R_np@xbx").alias("net_income"),
-            pl.col("statement_format").cast(pl.Utf8).alias("statement_format"),
+            net_income.alias("net_income"),
+            (
+                pl.col("inc_comp_type").cast(pl.Utf8)
+                if is_tushare and "inc_comp_type" in raw.columns
+                else pl.lit("tushare", dtype=pl.Utf8)
+                if is_tushare
+                else pl.col("statement_format").cast(pl.Utf8)
+            ).alias("statement_format"),
             pl.col("source_file").cast(pl.Utf8).alias("source_file"),
         ).filter(
             pl.col("symbol").is_not_null() & pl.col("period_end").is_not_null() & pl.col("announce_date").is_not_null()
@@ -183,7 +218,7 @@ class LocalFinancialCsvImporter:
         self._swap_raw_archive(raw_stage)
         metadata = {
             "dataset": "financials/raw_xbx", "version": 1,
-            "income_projection": ["symbol", "period_end", "announce_date", "revenue", "revenue_source", "net_income", "statement_format"],
+            "income_projection": ["symbol", "period_end", "announce_date", "revenue", "revenue_yoy", "revenue_source", "net_income", "statement_format"],
             "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
         metadata_path = self.data_dir / "financials" / "raw_xbx" / "_metadata.json"

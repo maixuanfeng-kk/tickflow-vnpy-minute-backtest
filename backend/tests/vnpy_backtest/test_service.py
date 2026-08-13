@@ -1,4 +1,4 @@
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from types import SimpleNamespace
 
 import polars as pl
@@ -70,6 +70,19 @@ def test_vnpy_service_rejects_empty_repository_data() -> None:
         )
 
 
+def test_vnpy_service_rejects_partial_day_for_etf_strategy() -> None:
+    with pytest.raises(ValueError, match="完整交易日 09:30-15:00"):
+        VnpyMinuteBacktestService(SimpleNamespace()).run(
+            VnpyMinuteBacktestConfig(
+                symbols=("159915.SZ",),
+                strategy_id="etf_159915_minute",
+                start=date(2026, 1, 5),
+                end=date(2026, 1, 6),
+                start_time=time(10, 0),
+            )
+        )
+
+
 def test_instrument_absolute_limit_prices_are_not_used_as_historical_percentages() -> None:
     class MetadataRepo:
         def get_instruments(self):
@@ -95,7 +108,10 @@ def test_daily_market_metadata_uses_historical_raw_pre_close_and_high(tmp_path) 
         "symbol": ["002938.SZ"],
         "date": [date(2026, 5, 22)],
         "pre_close": [94.48],
-        "high": [96.25],
+        "open": [95.00],
+        "high": [103.93],
+        "low": [93.80],
+        "close": [101.20],
         "name": ["鹏鼎控股"],
     }).write_parquet(part / "part.parquet")
     repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
@@ -107,6 +123,13 @@ def test_daily_market_metadata_uses_historical_raw_pre_close_and_high(tmp_path) 
     )
     assert metadata == {
         date(2026, 5, 22): {
-            "002938.SZ": {"pre_close": 94.48, "high": 96.25, "price_limit_pct": 0.10},
+            "002938.SZ": {
+                "pre_close": 94.48,
+                "price_limit_pct": 0.10,
+                "open": 95.00,
+                "high": 103.93,
+                "low": 93.80,
+                "close": 101.20,
+            },
         },
     }
