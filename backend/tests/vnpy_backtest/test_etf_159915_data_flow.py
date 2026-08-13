@@ -104,7 +104,7 @@ def test_etf_daily_metadata_overrides_minute_aggregated_low(tmp_path):
     ).write_parquet(daily_path / "part.parquet")
 
     service = VnpyMinuteBacktestService(_repo(tmp_path))
-    metadata = service._daily_limit_metadata(
+    metadata = service._daily_market_metadata(
         ("159915.SZ",), trading_day, trading_day, etf_data=True,
     )
     minute_frame = pl.DataFrame(

@@ -125,7 +125,7 @@ class VnpyMinuteBacktestService:
         daily_context = DailyContextBuilder(signal_projector)
         if etf_data:
             daily_context.add_daily_history(self._load_etf_daily_history(symbols, warmup_start))
-        daily_limit_metadata = self._daily_limit_metadata(
+        daily_market_metadata = self._daily_market_metadata(
             symbols, warmup_start, config.end, etf_data=etf_data,
         )
         days_seen = 0
@@ -169,7 +169,7 @@ class VnpyMinuteBacktestService:
             if trading_day < config.start:
                 daily_context.add_day(
                     full_bars_by_symbol,
-                    daily_prices=daily_limit_metadata.get(trading_day, {}),
+                    daily_prices=daily_market_metadata.get(trading_day, {}),
                 )
                 continue
             bars_by_symbol = full_bars_by_symbol
@@ -184,7 +184,7 @@ class VnpyMinuteBacktestService:
                 if not bars_by_symbol:
                     daily_context.add_day(
                         full_bars_by_symbol,
-                        daily_prices=daily_limit_metadata.get(trading_day, {}),
+                        daily_prices=daily_market_metadata.get(trading_day, {}),
                     )
                     continue
             # Do not create a reference (and therefore do not request a qfq
@@ -196,12 +196,13 @@ class VnpyMinuteBacktestService:
                 daily_context.references(
                     trading_day,
                     symbols=bars_by_symbol,
-                    execution_metadata=daily_limit_metadata.get(trading_day, {}),
+                    execution_metadata=daily_market_metadata.get(trading_day, {}),
+                    daily_market_metadata=daily_market_metadata,
                 ),
             )
             daily_context.add_day(
                 full_bars_by_symbol,
-                daily_prices=daily_limit_metadata.get(trading_day, {}),
+                daily_prices=daily_market_metadata.get(trading_day, {}),
             )
             days_seen += 1
             if config.on_progress:
@@ -506,7 +507,7 @@ class VnpyMinuteBacktestService:
         except Exception:  # noqa: BLE001
             return {}, {}
 
-    def _daily_limit_metadata(
+    def _daily_market_metadata(
         self,
         symbols: tuple[str, ...],
         start: date,
@@ -514,7 +515,7 @@ class VnpyMinuteBacktestService:
         *,
         etf_data: bool = False,
     ) -> dict[date, dict[str, dict[str, object]]]:
-        """Load historical raw pre-close and point-in-time price-limit ratios.
+        """Load historical raw pre-close/high and point-in-time price-limit ratios.
 
         The instrument snapshot's ``limit_up`` and ``limit_down`` fields are
         absolute prices for its own as-of date.  They are deliberately excluded
@@ -530,13 +531,13 @@ class VnpyMinuteBacktestService:
                 return {}
             scan = pl.scan_parquet(str(source / "**" / "*.parquet"))
             columns = set(scan.collect_schema().names())
-            if not {"symbol", "date", "pre_close"}.issubset(columns):
+            if not {"symbol", "date", "pre_close", "high"}.issubset(columns):
                 return {}
             name_expr = pl.col("name").cast(pl.Utf8) if "name" in columns else pl.lit("")
             optional_price_exprs = [
                 pl.col(field).cast(pl.Float64).alias(field)
                 if field in columns else pl.lit(None, dtype=pl.Float64).alias(field)
-                for field in ("open", "high", "low", "close")
+                for field in ("open", "low", "close")
             ]
             rows = (
                 scan.filter(
@@ -548,6 +549,7 @@ class VnpyMinuteBacktestService:
                     pl.col("symbol").cast(pl.Utf8),
                     pl.col("date").cast(pl.Date),
                     pl.col("pre_close").cast(pl.Float64),
+                    pl.col("high").cast(pl.Float64),
                     name_expr.alias("name"),
                     *optional_price_exprs,
                 )
@@ -564,6 +566,7 @@ class VnpyMinuteBacktestService:
             rule = rule_for_symbol(symbol, name=name, trading_day=trading_day)
             result[trading_day][symbol] = {
                 "pre_close": row["pre_close"],
+                "high": row["high"],
                 "price_limit_pct": rule.price_limit_pct,
                 **{
                     field: row[field]

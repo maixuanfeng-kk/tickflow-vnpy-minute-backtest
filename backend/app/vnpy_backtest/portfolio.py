@@ -103,6 +103,7 @@ class DailyContextBuilder:
         reference_day: date | None = None,
         symbols: Iterable[str] | None = None,
         execution_metadata: Mapping[str, Mapping[str, object]] | None = None,
+        daily_market_metadata: Mapping[date, Mapping[str, Mapping[str, object]]] | None = None,
     ) -> dict[str, DailyReference]:
         """Return references only for symbols that trade on ``reference_day``.
 
@@ -138,10 +139,21 @@ class DailyContextBuilder:
                 metadata_limit_pct = float(metadata.get("price_limit_pct", 0))
             except (TypeError, ValueError):
                 metadata_limit_pct = 0.0
+            previous_daily_metadata = (daily_market_metadata or {}).get(previous["date"], {}).get(symbol, {})
+            try:
+                raw_previous_high = float(previous_daily_metadata.get("high", previous.get("high", 0)))
+            except (TypeError, ValueError):
+                raw_previous_high = 0.0
+            if raw_previous_high <= 0:
+                raise ValueError(f"日 K 未覆盖 {symbol} {previous['date'].isoformat()}，无法计算昨日最高价")
             result[symbol] = DailyReference(
                 previous_open=adjusted(previous, "open"),
                 previous_close=adjusted(previous, "close"),
-                previous_high=adjusted(previous, "high"),
+                previous_high=raw_previous_high * (
+                    self._signal_projector.scale(symbol, previous["date"], effective_reference_day)
+                    if self._signal_projector is not None
+                    else 1.0
+                ),
                 previous_low=adjusted(previous, "low"),
                 previous_volume=previous["volume"],
                 limit_reference_price=metadata_pre_close if metadata_pre_close > 0 else raw_previous_close,
