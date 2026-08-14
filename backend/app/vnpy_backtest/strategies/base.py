@@ -58,6 +58,7 @@ class DailyReference:
     # to qfq and must not be reused to calculate exchange price limits.
     limit_reference_price: float | None = None
     price_limit_pct: float | None = None
+    dates: tuple[date, ...] = ()
     closes: tuple[float, ...] = ()
     opens: tuple[float, ...] = ()
     lows: tuple[float, ...] = ()

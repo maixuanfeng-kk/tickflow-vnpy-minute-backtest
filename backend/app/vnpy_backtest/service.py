@@ -133,7 +133,7 @@ class VnpyMinuteBacktestService:
             )
         daily_context = DailyContextBuilder(signal_projector)
         if etf_data:
-            daily_context.add_daily_history(self._load_etf_daily_history(symbols, warmup_start))
+            daily_context.add_daily_history(self._load_etf_daily_history(symbols, config.start))
         daily_market_metadata = self._daily_market_metadata(
             symbols, warmup_start, config.end, etf_data=etf_data,
         )

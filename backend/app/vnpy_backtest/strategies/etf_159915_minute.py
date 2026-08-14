@@ -56,15 +56,16 @@ class Etf159915MinuteStrategy:
         self._update_intraday(bar)
         current = float(bar.close_price)
         current_time = context.timestamp.time()
-        has_position = bool(context.positions)
+        position = context.positions.get(SYMBOL)
+        has_position = position is not None
         self._update_position_lifecycle(has_position)
         if current_time >= time(15, 0):
             return []
 
         if has_position:
-            if any(position.entry_date == context.timestamp.date() for position in context.positions.values()):
+            if position.entry_date == context.timestamp.date():
                 return []
-            return self._sell_intent(current, current_time)
+            return self._sell_intent(current, current_time, position.entry_date)
         if self._sold_today:
             if (
                 self._sold_by_54
@@ -111,7 +112,7 @@ class Etf159915MinuteStrategy:
             self._high_0932 = max(self._high_0932, float(bar.high_price))
 
     def _refresh_special_state(self, ref: DailyReference | None) -> None:
-        if ref is None or len(ref.closes) < 6:
+        if ref is None or len(ref.closes) < 10:
             if self._special_days_left <= 0:
                 self._special_level = 0
             return
@@ -119,13 +120,12 @@ class Etf159915MinuteStrategy:
         if min(c1, c2, c3) <= 0 or ref.previous_open is None:
             return
         ma5_c1 = self._dynamic_ma(ref.closes, 5, 0)
-        ma5_c2 = self._dynamic_ma(ref.closes, 5, 1)
-        common = (
-            c1 < ma5_c1 and c2 < ma5_c2
-            and (ma5_c1 - c1) / ma5_c1 > 0.015
-            and (c2 - c1) / c2 > 0.015
-        )
-        if not common:
+        ma10_c1 = self._dynamic_ma(ref.closes, 10, 0)
+        if (
+            not (c1 < ma5_c1 and c1 < ma10_c1)
+            or (ma5_c1 - c1) / ma5_c1 <= 0.015
+            or (c2 - c1) / c2 <= 0.015
+        ):
             return
         if (c3 - c1) / c3 > 0.03:
             self._special_level = 1
@@ -203,7 +203,12 @@ class Etf159915MinuteStrategy:
             return self._mark_buy("4_3_3")
         return []
 
-    def _sell_intent(self, current: float, current_time: time) -> list[OrderIntent]:
+    def _sell_intent(
+        self,
+        current: float,
+        current_time: time,
+        entry_date: date | None,
+    ) -> list[OrderIntent]:
         ref = self._reference
         if (
             ref is None
@@ -216,7 +221,7 @@ class Etf159915MinuteStrategy:
             self._sold_today = True
             self._pending_54_sell = True
             return [self._intent(Direction.SHORT, "5_4", ["5_4"])]
-        protection = self._sell_protection(ref)
+        protection = self._sell_protection(ref, entry_date)
         if protection is not None:
             trigger, reason, setup = protection
             if current < trigger:
@@ -324,6 +329,7 @@ class Etf159915MinuteStrategy:
     def _sell_protection(
         self,
         ref: DailyReference,
+        entry_date: date | None = None,
     ) -> tuple[float, str, object] | None:
         for older_offset in (1, 2, 3, 4):
             newer_offset = older_offset - 1
@@ -339,6 +345,11 @@ class Etf159915MinuteStrategy:
                 and (older_close - older_open) / older_open > 0.013
                 and (newer_close - newer_open) / newer_open > 0.013
             ):
+                older_date = self._previous_date(ref, older_offset)
+                if entry_date is not None and (
+                    older_date is None or entry_date > older_date
+                ):
+                    continue
                 setup = (
                     "5_3",
                     older_open,
@@ -358,6 +369,12 @@ class Etf159915MinuteStrategy:
         if fresh_52 is not None:
             return fresh_52, "5_2", None
         return None
+
+    @staticmethod
+    def _previous_date(ref: DailyReference, offset: int) -> date | None:
+        if len(ref.dates) <= offset:
+            return None
+        return ref.dates[-1 - offset]
 
     def _signed_change(self, ref: DailyReference) -> float:
         c1 = self._previous_close(ref)

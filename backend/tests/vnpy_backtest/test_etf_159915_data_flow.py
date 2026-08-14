@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import polars as pl
 
-from app.vnpy_backtest.service import VnpyMinuteBacktestService
+from app.vnpy_backtest.service import VnpyMinuteBacktestConfig, VnpyMinuteBacktestService
 from app.vnpy_backtest.portfolio import DailyContextBuilder
 from app.vnpy_backtest.local_data import bars_from_minute_frame
 
@@ -118,6 +118,88 @@ def test_daily_context_can_seed_etf_history_before_minute_warmup():
     references = builder.references(date(2026, 7, 1), symbols=["159915.SZ"])
     assert references["159915.SZ"].closes == (3.05, 3.15)
     assert references["159915.SZ"].opens == (3.0, 3.1)
+
+
+def test_daily_context_merges_warmup_minutes_into_seeded_daily_row():
+    trading_day = date(2026, 6, 30)
+    builder = DailyContextBuilder()
+    builder.add_daily_history(
+        {
+            "159915.SZ": [
+                {"date": trading_day, "open": 3.1, "high": 3.2, "low": 3.0, "close": 3.15, "volume": 1_100},
+            ]
+        }
+    )
+    minute_frame = pl.DataFrame(
+        {
+            "symbol": ["159915.SZ", "159915.SZ"],
+            "datetime": [datetime(2026, 6, 30, 9, 30), datetime(2026, 6, 30, 9, 31)],
+            "open": [3.1, 3.12], "high": [3.12, 3.15], "low": [3.09, 3.11],
+            "close": [3.12, 3.15], "volume": [100.0, 150.0], "amount": [312.0, 472.5],
+        }
+    )
+    builder.add_day(
+        {"159915.SZ": bars_from_minute_frame("159915.SZ", minute_frame)},
+        daily_prices={
+            "159915.SZ": {"open": 3.1, "high": 3.2, "low": 3.0, "close": 3.15},
+        },
+    )
+
+    reference = builder.references(date(2026, 7, 1), symbols=["159915.SZ"])["159915.SZ"]
+
+    assert reference.closes == (3.15,)
+    assert reference.previous_cumulative_volumes == {time(9, 30): 100.0, time(9, 31): 250.0}
+
+
+def test_etf_first_backtest_day_uses_daily_history_when_warmup_minutes_are_absent(tmp_path):
+    prior_days = [
+        date(2022, 12, 19), date(2022, 12, 20), date(2022, 12, 21), date(2022, 12, 22),
+        date(2022, 12, 23), date(2022, 12, 26), date(2022, 12, 27), date(2022, 12, 28),
+        date(2022, 12, 29), date(2022, 12, 30),
+    ]
+    closes = [2.280] * 8 + [2.277, 2.279]
+    for index, trading_day in enumerate(prior_days):
+        path = tmp_path / "kline_etf_daily" / f"date={trading_day.isoformat()}"
+        path.mkdir(parents=True)
+        open_price = 2.287 if trading_day == date(2022, 12, 30) else closes[index]
+        pl.DataFrame(
+            {
+                "symbol": ["159915.SZ"], "date": [trading_day],
+                "open": [open_price], "high": [max(open_price, closes[index]) + 0.01],
+                "low": [min(open_price, closes[index]) - 0.01], "close": [closes[index]],
+                "pre_close": [closes[index - 1] if index else closes[index]],
+                "volume": [1_000.0], "amount": [2_280.0],
+            }
+        ).write_parquet(path / "part.parquet")
+
+    signal_day = date(2023, 1, 3)
+    minute_path = tmp_path / "kline_etf_minute" / f"date={signal_day.isoformat()}"
+    minute_path.mkdir(parents=True)
+    minute_times = [time(9, 30), time(9, 31), time(9, 32), time(11, 28), time(11, 29)]
+    pl.DataFrame(
+        {
+            "symbol": ["159915.SZ"] * 5,
+            "datetime": [datetime.combine(signal_day, value) for value in minute_times],
+            "open": [2.267, 2.266, 2.269, 2.278, 2.279],
+            "high": [2.267, 2.271, 2.269, 2.279, 2.282],
+            "low": [2.267, 2.263, 2.260, 2.278, 2.279],
+            "close": [2.267, 2.264, 2.263, 2.279, 2.281],
+            "volume": [10_000.0] * 5, "amount": [22_790.0] * 5,
+        }
+    ).write_parquet(minute_path / "part.parquet")
+
+    result = VnpyMinuteBacktestService(_repo(tmp_path)).run(
+        VnpyMinuteBacktestConfig(
+            start=signal_day, end=signal_day, symbols=("159915.SZ",),
+            strategy_id="etf_159915_minute", signal_price_basis="raw",
+            commission_pct=0.0, slippage_bps=0.0,
+        )
+    )
+
+    assert [
+        (row["timestamp"], row["reason"])
+        for row in result["signal_diagnostics"]
+    ] == [("2023-01-03 11:28:00", "4_2_2")]
 
 
 def test_etf_daily_metadata_overrides_minute_aggregated_low(tmp_path):

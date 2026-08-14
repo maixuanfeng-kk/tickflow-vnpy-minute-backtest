@@ -171,13 +171,79 @@ def test_4232_uses_intraday_gain_from_previous_close_not_today_open():
     strategy = Etf159915MinuteStrategy({})
     reference = DailyReference(
         previous_open=91.1, previous_close=90.0, previous_high=92.0, previous_low=89.0,
-        closes=(100.0, 95.0, 94.0, 92.5, 92.0, 90.0),
+        closes=(100.0, 100.0, 100.0, 100.0, 100.0, 95.0, 94.0, 92.5, 92.0, 90.0),
     )
     moment = datetime(2026, 7, 2, 9, 31)
     intents = strategy.on_minute(
         {"159915.SZ": _bar(moment, 91.6, open_price=92.0)}, _context(moment, reference),
     )
     assert [intent.reason for intent in intents] == ["4_2_3_2"]
+
+
+def test_4232_uses_previous_close_below_both_ma5_and_ma10_instead_of_two_days_below_ma5():
+    strategy = Etf159915MinuteStrategy({})
+    reference = DailyReference(
+        previous_open=91.0,
+        previous_close=90.0,
+        previous_high=92.0,
+        previous_low=89.0,
+        closes=(90.0, 90.0, 90.0, 90.0, 90.0, 92.0, 92.0, 92.0, 92.0, 90.0),
+    )
+    moment = datetime(2026, 7, 2, 9, 31)
+    intents = strategy.on_minute(
+        {"159915.SZ": _bar(moment, 91.6, open_price=91.0)},
+        _context(moment, reference),
+    )
+    assert [intent.reason for intent in intents] == ["4_2_3_2"]
+
+
+def test_4232_rejects_when_previous_close_is_not_below_ma10():
+    strategy = Etf159915MinuteStrategy({})
+    reference = DailyReference(
+        previous_open=91.0,
+        previous_close=90.0,
+        previous_high=92.0,
+        previous_low=89.0,
+        closes=(50.0, 50.0, 50.0, 50.0, 100.0, 92.0, 92.0, 92.0, 92.0, 90.0),
+    )
+    moment = datetime(2026, 7, 2, 9, 31)
+    assert strategy.on_minute(
+        {"159915.SZ": _bar(moment, 91.6, open_price=91.0)},
+        _context(moment, reference),
+    ) == []
+
+
+def test_4231_uses_previous_close_below_both_ma5_and_ma10_instead_of_two_days_below_ma5():
+    strategy = Etf159915MinuteStrategy({})
+    reference = DailyReference(
+        previous_open=91.0,
+        previous_close=90.0,
+        previous_high=101.0,
+        previous_low=89.0,
+        closes=(90.0, 90.0, 90.0, 90.0, 89.0, 89.0, 89.0, 100.0, 92.0, 90.0),
+    )
+    moment = datetime(2026, 7, 2, 9, 31)
+    intents = strategy.on_minute(
+        {"159915.SZ": _bar(moment, 95.1, open_price=91.0)},
+        _context(moment, reference),
+    )
+    assert [intent.reason for intent in intents] == ["4_2_3_1"]
+
+
+def test_4231_rejects_when_previous_close_is_not_below_ma10():
+    strategy = Etf159915MinuteStrategy({})
+    reference = DailyReference(
+        previous_open=91.0,
+        previous_close=90.0,
+        previous_high=101.0,
+        previous_low=89.0,
+        closes=(50.0, 50.0, 50.0, 50.0, 100.0, 92.0, 92.0, 100.0, 92.0, 90.0),
+    )
+    moment = datetime(2026, 7, 2, 9, 31)
+    assert strategy.on_minute(
+        {"159915.SZ": _bar(moment, 95.1, open_price=91.0)},
+        _context(moment, reference),
+    ) == []
 
 
 def test_doji_day_does_not_enter_the_42_buy_rules():
@@ -196,7 +262,7 @@ def test_4231_remains_active_when_a_new_lower_priority_4232_state_appears():
     strategy = Etf159915MinuteStrategy({})
     first_reference = DailyReference(
         previous_open=91.0, previous_close=90.0, previous_high=92.0, previous_low=89.0,
-        closes=(100.0, 100.0, 97.0, 94.0, 92.0, 90.0),
+        closes=(100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 97.0, 94.0, 92.0, 90.0),
     )
     first = datetime(2026, 7, 2, 9, 31)
     strategy.on_minute(
@@ -205,7 +271,7 @@ def test_4231_remains_active_when_a_new_lower_priority_4232_state_appears():
 
     second_reference = DailyReference(
         previous_open=93.0, previous_close=91.0, previous_high=94.0, previous_low=90.0,
-        closes=(100.0, 100.0, 96.0, 93.0, 92.0, 91.0),
+        closes=(100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 96.0, 93.0, 92.0, 91.0),
     )
     second = datetime(2026, 7, 3, 9, 31)
     intents = strategy.on_minute(
@@ -222,7 +288,7 @@ def test_4232_carries_to_next_day_and_suppresses_411_until_its_trigger_breaks():
         previous_high=1.983,
         previous_low=1.938,
         opens=(1.978, 1.965, 1.975, 1.956, 1.967, 1.967),
-        closes=(1.978, 1.976, 1.990, 1.968, 1.971, 1.938),
+        closes=(1.990, 1.990, 1.990, 1.990, 1.978, 1.976, 1.990, 1.968, 1.971, 1.938),
         lows=(1.970, 1.962, 1.951, 1.925, 1.954, 1.938),
     )
     setup_day = datetime(2025, 1, 13, 14, 59)
@@ -313,14 +379,81 @@ def test_fresh_53_uses_the_latest_consecutive_strong_entity_days():
     strategy = Etf159915MinuteStrategy({})
     reference = DailyReference(
         previous_open=2.880, previous_close=2.927, previous_high=2.954, previous_low=2.870,
+        dates=(
+            datetime(2025, 8, 28).date(),
+            datetime(2025, 8, 29).date(),
+            datetime(2025, 9, 1).date(),
+        ),
         opens=(2.680, 2.799, 2.880), closes=(2.806, 2.865, 2.927), lows=(2.677, 2.780, 2.870),
     )
-    old_position = {"159915.SZ": PortfolioPositionView("159915.SZ", 100, 2.9, datetime(2025, 9, 1).date())}
+    old_position = {"159915.SZ": PortfolioPositionView("159915.SZ", 100, 2.9, datetime(2025, 8, 11).date())}
     sell_time = datetime(2025, 9, 2, 11, 2)
     intents = strategy.on_minute(
         {"159915.SZ": _bar(sell_time, 2.80)}, _context(sell_time, reference, old_position),
     )
     assert [intent.reason for intent in intents] == ["5_3"]
+
+
+def test_53_holding_age_skips_setup_that_started_before_position_entry():
+    strategy = Etf159915MinuteStrategy({})
+    reference = DailyReference(
+        previous_open=3.184,
+        previous_close=3.185,
+        previous_high=3.218,
+        previous_low=3.155,
+        dates=tuple(
+            datetime.fromisoformat(value).date()
+            for value in (
+                "2025-11-03", "2025-11-04", "2025-11-05", "2025-11-06", "2025-11-07",
+            )
+        ),
+        opens=(3.152, 3.166, 3.060, 3.158, 3.184),
+        closes=(3.176, 3.112, 3.142, 3.201, 3.185),
+        lows=(3.098, 3.087, 3.046, 3.153, 3.155),
+    )
+    position = {
+        "159915.SZ": PortfolioPositionView(
+            "159915.SZ", 100, 3.167, datetime(2025, 11, 6).date(),
+        )
+    }
+    moment = datetime(2025, 11, 10, 9, 44)
+    intents = strategy.on_minute(
+        {"159915.SZ": _bar(moment, 3.148, open_price=3.200)},
+        _context(moment, reference, position),
+    )
+
+    assert [intent.reason for intent in intents] == ["5_2_before_2_2"]
+
+
+def test_53_holding_age_keeps_setup_when_position_owned_on_older_setup_day():
+    strategy = Etf159915MinuteStrategy({})
+    reference = DailyReference(
+        previous_open=3.184,
+        previous_close=3.185,
+        previous_high=3.218,
+        previous_low=3.155,
+        dates=tuple(
+            datetime.fromisoformat(value).date()
+            for value in (
+                "2025-11-03", "2025-11-04", "2025-11-05", "2025-11-06", "2025-11-07",
+            )
+        ),
+        opens=(3.152, 3.166, 3.060, 3.158, 3.184),
+        closes=(3.176, 3.112, 3.142, 3.201, 3.185),
+        lows=(3.098, 3.087, 3.046, 3.153, 3.155),
+    )
+    position = {
+        "159915.SZ": PortfolioPositionView(
+            "159915.SZ", 100, 3.100, datetime(2025, 11, 5).date(),
+        )
+    }
+    moment = datetime(2025, 11, 10, 10, 2)
+    intents = strategy.on_minute(
+        {"159915.SZ": _bar(moment, 3.138, open_price=3.200)},
+        _context(moment, reference, position),
+    )
+
+    assert [intent.reason for intent in intents] == ["5_3_before_2_3"]
 
 
 def test_fresh_52_uses_previous_day_low_and_log_reason():
@@ -354,13 +487,18 @@ def test_consumed_53_setup_does_not_sell_a_later_position():
         previous_close=2.927,
         previous_high=2.954,
         previous_low=2.870,
+        dates=(
+            datetime(2025, 8, 28).date(),
+            datetime(2025, 8, 29).date(),
+            datetime(2025, 9, 1).date(),
+        ),
         opens=(2.680, 2.799, 2.880),
         closes=(2.806, 2.865, 2.927),
         lows=(2.677, 2.780, 2.870),
     )
     old_position = {
         "159915.SZ": PortfolioPositionView(
-            "159915.SZ", 100, 2.9, datetime(2025, 9, 1).date(),
+            "159915.SZ", 100, 2.9, datetime(2025, 8, 11).date(),
         )
     }
     sell_time = datetime(2025, 9, 2, 11, 2)
@@ -460,11 +598,11 @@ def test_tail_buy_starts_at_1446_to_match_trade_log_timestamps():
     assert [intent.reason for intent in intents] == ["4_3_2"]
 
 
-def test_423_special_state_uses_five_day_average_only():
+def test_423_special_state_uses_previous_close_below_ma5_and_ma10():
     strategy = Etf159915MinuteStrategy({})
     reference = DailyReference(
         previous_open=80.0, previous_close=75.0, previous_high=95.0, previous_low=74.0,
-        closes=(50.0, 50.0, 100.0, 100.0, 100.0, 80.0, 75.0),
+        closes=(100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 80.0, 75.0),
     )
     moment = datetime(2026, 7, 2, 9, 31)
     intents = strategy.on_minute(
@@ -477,7 +615,7 @@ def test_423_special_state_does_not_require_a_bearish_entity_day():
     strategy = Etf159915MinuteStrategy({})
     reference = DailyReference(
         previous_open=89.0, previous_close=90.0, previous_high=95.0, previous_low=88.0,
-        closes=(50.0, 100.0, 100.0, 100.0, 100.0, 95.0, 90.0),
+        closes=(100.0, 100.0, 100.0, 50.0, 100.0, 100.0, 100.0, 100.0, 95.0, 90.0),
     )
     moment = datetime(2026, 7, 2, 9, 31)
     intents = strategy.on_minute(
@@ -486,11 +624,11 @@ def test_423_special_state_does_not_require_a_bearish_entity_day():
     assert [intent.reason for intent in intents] == ["4_2_3_1"]
 
 
-def test_423_special_state_requires_enough_history_for_two_complete_five_day_averages():
+def test_423_special_state_requires_enough_history_for_a_complete_ten_day_average():
     strategy = Etf159915MinuteStrategy({})
     reference = DailyReference(
         previous_open=80.0, previous_close=75.0, previous_high=95.0, previous_low=74.0,
-        closes=(100.0, 100.0, 100.0, 80.0, 75.0),
+        closes=(100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 80.0, 75.0),
     )
     moment = datetime(2026, 7, 2, 9, 31)
     assert strategy.on_minute(

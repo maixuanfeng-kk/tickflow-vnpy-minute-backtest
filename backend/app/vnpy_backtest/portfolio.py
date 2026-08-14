@@ -159,6 +159,7 @@ class DailyContextBuilder:
                 previous_volume=previous["volume"],
                 limit_reference_price=metadata_pre_close if metadata_pre_close > 0 else raw_previous_close,
                 price_limit_pct=metadata_limit_pct if metadata_limit_pct > 0 else None,
+                dates=tuple(row["date"] for row in rows[-10:]),
                 closes=tuple(adjusted(row, "close") for row in rows[-10:]),
                 opens=tuple(adjusted(row, "open") for row in rows[-10:]),
                 lows=tuple(adjusted(row, "low") for row in rows[-10:]),
@@ -193,14 +194,21 @@ class DailyContextBuilder:
                     value = 0.0
                 if value > 0:
                     minute_prices[field] = value
-            self._history[symbol].append(
-                {
-                    "date": symbol_bars[0].datetime.date(),
-                    **minute_prices,
-                    "volume": sum(float(bar.volume) for bar in symbol_bars),
-                    "cumulative_volumes": cumulative_volumes,
-                }
-            )
+            trading_day = symbol_bars[0].datetime.date()
+            row = {
+                "date": trading_day,
+                **minute_prices,
+                "volume": sum(float(bar.volume) for bar in symbol_bars),
+                "cumulative_volumes": cumulative_volumes,
+            }
+            history = self._history[symbol]
+            for index, existing in enumerate(history):
+                if existing["date"] == trading_day:
+                    history[index] = row
+                    break
+            else:
+                history.append(row)
+                history.sort(key=lambda item: item["date"])
 
     def add_daily_history(self, history: Mapping[str, Sequence[Mapping[str, object]]]) -> None:
         """Seed completed daily OHLC history before minute warmup begins."""
