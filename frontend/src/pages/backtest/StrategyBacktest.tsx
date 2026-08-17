@@ -33,6 +33,7 @@ import { isEtf159915RunBlocked } from './strategy-extensions/etf159915'
 import {
   canRunBacktest,
   is159915Strategy,
+  is159915StockPoolStrategy,
   normalizeBacktestSymbols,
   resolveBacktestSymbols,
   symbolsFromPoolEntries,
@@ -808,6 +809,7 @@ export function StrategyBacktest() {
   const highGranularity = true
   const [vnpyStrategyId, setVnpyStrategyId] = useState('opening_breakout_pool')
   const etf159915Strategy = is159915Strategy(vnpyStrategyId)
+  const etf159915StockPoolStrategy = is159915StockPoolStrategy(vnpyStrategyId)
   const [vnpyParams, setVnpyParams] = useState<Record<string, unknown>>(VNPY_PORTFOLIO_DEFAULT_PARAMS)
   const [rangeSettingsOpen, setRangeSettingsOpen] = useState(false)
   const [quickRanges, setQuickRanges] = useState(loadQuickRanges)
@@ -910,6 +912,19 @@ export function StrategyBacktest() {
     setEndTime('15:00')
   }, [etf159915Strategy])
 
+  useEffect(() => {
+    if (!etf159915StockPoolStrategy) return
+    setStart('2026-05-06')
+    setEnd('2026-07-31')
+    setInitialCapital('10000000')
+    setSignalPriceBasis('raw')
+    setMaxPositions('10')
+    setPositionSizing('equal')
+    setVolumeLimitEnabled(false)
+    setStartTime('09:30')
+    setEndTime('15:00')
+  }, [etf159915StockPoolStrategy])
+
   const resetConfigFromDetail = (detail: StrategyDetail) => {
     setStrategyParams(strategyDefaultParams(detail))
     setOverrides(buildDefaultOverrides(detail))
@@ -970,13 +985,13 @@ export function StrategyBacktest() {
   }, [backtestTask])
 
   const handleRun = () => {
-    const requestSymbols = etf159915Strategy ? ['159915.SZ'] : resolveBacktestSymbols({
+    const requestSymbols = etf159915Strategy ? ['159915.SZ'] : etf159915StockPoolStrategy ? [] : resolveBacktestSymbols({
       source: poolSource,
       poolSymbols,
       manualSymbols: symbols.split(','),
     })
     if (
-      requestSymbols.length === 0
+      (!etf159915StockPoolStrategy && requestSymbols.length === 0)
       || !startTime
       || !endTime
       || (start === end && startTime > endTime)
@@ -995,12 +1010,12 @@ export function StrategyBacktest() {
       commission_pct: Number(fees) / 10000,
       stamp_tax_pct: etf159915Strategy ? 0 : Number(stampTax) / 1000,
       slippage_bps: Number(slippage),
-      max_positions: etf159915Strategy ? 1 : Number(maxPositions),
+      max_positions: etf159915Strategy ? 1 : etf159915StockPoolStrategy ? 10 : Number(maxPositions),
       max_exposure_pct: Number(maxExposure) / 100,
       initial_capital: Number(initialCapital),
-      position_sizing: etf159915Strategy ? 'equal' : positionSizing,
-      volume_limit_enabled: etf159915Strategy ? false : volumeLimitEnabled,
-      signal_price_basis: etf159915Strategy ? 'raw' : signalPriceBasis,
+      position_sizing: etf159915Strategy || etf159915StockPoolStrategy ? 'equal' : positionSizing,
+      volume_limit_enabled: etf159915Strategy || etf159915StockPoolStrategy ? false : volumeLimitEnabled,
+      signal_price_basis: etf159915Strategy || etf159915StockPoolStrategy ? 'raw' : signalPriceBasis,
       params: vnpyParams,
       overrides: {},
       mode: simMode,
@@ -1020,7 +1035,7 @@ export function StrategyBacktest() {
   })
   const etfReadinessBlocked = etf159915Strategy && isEtf159915RunBlocked(etfReadiness)
   const invalidMinuteRange = !startTime || !endTime || (start === end && startTime > endTime)
-  const canRunVnpy = hasRunnableSymbols && !etfReadinessBlocked && !invalidMinuteRange
+  const canRunVnpy = (hasRunnableSymbols || etf159915StockPoolStrategy) && !etfReadinessBlocked && !invalidMinuteRange
   const isEtfResult = result?.strategy_info?.id === 'etf_159915_minute'
 
   // 提取统计

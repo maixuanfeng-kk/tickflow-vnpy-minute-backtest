@@ -4,6 +4,7 @@ import test from 'node:test'
 import {
   canRunBacktest,
   is159915Strategy,
+  is159915StockPoolStrategy,
   normalizeBacktestSymbols,
   resolveBacktestSymbols,
   symbolsFromPoolEntries,
@@ -12,6 +13,11 @@ import {
 test('159915 strategy is identified as a single ETF strategy', () => {
   assert.equal(is159915Strategy('etf_159915_minute'), true)
   assert.equal(is159915Strategy('opening_breakout_pool'), false)
+})
+
+test('ETF timed stock pool strategy is distinct from the single ETF strategy', () => {
+  assert.equal(is159915StockPoolStrategy('etf_159915_stock_pool'), true)
+  assert.equal(is159915StockPoolStrategy('etf_159915_minute'), false)
 })
 
 test('pool members replace manual symbols and preserve exchange suffixes', () => {

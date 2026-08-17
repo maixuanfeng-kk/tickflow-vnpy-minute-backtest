@@ -37,3 +37,18 @@ def test_etf_strategy_forces_zero_stamp_tax():
         strategy_id="etf_159915_minute", stamp_tax_pct=0.001,
     )
     assert _service()._settings(config)["stamp_tax_rate"] == 0.0
+
+
+def test_etf_stock_pool_strategy_spends_all_cash_and_uses_raw_no_volume_cap():
+    config = VnpyMinuteBacktestConfig(
+        start=date(2026, 5, 6), end=date(2026, 5, 7), symbols=("000001.SZ",),
+        strategy_id="etf_159915_stock_pool", signal_price_basis="qfq",
+        max_positions=3, max_volume_ratio=0.1, position_sizing="score_weight",
+    )
+    settings = _service()._settings(config)
+    assert settings["signal_price_basis"] == "raw"
+    assert settings["max_positions"] == 10
+    assert settings["max_volume_ratio"] is None
+    assert settings["cash_reserve_ratio"] == 0.0
+    assert settings["commission_outside_budget"] is True
+    assert settings["spend_all_equal_budget"] is True

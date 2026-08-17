@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from 'react'
 import type { StrategyBacktestResult } from './api'
+import { is159915StockPoolStrategy } from './backtest-pools'
 
 /**
  * 全局回测任务管理 (SSE 模式 + 任务缓存 + 重连支持)。
@@ -203,7 +204,7 @@ export function startBacktest(params: {
 
   const isVnpy = params.engine === 'vnpy'
   const symbols = params.symbols?.filter(Boolean) ?? []
-  if (isVnpy && (symbols.length < 1 || symbols.length > 1000)) {
+  if (isVnpy && ((symbols.length < 1 && !is159915StockPoolStrategy(params.strategy_id)) || symbols.length > 1000)) {
     current = { ...current, isPending: false, error: 'vn.py 分钟回测支持 1–1000 只股票', reconnecting: false }
     emit()
     return

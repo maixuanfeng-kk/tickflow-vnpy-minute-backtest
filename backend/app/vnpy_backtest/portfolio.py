@@ -248,6 +248,7 @@ class MultiSymbolNextBarOpenEngine:
         position_sizing: str = "equal",
         reserve_ratio: float = 0.03,
         commission_outside_budget: bool = False,
+        spend_all_equal_budget: bool = False,
         round_slippage_to_tick: bool = False,
         instrument_names: Mapping[str, str] | None = None,
         instrument_tick_sizes: Mapping[str, float] | None = None,
@@ -265,6 +266,8 @@ class MultiSymbolNextBarOpenEngine:
         self.position_sizing = position_sizing
         self.reserve_ratio = max(float(reserve_ratio), 0.0)
         self.commission_outside_budget = bool(commission_outside_budget)
+        self._outside_budget_commission = 0.0
+        self.spend_all_equal_budget = bool(spend_all_equal_budget)
         self.round_slippage_to_tick = bool(round_slippage_to_tick)
         # The reserve is calculated from currently available cash whenever a
         # new equal-size budget is established (day start or a completed exit).
@@ -436,7 +439,14 @@ class MultiSymbolNextBarOpenEngine:
         ordered: list[tuple[OrderIntent, int]] = []
         for priority in sorted(groups, reverse=True):
             # 同优先级候选按股票代码升序选择，避免数据源顺序或随机数影响。
-            group = sorted(groups[priority], key=lambda item: (item[0].symbol, item[1]))
+            group = sorted(
+                groups[priority],
+                key=lambda item: (
+                    int(item[0].diagnostic.get("candidate_rank", 10**9)),
+                    item[0].symbol,
+                    item[1],
+                ),
+            )
             ordered.extend(group)
         return ordered
 
@@ -455,7 +465,11 @@ class MultiSymbolNextBarOpenEngine:
         if not selected or available <= 0:
             return [0.0] * len(selected)
         if self.position_sizing == "equal":
-            per_slot_budget = self._daily_equal_budget or 0.0
+            per_slot_budget = (
+                available / len(selected)
+                if self.spend_all_equal_budget
+                else self._daily_equal_budget or 0.0
+            )
             return [per_slot_budget] * len(selected)
 
         raw_scores = [self._allocation_score(intent) for intent, _, _ in selected]
@@ -590,7 +604,11 @@ class MultiSymbolNextBarOpenEngine:
             price = min(price, upper_limit)
         turnover = price * volume
         commission = max(turnover * self.commission_rate, self.min_commission)
-        if turnover + commission > self.cash + 1e-8:
+        cash_available = self.cash + (
+            self._outside_budget_commission if self.commission_outside_budget else 0.0
+        )
+        cash_required = turnover if self.commission_outside_budget else turnover + commission
+        if cash_required > cash_available + 1e-8:
             self._reject(order.symbol, bar.datetime, "insufficient_cash", order.signal_id)
             return False
         position = self.positions.setdefault(order.symbol, PortfolioPosition(order.symbol))
@@ -600,6 +618,8 @@ class MultiSymbolNextBarOpenEngine:
         position.entry_date = bar.datetime.date()
         position.entry_datetime = bar.datetime
         self.cash -= turnover + commission
+        if self.commission_outside_budget:
+            self._outside_budget_commission += commission
         self._fill(PortfolioFill(order.symbol, Direction.LONG, bar.datetime, price, volume, order.reason, commission, 0.0, abs(price - bar.open_price) * volume,
                                  portfolio_equity_before=equity_before,
                                  entry_position_pct=(turnover if self.commission_outside_budget else turnover + commission) / equity_before if equity_before > 0 else None,

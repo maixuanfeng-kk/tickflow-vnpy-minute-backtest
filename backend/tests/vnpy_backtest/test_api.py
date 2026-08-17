@@ -24,6 +24,7 @@ def test_vnpy_strategy_catalog_contains_four_portfolio_strategies() -> None:
 
     assert {item["id"] for item in response["strategies"]} == {
         "etf_159915_minute",
+        "etf_159915_stock_pool",
         "opening_breakout_pool",
         "opening_breakout_condition_1",
         "opening_breakout_condition_2",
@@ -83,6 +84,18 @@ def test_vnpy_scope_parses_minute_bounds_for_stock_strategy() -> None:
 
     assert (start.isoformat(), end.isoformat()) == ("2026-07-01", "2026-07-02")
     assert (start_time.isoformat(), end_time.isoformat()) == ("10:05:00", "14:25:00")
+
+
+def test_etf_stock_pool_scope_resolves_without_manual_symbols() -> None:
+    spec, symbols, *_ = backtest._parse_vnpy_scope(
+        "etf_159915_stock_pool",
+        None,
+        "2026-05-06",
+        "2026-07-31",
+    )
+
+    assert spec.id == "etf_159915_stock_pool"
+    assert symbols == ()
 
 
 def test_vnpy_scope_rejects_reversed_same_day_minute_bounds() -> None:

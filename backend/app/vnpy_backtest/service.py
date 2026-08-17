@@ -1,7 +1,7 @@
 """Dispatch registered single-symbol and portfolio vn.py minute backtests."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta
 from collections import defaultdict
 from collections.abc import Callable
@@ -94,9 +94,22 @@ class VnpyMinuteBacktestService:
                 "commission_outside_budget": True,
                 "stamp_tax_rate": 0.0,
             })
+        elif self._is_etf_stock_pool_strategy(config.strategy_id):
+            settings.update({
+                "max_volume_ratio": None,
+                "max_positions": 10,
+                "position_sizing": "equal",
+                "signal_price_basis": "raw",
+                "cash_reserve_ratio": 0.0,
+                "commission_outside_budget": True,
+                "spend_all_equal_budget": True,
+                "stamp_tax_rate": config.stamp_tax_pct,
+            })
         return settings
 
     def _run_portfolio(self, config: VnpyMinuteBacktestConfig, spec: StrategySpec, symbols: tuple[str, ...]) -> dict:
+        if self._is_etf_stock_pool_strategy(config.strategy_id):
+            return self._run_etf_stock_pool(config, spec, symbols)
         etf_data = self._is_etf_strategy(config.strategy_id)
         instrument_names, instrument_tick_sizes = self._instrument_metadata(symbols)
         engine = MultiSymbolNextBarOpenEngine(
@@ -110,6 +123,7 @@ class VnpyMinuteBacktestService:
             position_sizing="equal" if etf_data else config.position_sizing,
             reserve_ratio=0.03 if etf_data else float(config.params.get("cash_reserve_ratio", 0.03)),
             commission_outside_budget=etf_data,
+            spend_all_equal_budget=self._is_etf_stock_pool_strategy(config.strategy_id),
             round_slippage_to_tick=etf_data,
             instrument_names=instrument_names,
             instrument_tick_sizes=instrument_tick_sizes,
@@ -270,6 +284,220 @@ class VnpyMinuteBacktestService:
                               "adjustment_factor_dataset": "adj_factor_tushare" if config.signal_price_basis == "qfq" else None},
         }
 
+    def _run_etf_stock_pool(
+        self,
+        config: VnpyMinuteBacktestConfig,
+        spec: StrategySpec,
+        symbols: tuple[str, ...],
+    ) -> dict:
+        """Run stock bars against a signal-only shadow pass of 159915."""
+        monthly_pools = self._monthly_stock_pools()
+        symbols = tuple(sorted({
+            str(symbol)
+            for pool in monthly_pools.values()
+            for symbol in pool.get("symbols", [])
+        }))
+        if not symbols:
+            raise ValueError("没有可用的月度股票池")
+        shadow_config = replace(
+            config,
+            strategy_id="etf_159915_minute",
+            symbols=("159915.SZ",),
+            signal_price_basis="raw",
+            params={},
+            on_progress=None,
+        )
+        shadow_result = self._run_portfolio(
+            shadow_config,
+            get_strategy("etf_159915_minute"),
+            ("159915.SZ",),
+        )
+        params = dict(config.params)
+        params.setdefault("etf_events", self._etf_shadow_events(shadow_result, config))
+        params.setdefault("monthly_pools", monthly_pools)
+        params["max_positions"] = 10
+        stock_strategy = spec.strategy_class(params)
+        instrument_names, instrument_tick_sizes = self._instrument_metadata(symbols)
+        engine = MultiSymbolNextBarOpenEngine(
+            initial_cash=config.initial_capital,
+            commission_rate=config.commission_pct,
+            stamp_tax_rate=config.stamp_tax_pct,
+            slippage_rate=config.slippage_bps / 10_000,
+            min_commission=float(config.params.get("min_commission", 5.0)),
+            max_volume_ratio=None,
+            max_positions=10,
+            position_sizing="equal",
+            reserve_ratio=0.0,
+            commission_outside_budget=True,
+            spend_all_equal_budget=True,
+            instrument_names=instrument_names,
+            instrument_tick_sizes=instrument_tick_sizes,
+        )
+        warmup_start = config.start - timedelta(days=20)
+        signal_projector = MinuteSignalPriceProjector("raw", {}, {})
+        daily_context = DailyContextBuilder(signal_projector)
+        daily_market_metadata = self._daily_market_metadata(
+            symbols, warmup_start, config.end, etf_data=False,
+        )
+        try:
+            market_days = self._tushare_minute_trading_days(warmup_start, config.end)
+            total_days = len(self._tushare_minute_trading_days(config.start, config.end))
+        except AttributeError:
+            market_days = []
+            total_days = max((config.end - config.start).days + 1, 1)
+        active_symbols_by_day: dict[date, set[str]] = defaultdict(set)
+        days_seen = 0
+        for trading_day, frame in self._iter_tushare_minute_days(list(symbols), warmup_start, config.end):
+            if config.is_cancelled and config.is_cancelled():
+                raise RuntimeError("回测已取消")
+            full_bars_by_symbol = self._active_bars_by_symbol(self._bars_by_symbol(frame, symbols))
+            if not full_bars_by_symbol:
+                continue
+            active_symbols_by_day[trading_day] = set(full_bars_by_symbol)
+            if trading_day < config.start:
+                daily_context.add_day(full_bars_by_symbol, daily_prices=daily_market_metadata.get(trading_day, {}))
+                continue
+            bars_by_symbol = full_bars_by_symbol
+            if trading_day == config.start or trading_day == config.end:
+                filtered = self._filter_requested_minutes(
+                    frame,
+                    trading_day=trading_day,
+                    start_time=config.start_time if trading_day == config.start else time(0, 0),
+                    end_time=config.end_time if trading_day == config.end else time(23, 59, 59),
+                )
+                bars_by_symbol = self._active_bars_by_symbol(self._bars_by_symbol(filtered, symbols))
+                if not bars_by_symbol:
+                    daily_context.add_day(full_bars_by_symbol, daily_prices=daily_market_metadata.get(trading_day, {}))
+                    continue
+            engine.run_day(
+                bars_by_symbol,
+                stock_strategy,
+                daily_context.references(
+                    trading_day,
+                    symbols=bars_by_symbol,
+                    execution_metadata=daily_market_metadata.get(trading_day, {}),
+                    daily_market_metadata=daily_market_metadata,
+                ),
+            )
+            daily_context.add_day(full_bars_by_symbol, daily_prices=daily_market_metadata.get(trading_day, {}))
+            days_seen += 1
+            if config.on_progress:
+                current_equity = engine.equity_curve[-1]["value"] if engine.equity_curve else config.initial_capital
+                config.on_progress(days_seen, max(total_days, 1), trading_day, current_equity)
+        if days_seen == 0:
+            raise ValueError("所选日期范围内没有本地分钟 K 线数据")
+        result = self._assemble_portfolio_result(
+            config=config,
+            spec=spec,
+            symbols=symbols,
+            settings=self._settings(config),
+            engine=engine,
+            signal_projector=signal_projector,
+            market_days=market_days,
+            active_symbols_by_day=active_symbols_by_day,
+            days_seen=days_seen,
+            instrument_names=instrument_names,
+        )
+        result["benchmark_curve"] = shadow_result.get("equity_curve", [])
+        result["stats"].update({
+            "benchmark_status": "etf_159915_strategy",
+            "etf_strategy_return": shadow_result.get("stats", {}).get("total_return"),
+            "etf_strategy_max_drawdown": shadow_result.get("stats", {}).get("max_drawdown"),
+        })
+        result["strategy_info"]["timing_strategy_id"] = "etf_159915_minute"
+        return result
+
+    def _assemble_portfolio_result(
+        self,
+        *,
+        config: VnpyMinuteBacktestConfig,
+        spec: StrategySpec,
+        symbols: tuple[str, ...],
+        settings: dict[str, Any],
+        engine: MultiSymbolNextBarOpenEngine,
+        signal_projector: MinuteSignalPriceProjector,
+        market_days: list[date],
+        active_symbols_by_day: dict[date, set[str]],
+        days_seen: int,
+        instrument_names: dict[str, str],
+    ) -> dict:
+        result = engine.result()
+        end_balance = result.equity_curve[-1]["value"] if result.equity_curve else config.initial_capital
+        timeline = self._timeline_indexes(result.equity_curve)
+        completed_trades = self._portfolio_completed_trades(result.fills, instrument_names, timeline)
+        metrics, drawdown_curve = self._portfolio_metrics(
+            initial_capital=config.initial_capital,
+            equity_curve=result.equity_curve,
+            completed_trades=completed_trades,
+            fills=result.fills,
+            trading_days=days_seen,
+        )
+        positions = self._portfolio_positions(result.positions, result.last_prices, instrument_names, end_balance, timeline)
+        daily_ledger = self._daily_ledger(result.fills, completed_trades, result.equity_curve, instrument_names, config.initial_capital)
+        suspensions = self._suspension_periods(symbols, market_days, active_symbols_by_day, config.start, config.end)
+        return {
+            "run_id": uuid4().hex,
+            "config": self._result_config(config, spec, list(symbols), settings),
+            "stats": {
+                "mode": "vnpy_portfolio",
+                "benchmark_status": "local_unavailable",
+                "symbols_requested": len(symbols),
+                "trading_days": days_seen,
+                "rejection_count": len(result.rejections),
+                "open_position_count": len(positions),
+                **metrics,
+            },
+            "equity_curve": result.equity_curve,
+            "drawdown_curve": drawdown_curve,
+            "benchmark_curve": [],
+            "trades": completed_trades,
+            "fills": [self._portfolio_fill_to_trade(fill, instrument_names) for fill in result.fills],
+            "daily_ledger": daily_ledger,
+            "per_symbol_stats": self._portfolio_symbol_stats(completed_trades, result.positions, instrument_names, result.last_prices),
+            "positions": positions,
+            "signal_diagnostics": [self._portfolio_signal_to_dict(signal, instrument_names) for signal in result.signals],
+            "rejections": [item.__dict__ for item in result.rejections],
+            "suspensions": suspensions,
+            "warnings": self._suspension_warnings(suspensions),
+            "strategy_info": {
+                "id": spec.id,
+                "name": spec.name,
+                "source": "vnpy",
+                "signal_price_basis": "raw",
+                "adjustment_factor_dataset": None,
+            },
+        }
+
+    def _etf_shadow_events(self, shadow_result: dict, config: VnpyMinuteBacktestConfig) -> dict[str, dict[str, object]]:
+        signals = {
+            datetime.fromisoformat(str(item["timestamp"])): item
+            for item in shadow_result.get("signal_diagnostics", [])
+            if config.start <= datetime.fromisoformat(str(item["timestamp"])).date() <= config.end
+        }
+        if not signals:
+            return {}
+        previous_close: float | None = None
+        output: dict[str, dict[str, object]] = {}
+        for _, frame in self._iter_etf_minute_days(["159915.SZ"], config.start - timedelta(days=20), config.end):
+            bars = bars_from_minute_frame("159915.SZ", frame)
+            if not bars:
+                continue
+            for bar in bars:
+                item = signals.get(bar.datetime)
+                if item and previous_close and previous_close > 0:
+                    output[bar.datetime.isoformat(sep=" ")] = {
+                        "direction": "buy" if item["direction"] == "LONG" else "sell",
+                        "etf_return": float(bar.close_price) / previous_close - 1.0,
+                        "reason": item.get("reason") or item["direction"],
+                    }
+            previous_close = float(bars[-1].close_price)
+        return output
+
+    def _monthly_stock_pools(self) -> dict[str, dict[str, object]]:
+        from app.vnpy_backtest.stock_pool_data import monthly_stock_pools
+
+        return monthly_stock_pools(self.repo.store.data_dir)
+
     @staticmethod
     def _suspension_periods(
         symbols: tuple[str, ...],
@@ -401,6 +629,10 @@ class VnpyMinuteBacktestService:
     @staticmethod
     def _is_etf_strategy(strategy_id: str) -> bool:
         return strategy_id == "etf_159915_minute"
+
+    @staticmethod
+    def _is_etf_stock_pool_strategy(strategy_id: str) -> bool:
+        return strategy_id == "etf_159915_stock_pool"
 
     def _etf_minute_trading_days(self, start: date, end: date) -> list[date]:
         store = getattr(self.repo, "store", None)

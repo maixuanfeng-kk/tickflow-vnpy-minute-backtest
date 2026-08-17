@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 
 import polars as pl
+import pytest
 
 from app.stock_pools.base import StockPoolInput
 from app.stock_pools.data import DataReadiness, StockPoolDataAdapter
@@ -58,6 +60,45 @@ def test_monthly_growth_trend_uses_announced_financials_and_union_rules() -> Non
     assert evidence["000001.SZ"]["market_cap"] == 30_000_000_001.0
     # 2026Q1 was announced after the as-of date, therefore it cannot replace 2025Q1.
     assert evidence["600000.SH"]["financial_publish_date"] == date(2025, 4, 25)
+
+
+def test_financial_normalisation_prefers_same_period_revenue_growth() -> None:
+    source = pl.DataFrame({
+        "symbol": ["600000.SH", "600000.SH"],
+        "period_end": [date(2025, 3, 31), date(2026, 3, 31)],
+        "announce_date": [date(2025, 4, 25), date(2026, 4, 25)],
+        "revenue": [100.0, 130.0],
+        # This is a quarterly provider field; the screening rule uses the
+        # comparable income statement revenue values instead.
+        "revenue_yoy": [0.20, 0.01],
+        "net_income": [1.0, 2.0],
+    })
+
+    normalised = StockPoolDataAdapter._normalise_financials(source)
+    latest = normalised.sort("report_date").tail(1).to_dicts()[0]
+
+    assert latest["revenue_yoy"] == pytest.approx(0.30)
+
+
+def test_point_in_time_name_changes_mark_historical_st_status() -> None:
+    adapter = StockPoolDataAdapter(Path("."))
+    daily = pl.DataFrame({
+        "symbol": ["600777.SH", "600777.SH"],
+        "date": [date(2025, 7, 1), date(2026, 4, 30)],
+        "name": ["600777.SH", "600777.SH"],
+        "is_st": [False, False],
+    })
+    name_changes = pl.DataFrame({
+        "symbol": ["600777.SH"],
+        "name": ["ST新潮"],
+        "start_date": [date(2024, 4, 30)],
+        "end_date": [date(2025, 7, 7)],
+    })
+
+    enriched = adapter._apply_point_in_time_name_changes(daily, name_changes)
+
+    assert enriched.filter(pl.col("date") == date(2026, 4, 30))["is_st"].item() is False
+    assert enriched.filter(pl.col("date") == date(2025, 7, 1))["is_st"].item() is True
 
 
 def test_market_cap_must_be_strictly_above_300_billion() -> None:
@@ -176,6 +217,7 @@ def test_static_200_day_high_accepts_a_recent_touch_but_legacy_does_not() -> Non
 def test_strategy_params_default_and_reject_invalid_values() -> None:
     strategy = get_strategy("monthly_growth_trend")
     assert strategy is not None
+    assert strategy.version == "5"
     assert strategy.resolve_params({"market_cap_min": 30_000_000_000})["market_cap_min"] == 30_000_000_000
     try:
         strategy.resolve_params({"unknown": 1})

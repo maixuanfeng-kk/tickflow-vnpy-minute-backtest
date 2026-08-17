@@ -1,9 +1,9 @@
 """Canonical data adapter for stock-pool construction."""
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import date
-import json
 from pathlib import Path
 
 import polars as pl
@@ -73,6 +73,19 @@ class StockPoolDataAdapter:
         if not required_daily.issubset(daily_columns):
             missing_columns = ", ".join(sorted(required_daily - daily_columns))
             return DataReadiness(month, None, False, (f"本地 Tushare 日K缺少字段: {missing_columns}",), ())
+        missing: list[str] = []
+        name_changes_path = self._name_changes_path()
+        if not ({"name", "is_st"} & daily_columns):
+            if not name_changes_path.exists():
+                missing.append("缺少历史股票名称/ST状态数据")
+            else:
+                try:
+                    name_columns = set(pl.scan_parquet(str(name_changes_path)).collect_schema().names())
+                    required_name = {"symbol", "name", "start_date", "end_date"}
+                    if not required_name.issubset(name_columns):
+                        missing.append("历史股票名称数据字段不完整")
+                except Exception:  # noqa: BLE001
+                    missing.append("无法读取历史股票名称/ST状态数据")
         dates = (
             daily_scan
             .select(pl.col("date").cast(pl.Date).alias("date"))
@@ -87,7 +100,6 @@ class StockPoolDataAdapter:
         first_trade_date = target_dates[0]
         prior_dates = [item for item in dates if item < first_trade_date]
         as_of_date = prior_dates[-1] if prior_dates else None
-        missing: list[str] = []
         daily_days = len(prior_dates)
         if as_of_date is None:
             missing.append("缺少月初前一交易日的日K")
@@ -152,7 +164,7 @@ class StockPoolDataAdapter:
     def load(self, readiness: DataReadiness) -> StockPoolInput:
         if not readiness.ready or readiness.as_of_date is None:
             raise ValueError("数据尚未就绪")
-        daily_dataset, daily_root = self._daily_dataset()
+        _, daily_root = self._daily_dataset()
         daily_scan = pl.scan_parquet(str(daily_root / "**" / "*.parquet"))
         daily_columns = set(daily_scan.collect_schema().names())
         name = pl.col("name").cast(pl.Utf8) if "name" in daily_columns else pl.col("symbol").cast(pl.Utf8)
@@ -169,6 +181,10 @@ class StockPoolDataAdapter:
             .sort(["symbol", "date"])
             .collect()
         )
+        name_changes_path = self._name_changes_path()
+        if name_changes_path.exists():
+            name_changes = pl.read_parquet(name_changes_path)
+            raw_daily = self._apply_point_in_time_name_changes(raw_daily, name_changes)
         # Local Tushare history also keeps delisted securities.  The strategy
         # excludes symbols without an as-of bar, so remove them before the qfq
         # projection instead of requiring a factor at a date they no longer
@@ -210,7 +226,7 @@ class StockPoolDataAdapter:
     def _normalise_financials(df: pl.DataFrame) -> pl.DataFrame:
         period = "period_end" if "period_end" in df.columns else "report_date"
         publish = "announce_date" if "announce_date" in df.columns else "publish_date"
-        revenue_yoy = (
+        provided_revenue_yoy = (
             pl.col("revenue_yoy").cast(pl.Float64, strict=False)
             if "revenue_yoy" in df.columns
             else pl.lit(None, dtype=pl.Float64)
@@ -221,12 +237,13 @@ class StockPoolDataAdapter:
             pl.col(publish).cast(pl.Date, strict=False).alias("publish_date"),
             pl.col("revenue").cast(pl.Float64, strict=False),
             pl.col("net_income").cast(pl.Float64, strict=False).alias("net_profit"),
-            revenue_yoy.alias("revenue_yoy"),
+            provided_revenue_yoy.alias("provided_revenue_yoy"),
         ).drop_nulls(["symbol", "report_date", "publish_date"])
         rows: list[dict[str, object]] = []
         for frame in normalized.partition_by("symbol", maintain_order=False):
-            by_report = {row["report_date"]: row for row in frame.to_dicts()}
-            for row in frame.to_dicts():
+            ordered = frame.sort(["report_date", "publish_date"])
+            by_report = {row["report_date"]: row for row in ordered.to_dicts()}
+            for row in ordered.to_dicts():
                 prior = by_report.get(date(row["report_date"].year - 1, row["report_date"].month, row["report_date"].day))
                 revenue = row.get("revenue")
                 prior_revenue = prior.get("revenue") if prior else None
@@ -235,8 +252,8 @@ class StockPoolDataAdapter:
                     if revenue is not None and prior_revenue is not None and float(prior_revenue) != 0
                     else None
                 )
-                if row.get("revenue_yoy") is None:
-                    row["revenue_yoy"] = calculated_revenue_yoy
+                row["revenue_yoy"] = calculated_revenue_yoy if calculated_revenue_yoy is not None else row.get("provided_revenue_yoy")
+                row.pop("provided_revenue_yoy", None)
                 rows.append(row)
         return pl.DataFrame(rows, schema={
             "symbol": pl.Utf8, "report_date": pl.Date, "publish_date": pl.Date,
@@ -250,12 +267,51 @@ class StockPoolDataAdapter:
         except (OSError, json.JSONDecodeError):
             return None
 
+    @staticmethod
+    def _apply_point_in_time_name_changes(daily: pl.DataFrame, name_changes: pl.DataFrame) -> pl.DataFrame:
+        """Apply historical ST names to daily bars without using today's name."""
+        if daily.is_empty() or name_changes.is_empty():
+            return daily
+        changes = name_changes.select(
+            pl.col("symbol").cast(pl.Utf8),
+            pl.col("name").cast(pl.Utf8).alias("_pit_name"),
+            pl.col("start_date").cast(pl.Date, strict=False),
+            pl.col("end_date").cast(pl.Date, strict=False),
+        ).drop_nulls(["symbol", "_pit_name", "start_date"])
+        candidates = daily.select("symbol", "date").join(changes, on="symbol", how="left")
+        matches = (
+            candidates
+            .filter(
+                (pl.col("start_date") <= pl.col("date"))
+                & (pl.col("end_date").is_null() | (pl.col("date") <= pl.col("end_date")))
+            )
+            .sort(["symbol", "date", "start_date"])
+            .group_by(["symbol", "date"], maintain_order=True)
+            .agg(pl.col("_pit_name").last())
+        )
+        enriched = daily.join(matches, on=["symbol", "date"], how="left")
+        pit_normalized = pl.col("_pit_name").fill_null("").str.strip_chars().str.to_uppercase().str.replace_all(" ", "")
+        pit_is_st = pit_normalized.str.contains(r"^(?:\*ST|ST|S\*ST|SST)")
+        existing_is_st = pl.col("is_st").cast(pl.Boolean, strict=False).fill_null(False)
+        return (
+            enriched
+            .with_columns(
+                pl.when(pl.col("_pit_name").is_not_null()).then(pl.col("_pit_name"))
+                .otherwise(pl.col("name")).alias("name"),
+                (existing_is_st | pit_is_st).alias("is_st"),
+            )
+            .drop("_pit_name")
+        )
+
     def _daily_dataset(self) -> tuple[str, Path]:
         for dataset in ("kline_daily_tushare", "kline_daily_pro"):
             path = self.data_dir / dataset
             if path.exists() and any(path.rglob("*.parquet")):
                 return dataset, path
         return "kline_daily_tushare", self.data_dir / "kline_daily_tushare"
+
+    def _name_changes_path(self) -> Path:
+        return self.data_dir / "name_changes_tushare" / "part.parquet"
 
     def _financial_path(self) -> Path:
         for path in (

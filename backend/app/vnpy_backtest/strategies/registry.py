@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from app.vnpy_backtest.strategies.base import StrategyKind, StrategyParameter, StrategySpec
 from app.vnpy_backtest.strategies.etf_159915_minute import Etf159915MinuteStrategy
+from app.vnpy_backtest.strategies.etf_159915_stock_pool import Etf159915StockPoolStrategy
 from app.vnpy_backtest.strategies.opening_breakout_condition_1 import OpeningBreakoutCondition1Strategy
 from app.vnpy_backtest.strategies.opening_breakout_condition_2 import OpeningBreakoutCondition2Strategy
 from app.vnpy_backtest.strategies.opening_breakout_condition_3 import OpeningBreakoutCondition3Strategy
@@ -18,6 +19,15 @@ _STRATEGIES: dict[str, StrategySpec] = {
         min_symbols=1,
         max_symbols=1,
         description="159915 raw 1m ETF strategy with documented dynamic entry and exit protection.",
+    ),
+    "etf_159915_stock_pool": StrategySpec(
+        id="etf_159915_stock_pool",
+        name="159915 ETF 定时股票池策略",
+        kind=StrategyKind.PORTFOLIO,
+        strategy_class=Etf159915StockPoolStrategy,
+        min_symbols=0,
+        max_symbols=1000,
+        description="以 159915 ETF 原有买卖信号择时，在月度股票池中按相对涨幅和量能筛选个股。",
     ),
     "opening_breakout_pool": StrategySpec(
         id="opening_breakout_pool",

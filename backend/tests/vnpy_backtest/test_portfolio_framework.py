@@ -44,6 +44,7 @@ def test_registry_exposes_only_portfolio_strategies() -> None:
     assert get_strategy("minute_double_ma_volume") is None
     assert [item.id for item in list_strategies()] == [
         "etf_159915_minute",
+        "etf_159915_stock_pool",
         "opening_breakout_pool",
         "opening_breakout_condition_1",
         "opening_breakout_condition_2",
@@ -132,6 +133,66 @@ def test_portfolio_equal_sizing_is_strict_and_score_sizing_is_explicit() -> None
     )
     score_weighted.run_day(bars, _WeightedSignals(), {})
     assert {fill.symbol: fill.volume for fill in score_weighted.fills} == {"600000.SH": 3_300, "300001.SZ": 6_600}
+
+
+def test_portfolio_equal_sizing_can_spend_all_cash_on_selected_candidates() -> None:
+    start = datetime(2026, 1, 5, 9, 30)
+    bars = {
+        "600000.SH": [_bar("600000.SH", Exchange.SSE, start), _bar("600000.SH", Exchange.SSE, start + timedelta(minutes=1))],
+        "300001.SZ": [_bar("300001.SZ", Exchange.SZSE, start), _bar("300001.SZ", Exchange.SZSE, start + timedelta(minutes=1))],
+    }
+
+    class _TwoCandidates:
+        def on_minute(self, _bars, context):
+            if context.timestamp == start:
+                return [OrderIntent(symbol, Direction.LONG, "entry") for symbol in bars]
+            return []
+
+    engine = MultiSymbolNextBarOpenEngine(
+        initial_cash=10_000, commission_rate=0, stamp_tax_rate=0, slippage_rate=0,
+        min_commission=0, max_volume_ratio=None, reserve_ratio=0, position_sizing="equal",
+        max_positions=10, spend_all_equal_budget=True,
+    )
+    engine.run_day(bars, _TwoCandidates(), {})
+
+    assert [fill.volume for fill in engine.fills] == [500, 500]
+    assert engine.cash == 0
+
+
+def test_spend_all_budget_allows_commission_to_be_deducted_outside_principal() -> None:
+    start = datetime(2026, 1, 5, 9, 30)
+    bars = {
+        symbol: [
+            _bar(symbol, Exchange.SSE, start),
+            _bar(symbol, Exchange.SSE, start + timedelta(minutes=1)),
+        ]
+        for symbol in ("600000.SH", "600001.SH")
+    }
+
+    class _TwoCandidates:
+        def on_minute(self, _bars, context):
+            if context.timestamp == start:
+                return [OrderIntent(symbol, Direction.LONG, "entry") for symbol in bars]
+            return []
+
+    engine = MultiSymbolNextBarOpenEngine(
+        initial_cash=10_000,
+        commission_rate=0.001,
+        stamp_tax_rate=0,
+        slippage_rate=0,
+        min_commission=0,
+        max_volume_ratio=None,
+        reserve_ratio=0,
+        position_sizing="equal",
+        max_positions=10,
+        commission_outside_budget=True,
+        spend_all_equal_budget=True,
+    )
+    engine.run_day(bars, _TwoCandidates(), {})
+
+    assert len(engine.fills) == 2
+    assert sum(fill.price * fill.volume for fill in engine.fills) == 10_000
+    assert engine.cash == -10
 
 
 def test_portfolio_equal_sizing_reserves_cash_for_unfilled_position_slots() -> None:
