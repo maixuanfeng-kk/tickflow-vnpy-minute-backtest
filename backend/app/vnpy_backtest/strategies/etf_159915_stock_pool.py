@@ -27,6 +27,7 @@ def select_stock_candidates(
     now: datetime,
     cumulative_volumes: Mapping[str, float],
     pool_symbols: set[str],
+    day_open_prices: Mapping[str, float] | None = None,
 ) -> list[StockCandidate]:
     """Return eligible stocks ordered by current-day volume expansion."""
     candidates: list[StockCandidate] = []
@@ -51,7 +52,8 @@ def select_stock_candidates(
             continue
         if not (stock_return > etf_return and stock_return <= etf_return + 0.02):
             continue
-        if float(bar.close_price) <= float(bar.open_price):
+        day_open = (day_open_prices or {}).get(symbol, float(bar.open_price))
+        if float(bar.close_price) <= float(day_open):
             continue
         if volume_ratio < 1.3:
             continue
@@ -68,14 +70,17 @@ class Etf159915StockPoolStrategy:
         self.monthly_pools = self._normalize_pools(params.get("monthly_pools", {}))
         self._day: date | None = None
         self._cumulative_volumes: dict[str, float] = {}
+        self._day_open_prices: dict[str, float] = {}
 
     def on_minute(self, bars: Mapping[str, BarData], context: PortfolioContext) -> list[OrderIntent]:
         trading_day = context.timestamp.date()
         if self._day != trading_day:
             self._day = trading_day
             self._cumulative_volumes = {}
+            self._day_open_prices = {}
         for symbol, bar in bars.items():
             self._cumulative_volumes[symbol] = self._cumulative_volumes.get(symbol, 0.0) + float(bar.volume)
+            self._day_open_prices.setdefault(symbol, float(bar.open_price))
 
         event = self.etf_events.get(context.timestamp)
         held = set(context.positions)
@@ -102,6 +107,7 @@ class Etf159915StockPoolStrategy:
             now=context.timestamp,
             cumulative_volumes=self._cumulative_volumes,
             pool_symbols=pool_symbols - held,
+            day_open_prices=self._day_open_prices,
         )[:available_slots]
         for rank, candidate in enumerate(candidates, start=1):
             intents.append(OrderIntent(

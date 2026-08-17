@@ -11,6 +11,17 @@ export function is159915StockPoolStrategy(strategyId: string): boolean {
   return strategyId === ETF_159915_STOCK_POOL_STRATEGY_ID
 }
 
+export function usesManagedMonthlyPools(strategyId: string): boolean {
+  return is159915StockPoolStrategy(strategyId)
+}
+
+export function formatMonthlyPoolCounts(counts: Record<string, number> | null | undefined): string {
+  return Object.entries(counts ?? {})
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([month, count]) => `${month} ${count}只`)
+    .join(' · ')
+}
+
 export function normalizeBacktestSymbols(values: string[]): string[] {
   const seen = new Set<string>()
   for (const raw of values) {

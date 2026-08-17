@@ -832,6 +832,9 @@ export interface StrategyBacktestResult {
     score_max: number | null
     max_hold_days: number | null
     source: string
+    timing_strategy_id?: string
+    monthly_pool_counts?: Record<string, number>
+    monthly_pools?: Record<string, Record<string, unknown>>
   }
   elapsed_ms: number
   error: string | null

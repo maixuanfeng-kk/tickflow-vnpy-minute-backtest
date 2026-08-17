@@ -1,7 +1,9 @@
 import json
 import sys
+from datetime import date, datetime
 from types import ModuleType, SimpleNamespace
 
+import polars as pl
 import pytest
 from fastapi import HTTPException
 
@@ -58,6 +60,69 @@ def test_vnpy_readiness_returns_etf_coverage(monkeypatch, tmp_path) -> None:
     )
 
     assert response == expected
+
+
+def test_vnpy_readiness_blocks_etf_stock_pool_when_required_data_is_missing(tmp_path) -> None:
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(repo=SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))))
+    )
+
+    response = backtest.vnpy_readiness(
+        request,
+        strategy_id="etf_159915_stock_pool",
+        symbols="",
+        start="2026-05-06",
+        end="2026-07-31",
+    )
+
+    assert response["ready"] is False
+    assert response["blocking_reasons"]
+
+
+def test_vnpy_readiness_blocks_missing_stock_pool_minute_day(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        "app.vnpy_backtest.readiness.Etf159915ReadinessService.check",
+        lambda self, **kwargs: {
+            "strategy_id": "etf_159915_minute",
+            "ready": True,
+            "blocking_reasons": [],
+            "warnings": [],
+            "coverage": {
+                "daily": {"requested_days": ["2026-05-06", "2026-05-07"]},
+                "minute": {},
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "app.vnpy_backtest.stock_pool_data.monthly_stock_pools",
+        lambda data_dir: {
+            "2026-05": {
+                "effective_date": "2026-05-06",
+                "member_count": 1,
+                "symbols": ["000001.SZ"],
+            },
+        },
+    )
+    part = tmp_path / "kline_minute_tushare" / "date=2026-05-06"
+    part.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["000001.SZ"],
+        "datetime": [datetime(2026, 5, 6, 9, 30)],
+    }).write_parquet(part / "part.parquet")
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(repo=SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))))
+    )
+
+    response = backtest._readiness_for_scope(
+        request,
+        "etf_159915_stock_pool",
+        (),
+        date(2026, 5, 6),
+        date(2026, 5, 7),
+    )
+
+    assert response["ready"] is False
+    assert response["coverage"]["stock_minute"]["missing_days"] == ["2026-05-07"]
 
 
 def test_vnpy_scope_rejects_custom_minute_bounds_for_etf_strategy() -> None:

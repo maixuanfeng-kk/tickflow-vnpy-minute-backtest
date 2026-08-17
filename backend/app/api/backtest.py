@@ -104,7 +104,7 @@ def _readiness_for_scope(
     start: date,
     end: date,
 ) -> dict:
-    if strategy_id != "etf_159915_minute":
+    if strategy_id not in {"etf_159915_minute", "etf_159915_stock_pool"}:
         return {
             "strategy_id": strategy_id,
             "ready": True,
@@ -115,7 +115,44 @@ def _readiness_for_scope(
     from app.vnpy_backtest.readiness import Etf159915ReadinessService
 
     service = Etf159915ReadinessService(request.app.state.repo.store.data_dir)
-    return service.check(symbol=symbols[0], start=start, end=end)
+    result = service.check(symbol="159915.SZ", start=start, end=end)
+    if strategy_id == "etf_159915_minute":
+        return result
+
+    from app.vnpy_backtest.stock_pool_data import (
+        monthly_stock_pools,
+        stock_pool_minute_coverage,
+    )
+
+    blocking = list(result["blocking_reasons"])
+    coverage = dict(result["coverage"])
+    try:
+        pools = monthly_stock_pools(request.app.state.repo.store.data_dir)
+        coverage["stock_pools"] = {
+            month: {key: value for key, value in pool.items() if key != "symbols"}
+            for month, pool in pools.items()
+        }
+        stock_minute = stock_pool_minute_coverage(
+            request.app.state.repo.store.data_dir,
+            pools,
+            list(coverage.get("daily", {}).get("requested_days", [])),
+        )
+        coverage["stock_minute"] = stock_minute
+        if stock_minute["missing_days"]:
+            blocking.append(
+                f"股票分钟数据缺少 {len(stock_minute['missing_days'])} 个交易日。"
+            )
+    except ValueError as exc:
+        blocking.append(str(exc))
+        coverage["stock_pools"] = {}
+        coverage["stock_minute"] = {}
+    return {
+        **result,
+        "strategy_id": strategy_id,
+        "ready": not blocking,
+        "blocking_reasons": blocking,
+        "coverage": coverage,
+    }
 
 
 def _job_key(

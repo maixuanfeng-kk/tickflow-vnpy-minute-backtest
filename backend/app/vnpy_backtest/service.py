@@ -312,6 +312,11 @@ class VnpyMinuteBacktestService:
             get_strategy("etf_159915_minute"),
             ("159915.SZ",),
         )
+        shadow_days = {
+            date.fromisoformat(str(point["date"])[:10])
+            for point in shadow_result.get("equity_curve", [])
+            if config.start <= date.fromisoformat(str(point["date"])[:10]) <= config.end
+        }
         params = dict(config.params)
         params.setdefault("etf_events", self._etf_shadow_events(shadow_result, config))
         params.setdefault("monthly_pools", monthly_pools)
@@ -346,6 +351,7 @@ class VnpyMinuteBacktestService:
             market_days = []
             total_days = max((config.end - config.start).days + 1, 1)
         active_symbols_by_day: dict[date, set[str]] = defaultdict(set)
+        processed_days: set[date] = set()
         days_seen = 0
         for trading_day, frame in self._iter_tushare_minute_days(list(symbols), warmup_start, config.end):
             if config.is_cancelled and config.is_cancelled():
@@ -379,6 +385,7 @@ class VnpyMinuteBacktestService:
                     daily_market_metadata=daily_market_metadata,
                 ),
             )
+            processed_days.add(trading_day)
             daily_context.add_day(full_bars_by_symbol, daily_prices=daily_market_metadata.get(trading_day, {}))
             days_seen += 1
             if config.on_progress:
@@ -386,6 +393,12 @@ class VnpyMinuteBacktestService:
                 config.on_progress(days_seen, max(total_days, 1), trading_day, current_equity)
         if days_seen == 0:
             raise ValueError("所选日期范围内没有本地分钟 K 线数据")
+        missing_days = sorted(shadow_days - processed_days)
+        if missing_days:
+            preview = ", ".join(day.isoformat() for day in missing_days[:5])
+            raise ValueError(
+                f"股票分钟数据缺少 {len(missing_days)} 个交易日: {preview}"
+            )
         result = self._assemble_portfolio_result(
             config=config,
             spec=spec,
@@ -404,7 +417,18 @@ class VnpyMinuteBacktestService:
             "etf_strategy_return": shadow_result.get("stats", {}).get("total_return"),
             "etf_strategy_max_drawdown": shadow_result.get("stats", {}).get("max_drawdown"),
         })
-        result["strategy_info"]["timing_strategy_id"] = "etf_159915_minute"
+        pool_metadata = {
+            month: {key: value for key, value in pool.items() if key != "symbols"}
+            for month, pool in monthly_pools.items()
+        }
+        result["strategy_info"].update({
+            "timing_strategy_id": "etf_159915_minute",
+            "monthly_pool_counts": {
+                month: int(pool["member_count"])
+                for month, pool in monthly_pools.items()
+            },
+            "monthly_pools": pool_metadata,
+        })
         return result
 
     def _assemble_portfolio_result(

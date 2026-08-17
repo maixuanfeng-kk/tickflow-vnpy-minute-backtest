@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, time
 from pathlib import Path
 
+import polars as pl
+import pytest
 from vnpy.trader.constant import Exchange, Interval
 from vnpy.trader.object import BarData
 
@@ -74,6 +77,23 @@ def test_candidate_filter_rejects_equal_etf_return_and_price_below_open() -> Non
     assert [item.symbol for item in candidates] == []
 
 
+def test_candidate_filter_uses_trading_day_open_not_current_minute_open() -> None:
+    now = datetime(2026, 5, 6, 9, 31)
+    bars = {
+        "000001.SZ": _bar("000001.SZ", close=10.20, open_price=10.10, volume=150),
+    }
+    references = {"000001.SZ": _reference(10.0, 9.8, 100)}
+
+    candidates = select_stock_candidates(
+        bars, references, etf_return=0.01, now=now,
+        cumulative_volumes={"000001.SZ": 150},
+        pool_symbols={"000001.SZ"},
+        day_open_prices={"000001.SZ": 10.30},
+    )
+
+    assert candidates == []
+
+
 def test_strategy_emits_ranked_equal_pool_buys_on_etf_buy_event() -> None:
     now = datetime(2026, 5, 6, 9, 31)
     bars = {
@@ -100,3 +120,25 @@ def test_strategy_emits_ranked_equal_pool_buys_on_etf_buy_event() -> None:
 def test_authoritative_may_pool_has_217_members() -> None:
     pools = monthly_stock_pools(Path(__file__).parents[3] / "data")
     assert len(pools["2026-05"]["symbols"]) == 217
+    assert pools["2026-05"]["pool_key"] == "generated:monthly_growth_trend:2026-05"
+    assert pools["2026-05"]["as_of_date"] == "2026-04-30"
+
+
+def test_monthly_stock_pools_rejects_missing_required_snapshot(tmp_path) -> None:
+    root = tmp_path / "user_data" / "watchlist_pools"
+    directory = root / "generated=monthly_growth_trend--2026-05"
+    directory.mkdir(parents=True)
+    pl.DataFrame({"symbol": [f"{index:06d}.SZ" for index in range(217)]}).write_parquet(
+        directory / "members.parquet"
+    )
+    (directory / "manifest.json").write_text(json.dumps({
+        "pool_key": "generated:monthly_growth_trend:2026-05",
+        "month": "2026-05",
+        "source": "stock_pool",
+        "strategy_id": "monthly_growth_trend",
+        "as_of_date": "2026-04-30",
+        "member_count": 217,
+    }), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="2026-06"):
+        monthly_stock_pools(tmp_path)

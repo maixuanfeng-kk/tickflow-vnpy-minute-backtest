@@ -32,11 +32,12 @@ import {
 import { isEtf159915RunBlocked } from './strategy-extensions/etf159915'
 import {
   canRunBacktest,
+  formatMonthlyPoolCounts,
   is159915Strategy,
-  is159915StockPoolStrategy,
   normalizeBacktestSymbols,
   resolveBacktestSymbols,
   symbolsFromPoolEntries,
+  usesManagedMonthlyPools,
   type BacktestPoolSource,
 } from '@/lib/backtest-pools'
 
@@ -809,7 +810,7 @@ export function StrategyBacktest() {
   const highGranularity = true
   const [vnpyStrategyId, setVnpyStrategyId] = useState('opening_breakout_pool')
   const etf159915Strategy = is159915Strategy(vnpyStrategyId)
-  const etf159915StockPoolStrategy = is159915StockPoolStrategy(vnpyStrategyId)
+  const etf159915StockPoolStrategy = usesManagedMonthlyPools(vnpyStrategyId)
   const [vnpyParams, setVnpyParams] = useState<Record<string, unknown>>(VNPY_PORTFOLIO_DEFAULT_PARAMS)
   const [rangeSettingsOpen, setRangeSettingsOpen] = useState(false)
   const [quickRanges, setQuickRanges] = useState(loadQuickRanges)
@@ -875,7 +876,7 @@ export function StrategyBacktest() {
   const etfReadiness = useQuery({
     queryKey: ['vnpy-readiness', vnpyStrategyId, '159915.SZ', start, end, startTime, endTime],
     queryFn: () => api.vnpyReadiness(vnpyStrategyId, ['159915.SZ'], start, end, startTime, endTime),
-    enabled: etf159915Strategy && Boolean(
+    enabled: (etf159915Strategy || etf159915StockPoolStrategy) && Boolean(
       start && end && startTime && endTime && start <= end && (start !== end || startTime <= endTime),
     ),
     retry: false,
@@ -1033,10 +1034,12 @@ export function StrategyBacktest() {
     poolSymbols,
     manualSymbols: symbols.split(','),
   })
-  const etfReadinessBlocked = etf159915Strategy && isEtf159915RunBlocked(etfReadiness)
+  const etfReadinessBlocked = (etf159915Strategy || etf159915StockPoolStrategy) && isEtf159915RunBlocked(etfReadiness)
   const invalidMinuteRange = !startTime || !endTime || (start === end && startTime > endTime)
   const canRunVnpy = (hasRunnableSymbols || etf159915StockPoolStrategy) && !etfReadinessBlocked && !invalidMinuteRange
   const isEtfResult = result?.strategy_info?.id === 'etf_159915_minute'
+  const isEtfStockPoolResult = usesManagedMonthlyPools(result?.strategy_info?.id ?? '')
+  const monthlyPoolSummary = formatMonthlyPoolCounts(result?.strategy_info?.monthly_pool_counts)
 
   // 提取统计
   const s = result?.stats
@@ -1260,7 +1263,7 @@ export function StrategyBacktest() {
     <div className="h-full min-h-0 overflow-hidden rounded-card border border-border bg-surface/80 grid grid-cols-1 xl:grid-cols-[18rem_minmax(0,1fr)]">
       {/* 配置面板 */}
       <section className="space-y-3 border-b xl:border-b-0 xl:border-r border-border bg-base/25 px-3 py-3 xl:overflow-y-auto">
-        {highGranularity && (
+        {highGranularity && !etf159915StockPoolStrategy && (
           <div className="rounded-btn border border-accent/25 bg-accent/5 p-2.5">
             <div className="flex items-center justify-between gap-2">
               <div>
@@ -1272,6 +1275,16 @@ export function StrategyBacktest() {
               </span>
             </div>
             <div className="mt-2"><StockPoolPicker value={symbols} onChange={setSymbols} onPoolStateChange={state => { setPoolSource(state.source); setPoolSymbols(state.symbols) }} /></div>
+          </div>
+        )}
+        {highGranularity && etf159915StockPoolStrategy && (
+          <div className="rounded-btn border border-accent/25 bg-accent/5 p-2.5">
+            <div className="text-xs font-semibold text-foreground">月度股票池</div>
+            <div className="mt-1.5 flex gap-1.5 text-[10px] text-secondary">
+              {['2026-05', '2026-06', '2026-07'].map(month => (
+                <span key={month} className="rounded border border-accent/20 bg-base px-1.5 py-0.5">{month}</span>
+              ))}
+            </div>
           </div>
         )}
         <div>
@@ -1832,7 +1845,11 @@ export function StrategyBacktest() {
                   <span className="text-[10px] text-amber-200/70">基准未配置，超额收益不计算</span>
                 </div>
                 <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-[11px] text-secondary md:grid-cols-4">
-                  <span>股票池 <b className="font-mono text-foreground">{pick('symbols_requested') ?? 0}</b></span>
+                  {isEtfStockPoolResult ? (
+                    <span className="md:col-span-2">月度股票池 <b className="font-mono text-foreground">{monthlyPoolSummary || '—'}</b></span>
+                  ) : (
+                    <span>股票池 <b className="font-mono text-foreground">{pick('symbols_requested') ?? 0}</b></span>
+                  )}
                   <span>回放交易日 <b className="font-mono text-foreground">{pick('trading_days') ?? 0}</b></span>
                   <span>订单成交 <b className="font-mono text-foreground">{pick('order_fill_count') ?? 0}</b></span>
                   <span>期末持仓 <b className="font-mono text-foreground">{pick('open_position_count') ?? 0}</b></span>
