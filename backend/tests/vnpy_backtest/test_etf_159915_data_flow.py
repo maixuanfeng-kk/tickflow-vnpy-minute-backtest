@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import polars as pl
 
+from app.tickflow.etf_datasets import ETF_DAILY_DATASET, ETF_MINUTE_DATASET
 from app.vnpy_backtest.service import VnpyMinuteBacktestConfig, VnpyMinuteBacktestService
 from app.vnpy_backtest.portfolio import DailyContextBuilder
 from app.vnpy_backtest.local_data import bars_from_minute_frame
@@ -13,7 +14,7 @@ def _repo(tmp_path):
 
 
 def test_etf_minute_loader_uses_etf_partitions_and_filters_after_close(tmp_path):
-    path = tmp_path / "kline_etf_minute" / "date=2026-07-01"
+    path = tmp_path / ETF_MINUTE_DATASET / "date=2026-07-01"
     path.mkdir(parents=True)
     pl.DataFrame(
         {
@@ -73,7 +74,7 @@ def test_etf_strategy_is_identified_separately_from_stock_minute_data():
 def test_etf_warmup_start_uses_tenth_prior_daily_trading_day(tmp_path):
     trading_days = [date(2025, 1, day) for day in range(2, 12)]
     for trading_day in trading_days:
-        path = tmp_path / "kline_etf_daily" / f"date={trading_day.isoformat()}"
+        path = tmp_path / ETF_DAILY_DATASET / f"date={trading_day.isoformat()}"
         path.mkdir(parents=True)
         pl.DataFrame(
             {
@@ -86,7 +87,7 @@ def test_etf_warmup_start_uses_tenth_prior_daily_trading_day(tmp_path):
                 "pre_close": [2.0],
             }
         ).write_parquet(path / "part.parquet")
-    other_path = tmp_path / "kline_etf_daily" / "date=2024-12-01"
+    other_path = tmp_path / ETF_DAILY_DATASET / "date=2024-12-01"
     other_path.mkdir(parents=True)
     pl.DataFrame(
         {
@@ -159,7 +160,7 @@ def test_etf_first_backtest_day_uses_daily_history_when_warmup_minutes_are_absen
     ]
     closes = [2.280] * 8 + [2.277, 2.279]
     for index, trading_day in enumerate(prior_days):
-        path = tmp_path / "kline_etf_daily" / f"date={trading_day.isoformat()}"
+        path = tmp_path / ETF_DAILY_DATASET / f"date={trading_day.isoformat()}"
         path.mkdir(parents=True)
         open_price = 2.287 if trading_day == date(2022, 12, 30) else closes[index]
         pl.DataFrame(
@@ -173,7 +174,7 @@ def test_etf_first_backtest_day_uses_daily_history_when_warmup_minutes_are_absen
         ).write_parquet(path / "part.parquet")
 
     signal_day = date(2023, 1, 3)
-    minute_path = tmp_path / "kline_etf_minute" / f"date={signal_day.isoformat()}"
+    minute_path = tmp_path / ETF_MINUTE_DATASET / f"date={signal_day.isoformat()}"
     minute_path.mkdir(parents=True)
     minute_times = [time(9, 30), time(9, 31), time(9, 32), time(11, 28), time(11, 29)]
     pl.DataFrame(
@@ -204,7 +205,7 @@ def test_etf_first_backtest_day_uses_daily_history_when_warmup_minutes_are_absen
 
 def test_etf_daily_metadata_overrides_minute_aggregated_low(tmp_path):
     trading_day = date(2025, 1, 9)
-    daily_path = tmp_path / "kline_etf_daily" / f"date={trading_day.isoformat()}"
+    daily_path = tmp_path / ETF_DAILY_DATASET / f"date={trading_day.isoformat()}"
     daily_path.mkdir(parents=True)
     pl.DataFrame(
         {

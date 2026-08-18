@@ -85,7 +85,7 @@ def _parse_vnpy_scope(
         raise HTTPException(status_code=400, detail="end 不能早于 start")
     start_time_value = _parse_vnpy_time(start_time, "09:30")
     end_time_value = _parse_vnpy_time(end_time, "15:00")
-    if strategy_id == "etf_159915_minute" and (
+    if strategy_id in {"etf_159915_minute", "etf_159915_component_weighted"} and (
         start_time_value != dt_time(9, 30) or end_time_value != dt_time(15, 0)
     ):
         raise HTTPException(
@@ -104,6 +104,19 @@ def _readiness_for_scope(
     start: date,
     end: date,
 ) -> dict:
+    if strategy_id == "etf_159915_component_weighted":
+        from app.vnpy_backtest.etf_component_data import snapshot_dates
+        from app.vnpy_backtest.readiness import Etf159915ReadinessService
+        result = Etf159915ReadinessService(request.app.state.repo.store.data_dir).check(symbol="159915.SZ", start=start, end=end)
+        days = snapshot_dates(request.app.state.repo.store.data_dir, start, end)
+        blocking = list(result["blocking_reasons"])
+        required = result.get("coverage", {}).get("daily", {}).get("requested_days", [])
+        missing = [day for day in required if date.fromisoformat(str(day)) not in set(days)]
+        if missing:
+            blocking.append(f"缺少 {len(missing)} 个成分股快照日期")
+        coverage = dict(result.get("coverage", {}))
+        coverage["components"] = {"available_days": [day.isoformat() for day in days], "missing_days": missing}
+        return {**result, "strategy_id": strategy_id, "ready": not blocking, "blocking_reasons": blocking, "coverage": coverage}
     if strategy_id not in {"etf_159915_minute", "etf_159915_stock_pool"}:
         return {
             "strategy_id": strategy_id,

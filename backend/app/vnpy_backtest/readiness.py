@@ -6,6 +6,8 @@ from pathlib import Path
 
 import polars as pl
 
+from app.tickflow.etf_datasets import ETF_DAILY_DATASET, ETF_MINUTE_DATASET
+
 
 class Etf159915ReadinessService:
     EXPECTED_MINUTE_ROWS = 241
@@ -85,7 +87,7 @@ class Etf159915ReadinessService:
         }
 
     def _load_daily(self, symbol: str) -> tuple[pl.DataFrame | None, str | None]:
-        root = self.data_dir / "kline_etf_daily"
+        root = self.data_dir / ETF_DAILY_DATASET
         if not root.exists():
             return None, "ETF 日线数据集不存在。"
         try:
@@ -123,7 +125,7 @@ class Etf159915ReadinessService:
     def _load_minute(
         self, symbol: str, start: date, end: date
     ) -> tuple[pl.DataFrame | None, str | None]:
-        root = self.data_dir / "kline_etf_minute"
+        root = self.data_dir / ETF_MINUTE_DATASET
         if not root.exists():
             return None, "ETF 分钟数据集不存在。"
         try:

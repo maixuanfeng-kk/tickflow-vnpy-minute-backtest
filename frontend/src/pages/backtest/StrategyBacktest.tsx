@@ -34,6 +34,7 @@ import {
   canRunBacktest,
   formatMonthlyPoolCounts,
   is159915Strategy,
+  is159915ComponentWeightedStrategy,
   normalizeBacktestSymbols,
   resolveBacktestSymbols,
   symbolsFromPoolEntries,
@@ -810,6 +811,7 @@ export function StrategyBacktest() {
   const highGranularity = true
   const [vnpyStrategyId, setVnpyStrategyId] = useState('opening_breakout_pool')
   const etf159915Strategy = is159915Strategy(vnpyStrategyId)
+  const etf159915ComponentStrategy = is159915ComponentWeightedStrategy(vnpyStrategyId)
   const etf159915StockPoolStrategy = usesManagedMonthlyPools(vnpyStrategyId)
   const [vnpyParams, setVnpyParams] = useState<Record<string, unknown>>(VNPY_PORTFOLIO_DEFAULT_PARAMS)
   const [rangeSettingsOpen, setRangeSettingsOpen] = useState(false)
@@ -876,7 +878,7 @@ export function StrategyBacktest() {
   const etfReadiness = useQuery({
     queryKey: ['vnpy-readiness', vnpyStrategyId, '159915.SZ', start, end, startTime, endTime],
     queryFn: () => api.vnpyReadiness(vnpyStrategyId, ['159915.SZ'], start, end, startTime, endTime),
-    enabled: (etf159915Strategy || etf159915StockPoolStrategy) && Boolean(
+    enabled: (etf159915Strategy || etf159915StockPoolStrategy || etf159915ComponentStrategy) && Boolean(
       start && end && startTime && endTime && start <= end && (start !== end || startTime <= endTime),
     ),
     retry: false,
@@ -912,6 +914,19 @@ export function StrategyBacktest() {
     setStartTime('09:30')
     setEndTime('15:00')
   }, [etf159915Strategy])
+
+  useEffect(() => {
+    if (!etf159915ComponentStrategy) return
+    setSymbols('159915.SZ')
+    setPoolSource('manual')
+    setPoolSymbols([])
+    setSignalPriceBasis('raw')
+    setMaxPositions('10000')
+    setPositionSizing('equal')
+    setVolumeLimitEnabled(false)
+    setStartTime('09:30')
+    setEndTime('15:00')
+  }, [etf159915ComponentStrategy])
 
   useEffect(() => {
     if (!etf159915StockPoolStrategy) return
@@ -986,7 +1001,7 @@ export function StrategyBacktest() {
   }, [backtestTask])
 
   const handleRun = () => {
-    const requestSymbols = etf159915Strategy ? ['159915.SZ'] : etf159915StockPoolStrategy ? [] : resolveBacktestSymbols({
+    const requestSymbols = (etf159915Strategy || etf159915ComponentStrategy) ? ['159915.SZ'] : etf159915StockPoolStrategy ? [] : resolveBacktestSymbols({
       source: poolSource,
       poolSymbols,
       manualSymbols: symbols.split(','),
@@ -996,7 +1011,7 @@ export function StrategyBacktest() {
       || !startTime
       || !endTime
       || (start === end && startTime > endTime)
-      || (etf159915Strategy && isEtf159915RunBlocked(etfReadiness))
+      || ((etf159915Strategy || etf159915ComponentStrategy) && isEtf159915RunBlocked(etfReadiness))
     ) return
     startBacktest({
       strategy_id: vnpyStrategyId,
@@ -1034,10 +1049,11 @@ export function StrategyBacktest() {
     poolSymbols,
     manualSymbols: symbols.split(','),
   })
-  const etfReadinessBlocked = (etf159915Strategy || etf159915StockPoolStrategy) && isEtf159915RunBlocked(etfReadiness)
+  const etfReadinessBlocked = (etf159915Strategy || etf159915StockPoolStrategy || etf159915ComponentStrategy) && isEtf159915RunBlocked(etfReadiness)
   const invalidMinuteRange = !startTime || !endTime || (start === end && startTime > endTime)
-  const canRunVnpy = (hasRunnableSymbols || etf159915StockPoolStrategy) && !etfReadinessBlocked && !invalidMinuteRange
+  const canRunVnpy = (hasRunnableSymbols || etf159915StockPoolStrategy || etf159915ComponentStrategy) && !etfReadinessBlocked && !invalidMinuteRange
   const isEtfResult = result?.strategy_info?.id === 'etf_159915_minute'
+  const isEtfComponentResult = result?.strategy_info?.id === 'etf_159915_component_weighted'
   const isEtfStockPoolResult = usesManagedMonthlyPools(result?.strategy_info?.id ?? '')
   const monthlyPoolSummary = formatMonthlyPoolCounts(result?.strategy_info?.monthly_pool_counts)
 
@@ -1845,7 +1861,12 @@ export function StrategyBacktest() {
                   <span className="text-[10px] text-amber-200/70">基准未配置，超额收益不计算</span>
                 </div>
                 <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-[11px] text-secondary md:grid-cols-4">
-                  {isEtfStockPoolResult ? (
+                  {isEtfComponentResult ? (
+                    <>
+                      <span>成分股 <b className="font-mono text-foreground">{result.strategy_info.component_count ?? 0}</b></span>
+                      <span className="md:col-span-2">过滤 <b className="font-mono text-foreground">{Object.entries(result.strategy_info.filter_counts ?? {}).map(([key, value]) => `${key}:${value}`).join('，') || '—'}</b></span>
+                    </>
+                  ) : isEtfStockPoolResult ? (
                     <span className="md:col-span-2">月度股票池 <b className="font-mono text-foreground">{monthlyPoolSummary || '—'}</b></span>
                   ) : (
                     <span>股票池 <b className="font-mono text-foreground">{pick('symbols_requested') ?? 0}</b></span>
@@ -1905,7 +1926,7 @@ export function StrategyBacktest() {
                     'trades',
                     'signals',
                     'positions',
-                    ...(isEtfResult ? ['execution' as const] : []),
+                    ...((isEtfResult || isEtfComponentResult) ? ['execution' as const] : []),
                   ] as const).map(t => (
                     <button
                       key={t}
@@ -2117,7 +2138,7 @@ export function StrategyBacktest() {
                   <div className="overflow-x-auto"><table className="w-full min-w-[1040px] text-sm"><thead className="bg-elevated"><tr className="text-left text-secondary"><th className="px-4 py-2.5 font-medium">股票代码</th><th className="px-4 py-2.5 font-medium">股票名称</th><th className="px-4 py-2.5 font-medium text-right">持仓股数</th><th className="px-4 py-2.5 font-medium text-right">成本 / 收盘</th><th className="px-4 py-2.5 font-medium text-right">市值 / 仓位</th><th className="px-4 py-2.5 font-medium text-right">浮动盈亏</th><th className="px-4 py-2.5 font-medium">建仓 / 持有</th></tr></thead><tbody>{(result.positions ?? []).map(item => <tr key={item.symbol} className="border-t border-border hover:bg-elevated/50"><td className="px-4 py-2 font-mono">{item.symbol}</td><td className="px-4 py-2 font-medium">{item.name || '名称未知'}</td><td className="px-4 py-2 text-right num">{fmtShares(item.volume)}</td><td className="px-4 py-2 text-right num"><div>{fmtPrice(item.average_cost)}</div><div className="mt-0.5 text-xs text-muted">{fmtPrice(item.mark_price)}</div></td><td className="px-4 py-2 text-right num"><div>{fmtMoney(item.market_value)}</div><div className="mt-0.5 text-xs text-muted">{fmtPct(item.position_pct)}</div></td><td className={`px-4 py-2 text-right num ${priceColorClass(item.unrealized_pnl)}`}><div>{fmtSignedMoney(item.unrealized_pnl)}</div><div className="mt-0.5 text-xs">{fmtPct(item.unrealized_pnl_pct)}</div></td><td className="px-4 py-2 text-xs text-secondary"><div>{item.entry_date || '—'}</div><div className="mt-0.5">{item.holding_days} 个交易日 · {item.holding_minutes} 个有效分钟</div></td></tr>)}</tbody></table>{!(result.positions?.length) && <div className="p-8 text-center text-sm text-muted">回测结束时没有未平仓持仓。</div>}</div>
                 )}
 
-                {resultTab === 'execution' && isEtfResult && (
+                {resultTab === 'execution' && (isEtfResult || isEtfComponentResult) && (
                   <Etf159915ExecutionTrace result={result} />
                 )}
               </div>

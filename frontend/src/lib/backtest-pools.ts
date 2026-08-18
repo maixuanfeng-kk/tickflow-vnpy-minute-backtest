@@ -2,9 +2,14 @@ export type BacktestPoolSource = 'manual' | 'pool'
 
 export const ETF_159915_STRATEGY_ID = 'etf_159915_minute'
 export const ETF_159915_STOCK_POOL_STRATEGY_ID = 'etf_159915_stock_pool'
+export const ETF_159915_COMPONENT_WEIGHTED_STRATEGY_ID = 'etf_159915_component_weighted'
 
 export function is159915Strategy(strategyId: string): boolean {
   return strategyId === ETF_159915_STRATEGY_ID
+}
+
+export function is159915ComponentWeightedStrategy(strategyId: string): boolean {
+  return strategyId === ETF_159915_COMPONENT_WEIGHTED_STRATEGY_ID
 }
 
 export function is159915StockPoolStrategy(strategyId: string): boolean {

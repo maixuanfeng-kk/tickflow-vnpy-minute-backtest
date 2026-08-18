@@ -3,6 +3,7 @@ from datetime import date, datetime, time, timedelta
 import polars as pl
 
 from app.vnpy_backtest.readiness import Etf159915ReadinessService
+from app.tickflow.etf_datasets import ETF_DAILY_DATASET, ETF_MINUTE_DATASET
 
 
 SYMBOL = "159915.SZ"
@@ -16,7 +17,7 @@ def _write_daily(
     invalid_high: bool = False,
 ) -> None:
     for trading_day in days:
-        path = root / "kline_etf_daily" / f"date={trading_day.isoformat()}"
+        path = root / ETF_DAILY_DATASET / f"date={trading_day.isoformat()}"
         path.mkdir(parents=True, exist_ok=True)
         columns = {"symbol": [SYMBOL], "date": [trading_day]}
         if include_strategy_fields:
@@ -47,7 +48,7 @@ def _minute_times() -> list[time]:
 def _write_minute(root, trading_day: date, *, omitted: set[time] | None = None, zero_at: time | None = None) -> None:
     omitted = omitted or set()
     times = [value for value in _minute_times() if value not in omitted]
-    path = root / "kline_etf_minute" / f"date={trading_day.isoformat()}"
+    path = root / ETF_MINUTE_DATASET / f"date={trading_day.isoformat()}"
     path.mkdir(parents=True, exist_ok=True)
     pl.DataFrame(
         {
@@ -143,7 +144,7 @@ def test_minute_schema_missing_execution_prices_blocks_readiness(tmp_path) -> No
     _write_daily(tmp_path, [*warmup, *requested])
     for trading_day in [*warmup, *requested]:
         _write_minute(tmp_path, trading_day)
-    part = tmp_path / "kline_etf_minute" / f"date={requested[0].isoformat()}" / "part.parquet"
+    part = tmp_path / ETF_MINUTE_DATASET / f"date={requested[0].isoformat()}" / "part.parquet"
     pl.read_parquet(part).drop("amount").write_parquet(part)
 
     result = Etf159915ReadinessService(tmp_path).check(

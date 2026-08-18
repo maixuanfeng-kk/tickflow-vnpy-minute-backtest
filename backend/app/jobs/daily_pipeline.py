@@ -23,6 +23,7 @@ from app.indicators.pipeline import run_pipeline
 from app.config import settings
 from app.services import index_sync, instrument_sync, kline_sync, preferences as _prefs
 from app.tickflow.capabilities import Cap, CapabilitySet
+from app.tickflow.etf_datasets import ETF_DAILY_DATASET, ETF_MINUTE_DATASET
 from app.tickflow.pools import DEMO_SYMBOLS, get_pool
 from app.tickflow.repository import KlineRepository
 
@@ -553,9 +554,9 @@ def _refresh_single_view(repo: KlineRepository, name: str) -> None:
         "kline_enriched": f"{d}/kline_daily_enriched/**/*.parquet",
         "kline_index_daily": f"{d}/kline_index_daily/**/*.parquet",
         "kline_index_enriched": f"{d}/kline_index_enriched/**/*.parquet",
-        "kline_etf_daily": f"{d}/kline_etf_daily/**/*.parquet",
+        "kline_etf_daily": f"{d}/{ETF_DAILY_DATASET}/**/*.parquet",
         "kline_etf_enriched": f"{d}/kline_etf_enriched/**/*.parquet",
-        "kline_etf_minute": f"{d}/kline_etf_minute/**/*.parquet",
+        "kline_etf_minute": f"{d}/{ETF_MINUTE_DATASET}/**/*.parquet",
         "kline_minute": f"{d}/kline_minute/**/*.parquet",
         "adj_factor": f"{d}/adj_factor/**/*.parquet",
         "adj_factor_etf": f"{d}/adj_factor_etf/**/*.parquet",

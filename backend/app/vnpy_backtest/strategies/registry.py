@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from app.vnpy_backtest.strategies.base import StrategyKind, StrategyParameter, StrategySpec
 from app.vnpy_backtest.strategies.etf_159915_minute import Etf159915MinuteStrategy
+from app.vnpy_backtest.strategies.etf_159915_component_weighted import Etf159915ComponentWeightedStrategy
 from app.vnpy_backtest.strategies.etf_159915_stock_pool import Etf159915StockPoolStrategy
 from app.vnpy_backtest.strategies.opening_breakout_condition_1 import OpeningBreakoutCondition1Strategy
 from app.vnpy_backtest.strategies.opening_breakout_condition_2 import OpeningBreakoutCondition2Strategy
@@ -28,6 +29,18 @@ _STRATEGIES: dict[str, StrategySpec] = {
         min_symbols=0,
         max_symbols=1000,
         description="以 159915 ETF 原有买卖信号择时，在月度股票池中按相对涨幅和量能筛选个股。",
+    ),
+    "etf_159915_component_weighted": StrategySpec(
+        id="etf_159915_component_weighted",
+        name="159915 ETF 成分股加权策略",
+        kind=StrategyKind.PORTFOLIO,
+        strategy_class=Etf159915ComponentWeightedStrategy,
+        min_symbols=1,
+        max_symbols=1,
+        description="ETF 分钟信号驱动成分股下一分钟开盘按调整权重建仓。",
+        parameters=(
+            StrategyParameter("capital_usage_ratio", "资金使用比例", 0.97, minimum=0.01, maximum=1.0),
+        ),
     ),
     "opening_breakout_pool": StrategySpec(
         id="opening_breakout_pool",

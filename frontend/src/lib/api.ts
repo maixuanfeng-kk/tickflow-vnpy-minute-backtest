@@ -2740,3 +2740,6 @@ export interface AnalysisMenu {
   updated_at?: string | null
   builtin?: boolean
 }
+    component_count?: number
+    filter_counts?: Record<string, number>
+    component_batches?: Record<string, Array<Record<string, unknown>>>

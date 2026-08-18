@@ -8,6 +8,8 @@ from pathlib import Path
 
 import polars as pl
 
+from app.tickflow.etf_datasets import ETF_MINUTE_DATASET
+
 CANONICAL_COLUMNS = ["symbol", "datetime", "open", "high", "low", "close", "volume", "amount"]
 
 
@@ -146,7 +148,7 @@ class LocalEtfMinuteCsvImporter:
         )
         for (trade_date,), partition in incoming.partition_by("_trade_date", as_dict=True).items():
             date_text = str(trade_date)
-            output = self.data_dir / "kline_etf_minute" / f"date={date_text}" / "part.parquet"
+            output = self.data_dir / ETF_MINUTE_DATASET / f"date={date_text}" / "part.parquet"
             output.parent.mkdir(parents=True, exist_ok=True)
             partition = partition.drop("_trade_date")
             existing = pl.read_parquet(output) if output.exists() else pl.DataFrame(schema=partition.schema)
@@ -166,5 +168,5 @@ def refresh_etf_minute_view(repo) -> None:
     data_dir = repo.store.data_dir.as_posix()
     repo.db.execute(
         f"""CREATE OR REPLACE VIEW kline_etf_minute AS
-            SELECT * FROM read_parquet('{data_dir}/kline_etf_minute/**/*.parquet', union_by_name=true)"""
+            SELECT * FROM read_parquet('{data_dir}/{ETF_MINUTE_DATASET}/**/*.parquet', union_by_name=true)"""
     )

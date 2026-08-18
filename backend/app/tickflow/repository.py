@@ -27,6 +27,7 @@ import polars as pl
 
 from app.config import settings
 from app.parquet import scan_enriched_parquet
+from app.tickflow.etf_datasets import ETF_DAILY_DATASET, ETF_MINUTE_DATASET
 
 logger = logging.getLogger(__name__)
 
@@ -53,9 +54,9 @@ class DataStore:
             "kline_daily_enriched",
             "kline_index_daily",
             "kline_index_enriched",
-            "kline_etf_daily",
+            ETF_DAILY_DATASET,
             "kline_etf_enriched",
-            "kline_etf_minute",
+            ETF_MINUTE_DATASET,
             "kline_minute",
             "adj_factor",
             "adj_factor_etf",
@@ -153,11 +154,11 @@ class DataStore:
             f"""CREATE OR REPLACE VIEW kline_index_enriched AS
                 SELECT * FROM read_parquet('{d}/kline_index_enriched/**/*.parquet', union_by_name=true)""",
             f"""CREATE OR REPLACE VIEW kline_etf_daily AS
-                SELECT * FROM read_parquet('{d}/kline_etf_daily/**/*.parquet', union_by_name=true)""",
+                SELECT * FROM read_parquet('{d}/{ETF_DAILY_DATASET}/**/*.parquet', union_by_name=true)""",
             f"""CREATE OR REPLACE VIEW kline_etf_enriched AS
                 SELECT * FROM read_parquet('{d}/kline_etf_enriched/**/*.parquet', union_by_name=true)""",
             f"""CREATE OR REPLACE VIEW kline_etf_minute AS
-                SELECT * FROM read_parquet('{d}/kline_etf_minute/**/*.parquet', union_by_name=true)""",
+                SELECT * FROM read_parquet('{d}/{ETF_MINUTE_DATASET}/**/*.parquet', union_by_name=true)""",
             f"""CREATE OR REPLACE VIEW kline_minute AS
                 SELECT * FROM read_parquet('{d}/kline_minute/**/*.parquet', union_by_name=true)""",
             f"""CREATE OR REPLACE VIEW adj_factor AS
@@ -225,7 +226,7 @@ class DataStore:
                        'index' AS asset_type, 'tickflow' AS source
                 FROM kline_index_daily
             """)
-        if self._has_parquet("kline_etf_daily"):
+        if self._has_parquet(ETF_DAILY_DATASET):
             daily_parts.append("""
                 SELECT symbol, date, open, high, low, close, volume, amount,
                        'etf' AS asset_type, 'tickflow' AS source
@@ -245,7 +246,7 @@ class DataStore:
                        'stock' AS asset_type, 'tickflow' AS source
                 FROM kline_minute
             """)
-        if self._has_parquet("kline_etf_minute"):
+        if self._has_parquet(ETF_MINUTE_DATASET):
             minute_parts.append("""
                 SELECT symbol, datetime, open, high, low, close, volume, amount,
                        'etf' AS asset_type, 'tickflow' AS source
@@ -334,7 +335,7 @@ class KlineRepository:
         self._index_enriched_glob = str(store.data_dir / "kline_index_enriched" / "**" / "*.parquet")
         self._etf_enriched_glob = str(store.data_dir / "kline_etf_enriched" / "**" / "*.parquet")
         self._minute_glob = str(store.data_dir / "kline_minute" / "**" / "*.parquet")
-        self._etf_minute_glob = str(store.data_dir / "kline_etf_minute" / "**" / "*.parquet")
+        self._etf_minute_glob = str(store.data_dir / ETF_MINUTE_DATASET / "**" / "*.parquet")
         self._inst_glob = str(store.data_dir / "instruments" / "**" / "*.parquet")
         self._index_inst_glob = str(store.data_dir / "instruments_index" / "**" / "*.parquet")
         self._etf_inst_glob = str(store.data_dir / "instruments_etf" / "**" / "*.parquet")
@@ -1813,7 +1814,7 @@ class KlineRepository:
         """按日分区写入 ETF 日K数据 (merge-upsert)。"""
         if df.is_empty():
             return
-        self._write_daily_partition(df, "kline_etf_daily")
+        self._write_daily_partition(df, ETF_DAILY_DATASET)
 
     def append_etf_enriched(self, df: pl.DataFrame) -> None:
         """按日分区写入 ETF enriched 数据。磁盘仅写入基础行情窄表。"""
@@ -1874,7 +1875,7 @@ class KlineRepository:
             f"""CREATE OR REPLACE VIEW kline_index_enriched AS
                 SELECT * FROM read_parquet('{d}/kline_index_enriched/**/*.parquet', union_by_name=true)""",
             f"""CREATE OR REPLACE VIEW kline_etf_daily AS
-                SELECT * FROM read_parquet('{d}/kline_etf_daily/**/*.parquet', union_by_name=true)""",
+                SELECT * FROM read_parquet('{d}/{ETF_DAILY_DATASET}/**/*.parquet', union_by_name=true)""",
             f"""CREATE OR REPLACE VIEW kline_etf_enriched AS
                 SELECT * FROM read_parquet('{d}/kline_etf_enriched/**/*.parquet', union_by_name=true)""",
             f"""CREATE OR REPLACE VIEW instruments_index AS
@@ -1904,9 +1905,9 @@ class KlineRepository:
             "kline_enriched": f"{d}/kline_daily_enriched/**/*.parquet",
             "kline_index_daily": f"{d}/kline_index_daily/**/*.parquet",
             "kline_index_enriched": f"{d}/kline_index_enriched/**/*.parquet",
-            "kline_etf_daily": f"{d}/kline_etf_daily/**/*.parquet",
+            "kline_etf_daily": f"{d}/{ETF_DAILY_DATASET}/**/*.parquet",
             "kline_etf_enriched": f"{d}/kline_etf_enriched/**/*.parquet",
-            "kline_etf_minute": f"{d}/kline_etf_minute/**/*.parquet",
+            "kline_etf_minute": f"{d}/{ETF_MINUTE_DATASET}/**/*.parquet",
             "kline_minute": f"{d}/kline_minute/**/*.parquet",
             "adj_factor": f"{d}/adj_factor/**/*.parquet",
             "adj_factor_etf": f"{d}/adj_factor_etf/**/*.parquet",
@@ -1968,7 +1969,7 @@ class KlineRepository:
         table = {
             "stock": "kline_daily",
             "index": "kline_index_daily",
-            "etf": "kline_etf_daily",
+            "etf": ETF_DAILY_DATASET,
         }.get(asset_type)
         if not table:
             return
@@ -2065,7 +2066,7 @@ class KlineRepository:
         table = {
             "stock": "kline_daily",
             "index": "kline_index_daily",
-            "etf": "kline_etf_daily",
+            "etf": ETF_DAILY_DATASET,
         }.get(asset_type)
         if not table:
             return

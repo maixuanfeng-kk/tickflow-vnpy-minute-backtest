@@ -94,6 +94,7 @@ class OrderIntent:
     reason: str
     volume: int | None = None
     target_cash: float | None = None
+    target_weight: float | None = None
     # Strategy-owned, JSON-safe context for the result-page signal diagnostic.
     # It never participates in sizing or matching.
     diagnostic: Mapping[str, object] = field(default_factory=dict)

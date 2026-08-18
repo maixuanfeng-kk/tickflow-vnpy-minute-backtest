@@ -12,6 +12,7 @@ from typing import Any, Callable
 from fastapi import APIRouter, Request
 
 from app.indicators.pipeline import ENRICHED_COLUMNS
+from app.tickflow.etf_datasets import ETF_DAILY_DATASET, ETF_MINUTE_DATASET
 
 logger = logging.getLogger(__name__)
 
@@ -490,7 +491,7 @@ def _compute_storage(data_dir: Path) -> dict:
         "index_daily": data_dir / "kline_index_daily",
         "index_enriched": data_dir / "kline_index_enriched",
         "index_instruments": data_dir / "instruments_index",
-        "etf_daily": data_dir / "kline_etf_daily",
+        "etf_daily": data_dir / ETF_DAILY_DATASET,
         "etf_enriched": data_dir / "kline_etf_enriched",
         "etf_instruments": data_dir / "instruments_etf",
         "etf_adj_factor": data_dir / "adj_factor_etf",
@@ -654,7 +655,7 @@ def clear_data(request: Request):
 
     for sub in (
         "kline_daily", "kline_daily_enriched", "kline_index_daily", "kline_index_enriched",
-        "kline_etf_daily", "kline_etf_enriched", "kline_etf_minute", "kline_minute",
+        ETF_DAILY_DATASET, "kline_etf_enriched", ETF_MINUTE_DATASET, "kline_minute",
         "adj_factor", "adj_factor_etf", "instruments", "instruments_index", "instruments_etf", "pools", "financials",
         "backtest_results", "screener_results", "ai_cache",
     ):

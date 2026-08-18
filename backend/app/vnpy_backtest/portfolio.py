@@ -261,8 +261,8 @@ class MultiSymbolNextBarOpenEngine:
         self.min_commission = float(min_commission)
         self.max_volume_ratio = max_volume_ratio
         self.max_positions = max(1, int(max_positions))
-        if position_sizing not in {"equal", "score_weight"}:
-            raise ValueError("position_sizing must be equal or score_weight")
+        if position_sizing not in {"equal", "score_weight", "target_weight"}:
+            raise ValueError("position_sizing must be equal, score_weight or target_weight")
         self.position_sizing = position_sizing
         self.reserve_ratio = max(float(reserve_ratio), 0.0)
         self.commission_outside_budget = bool(commission_outside_budget)
@@ -348,6 +348,11 @@ class MultiSymbolNextBarOpenEngine:
         recorded = [(intent, self._record_signal(intent, timestamp)) for intent in intents]
         sells = [(intent, signal_id) for intent, signal_id in recorded if intent.direction == Direction.SHORT]
         buys = [(intent, signal_id) for intent, signal_id in recorded if intent.direction == Direction.LONG]
+        if any(bool(intent.diagnostic.get("cancel_pending_buys")) for intent, _ in sells):
+            for pending in list(self.pending):
+                if pending.direction == Direction.LONG:
+                    self.pending.remove(pending)
+                    self._reject(pending.symbol, timestamp, "cancelled_by_sell", pending.signal_id)
         for intent, signal_id in sells:
             due_at = next_times.get((intent.symbol, timestamp))
             if due_at is None:
@@ -387,7 +392,7 @@ class MultiSymbolNextBarOpenEngine:
             candidates.append((intent, signal_id, due_at))
 
         available = max(context.available_cash * (1 - self.reserve_ratio), 0.0)
-        remaining_slots = max(self.max_positions - occupied_slots, 0)
+        remaining_slots = len(candidates) if self.position_sizing == "target_weight" else max(self.max_positions - occupied_slots, 0)
         selected = candidates[:remaining_slots]
         budgets = self._allocation_budgets(selected, available, remaining_slots)
         queued_primaries: list[tuple[OrderIntent, int, datetime, float]] = []
@@ -472,7 +477,10 @@ class MultiSymbolNextBarOpenEngine:
             )
             return [per_slot_budget] * len(selected)
 
-        raw_scores = [self._allocation_score(intent) for intent, _, _ in selected]
+        if self.position_sizing == "target_weight":
+            raw_scores = [max(float(intent.diagnostic.get("normalized_weight", 0.0)), 0.0) for intent, _, _ in selected]
+        else:
+            raw_scores = [self._allocation_score(intent) for intent, _, _ in selected]
         score_total = sum(raw_scores)
         if score_total <= 0:
             return [available / len(selected)] * len(selected)

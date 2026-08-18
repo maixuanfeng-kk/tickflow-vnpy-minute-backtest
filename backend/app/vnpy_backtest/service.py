@@ -18,6 +18,8 @@ from app.vnpy_backtest.portfolio import DailyContextBuilder, MultiSymbolNextBarO
 from app.vnpy_backtest.signal_prices import MinuteSignalPriceProjector
 from app.vnpy_backtest.strategies.base import StrategySpec
 from app.vnpy_backtest.strategies.registry import get_strategy
+from app.tickflow.etf_datasets import ETF_DAILY_DATASET, ETF_MINUTE_DATASET
+from app.vnpy_backtest.etf_component_data import adjusted_weights, load_snapshot
 
 
 @dataclass(frozen=True)
@@ -63,9 +65,9 @@ class VnpyMinuteBacktestService:
         symbols = config.normalized_symbols
         if not spec.min_symbols <= len(symbols) <= spec.max_symbols:
             raise ValueError(f"{spec.name} 支持 {spec.min_symbols}-{spec.max_symbols} 只股票")
-        if self._is_etf_strategy(config.strategy_id) and symbols != ("159915.SZ",):
+        if (self._is_etf_strategy(config.strategy_id) or self._is_etf_component_strategy(config.strategy_id)) and symbols != ("159915.SZ",):
             raise ValueError("etf_159915_minute 只支持 159915.SZ")
-        if self._is_etf_strategy(config.strategy_id) and (
+        if (self._is_etf_strategy(config.strategy_id) or self._is_etf_component_strategy(config.strategy_id)) and (
             config.start_time != time(9, 30) or config.end_time != time(15, 0)
         ):
             raise ValueError("etf_159915_minute 只支持完整交易日 09:30-15:00")
@@ -105,9 +107,20 @@ class VnpyMinuteBacktestService:
                 "spend_all_equal_budget": True,
                 "stamp_tax_rate": config.stamp_tax_pct,
             })
+        elif self._is_etf_component_strategy(config.strategy_id):
+            settings.update({
+                "max_volume_ratio": None,
+                "max_positions": 10000,
+                "position_sizing": "target_weight",
+                "signal_price_basis": "raw",
+                "cash_reserve_ratio": 1 - float(config.params.get("capital_usage_ratio", 0.97)),
+                "commission_outside_budget": False,
+            })
         return settings
 
     def _run_portfolio(self, config: VnpyMinuteBacktestConfig, spec: StrategySpec, symbols: tuple[str, ...]) -> dict:
+        if self._is_etf_component_strategy(config.strategy_id):
+            return self._run_etf_component_weighted(config, spec, symbols)
         if self._is_etf_stock_pool_strategy(config.strategy_id):
             return self._run_etf_stock_pool(config, spec, symbols)
         etf_data = self._is_etf_strategy(config.strategy_id)
@@ -431,6 +444,66 @@ class VnpyMinuteBacktestService:
         })
         return result
 
+    def _run_etf_component_weighted(self, config: VnpyMinuteBacktestConfig, spec: StrategySpec, symbols: tuple[str, ...]) -> dict:
+        shadow_config = replace(config, strategy_id="etf_159915_minute", symbols=("159915.SZ",), signal_price_basis="raw", params={}, on_progress=None)
+        shadow = self._run_portfolio(shadow_config, get_strategy("etf_159915_minute"), ("159915.SZ",))
+        events = self._etf_shadow_events(shadow, config)
+        batches: dict[str, list[dict[str, object]]] = {}
+        all_symbols: set[str] = set()
+        filter_counts: dict[str, int] = defaultdict(int)
+        for timestamp, event in events.items():
+            if event.get("direction") != "buy":
+                continue
+            signal_day = datetime.fromisoformat(timestamp).date()
+            members, filtered = adjusted_weights(self.repo.store.data_dir, load_snapshot(self.repo.store.data_dir, signal_day), signal_day)
+            batches[timestamp] = members
+            all_symbols.update(str(item["symbol"]) for item in members)
+            for reason, count in filtered.items():
+                filter_counts[reason] += count
+        if not all_symbols:
+            raise ValueError("no eligible 159915 components in the requested signal range")
+        params = dict(config.params)
+        params.update({"etf_events": events, "component_batches": batches})
+        strategy = spec.strategy_class(params)
+        component_symbols = tuple(sorted(all_symbols))
+        names, ticks = self._instrument_metadata(component_symbols)
+        capital_usage = min(max(float(params.get("capital_usage_ratio", 0.97)), 0.01), 1.0)
+        engine = MultiSymbolNextBarOpenEngine(
+            initial_cash=config.initial_capital, commission_rate=config.commission_pct, stamp_tax_rate=config.stamp_tax_pct,
+            slippage_rate=config.slippage_bps / 10_000, min_commission=float(params.get("min_commission", 5.0)),
+            max_volume_ratio=None, max_positions=10_000, position_sizing="target_weight", reserve_ratio=1 - capital_usage,
+            commission_outside_budget=False, instrument_names=names, instrument_tick_sizes=ticks,
+        )
+        projector = MinuteSignalPriceProjector("raw", {}, {})
+        context_builder = DailyContextBuilder(projector)
+        warmup = config.start - timedelta(days=20)
+        metadata = self._daily_market_metadata(component_symbols, warmup, config.end, etf_data=False)
+        market_days = self._tushare_minute_trading_days(warmup, config.end)
+        days_seen = 0
+        active: dict[date, set[str]] = defaultdict(set)
+        for trading_day, frame in self._iter_tushare_minute_days(list(component_symbols), warmup, config.end):
+            full = self._active_bars_by_symbol(self._bars_by_symbol(frame, component_symbols))
+            if not full:
+                continue
+            active[trading_day] = set(full)
+            if trading_day < config.start:
+                context_builder.add_day(full, daily_prices=metadata.get(trading_day, {}))
+                continue
+            current = full
+            if trading_day == config.start or trading_day == config.end:
+                current = self._active_bars_by_symbol(self._bars_by_symbol(self._filter_requested_minutes(frame, trading_day=trading_day, start_time=config.start_time if trading_day == config.start else time(0, 0), end_time=config.end_time if trading_day == config.end else time(23, 59, 59)), component_symbols))
+            if current:
+                engine.run_day(current, strategy, context_builder.references(trading_day, symbols=current, execution_metadata=metadata.get(trading_day, {}), daily_market_metadata=metadata))
+                days_seen += 1
+            context_builder.add_day(full, daily_prices=metadata.get(trading_day, {}))
+        if days_seen == 0:
+            raise ValueError("no stock minute data in requested range")
+        result = self._assemble_portfolio_result(config=config, spec=spec, symbols=component_symbols, settings=self._settings(config), engine=engine, signal_projector=projector, market_days=market_days, active_symbols_by_day=active, days_seen=days_seen, instrument_names=names)
+        result["benchmark_curve"] = shadow.get("equity_curve", [])
+        result["strategy_info"].update({"timing_strategy_id": "etf_159915_minute", "component_count": len(all_symbols), "filter_counts": dict(filter_counts), "component_batches": {key: value for key, value in batches.items()}})
+        result["stats"].update({"benchmark_status": "etf_159915_strategy", "etf_strategy_return": shadow.get("stats", {}).get("total_return")})
+        return result
+
     def _assemble_portfolio_result(
         self,
         *,
@@ -655,6 +728,10 @@ class VnpyMinuteBacktestService:
         return strategy_id == "etf_159915_minute"
 
     @staticmethod
+    def _is_etf_component_strategy(strategy_id: str) -> bool:
+        return strategy_id == "etf_159915_component_weighted"
+
+    @staticmethod
     def _is_etf_stock_pool_strategy(strategy_id: str) -> bool:
         return strategy_id == "etf_159915_stock_pool"
 
@@ -662,7 +739,7 @@ class VnpyMinuteBacktestService:
         store = getattr(self.repo, "store", None)
         if store is None:
             return []
-        root = store.data_dir / "kline_etf_minute"
+        root = store.data_dir / ETF_MINUTE_DATASET
         days: list[date] = []
         for directory in root.glob("date=*") if root.exists() else []:
             if not directory.is_dir() or not (directory / "part.parquet").exists():
@@ -679,7 +756,7 @@ class VnpyMinuteBacktestService:
         store = getattr(self.repo, "store", None)
         if store is None:
             return start - timedelta(days=20)
-        root = store.data_dir / "kline_etf_daily"
+        root = store.data_dir / ETF_DAILY_DATASET
         if not root.exists():
             return start - timedelta(days=20)
         try:
@@ -701,7 +778,7 @@ class VnpyMinuteBacktestService:
         store = getattr(self.repo, "store", None)
         if store is None:
             return {}
-        root = store.data_dir / "kline_etf_daily"
+        root = store.data_dir / ETF_DAILY_DATASET
         if not root.exists():
             return {}
         try:
@@ -758,7 +835,7 @@ class VnpyMinuteBacktestService:
         if store is None:
             return
         for trading_day in self._etf_minute_trading_days(start, end):
-            part = store.data_dir / "kline_etf_minute" / f"date={trading_day.isoformat()}" / "part.parquet"
+            part = store.data_dir / ETF_MINUTE_DATASET / f"date={trading_day.isoformat()}" / "part.parquet"
             frame = (
                 pl.scan_parquet(str(part))
                 .filter(
@@ -810,7 +887,7 @@ class VnpyMinuteBacktestService:
         """
         try:
             source = self.repo.store.data_dir / (
-                "kline_etf_daily" if etf_data else "kline_daily_tushare"
+                ETF_DAILY_DATASET if etf_data else "kline_daily_tushare"
             )
             if not etf_data and not source.exists():
                 source = self.repo.store.data_dir / "kline_daily_xbx"
